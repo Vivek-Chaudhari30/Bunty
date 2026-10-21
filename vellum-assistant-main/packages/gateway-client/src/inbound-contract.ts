@@ -1,0 +1,215 @@
+/**
+ * Gateway → daemon inbound payload contract.
+ *
+ * Zod schema defining the wire format for messages forwarded from the
+ * gateway to the daemon via `POST /v1/channels/inbound`. Both services
+ * import from here so the contract is enforced at compile time.
+ *
+ * The gateway constructs this payload in `forwardToRuntime()` from the
+ * normalized `GatewayInboundEvent`; the daemon validates and consumes
+ * it in `handleChannelInbound()`.
+ */
+
+import { INBOUND_EVENT_KINDS } from "./inbound-event-kind.js";
+import { z } from "zod";
+
+import { ReactionEmojiFieldsSchema } from "@vellumai/service-contracts/reactions";
+
+import { ChannelConversationTypeSchema } from "./channel-permission-contract.js";
+
+import { AdmissionPolicySchema } from "./admission-policy-contract.js";
+import { TrustVerdictSchema } from "./trust-verdict-contract.js";
+
+// ---------------------------------------------------------------------------
+// Command intent (channel-initiated commands, e.g. Telegram /start)
+// ---------------------------------------------------------------------------
+
+export const CommandIntentSchema = z.object({
+  type: z.string(),
+  payload: z.string().optional(),
+});
+
+export type CommandIntent = z.infer<typeof CommandIntentSchema>;
+
+// ---------------------------------------------------------------------------
+// Source metadata — structured fields forwarded from the gateway's
+// normalized inbound event. Replaces the untyped Record<string, unknown>.
+// ---------------------------------------------------------------------------
+
+export const SourceMetadataSchema = z
+  .object({
+    /** Provider-assigned update/event ID. */
+    updateId: z.string().optional(),
+    /** Provider message ID (e.g. Slack message `ts`). */
+    messageId: z.string().optional(),
+    /**
+     * Provider chat type (e.g. Telegram "private", "group"). Answers whether a
+     * room is multi-party, which drives group etiquette.
+     */
+    chatType: z.string().optional(),
+    /**
+     * How visible the conversation is, on the permission matrix's axis, as
+     * decided by the sending channel's own normalizer. A different question
+     * from `chatType`: a group DM is multi-party and private, a public channel
+     * is multi-party and public.
+     *
+     * Absent means not established rather than public, so a permissive rule
+     * cannot reach a room whose visibility nobody proved.
+     */
+    conversationType: ChannelConversationTypeSchema.optional(),
+    /** Thread/conversation-group ID (e.g. Slack `thread_ts`). */
+    threadId: z.string().optional(),
+    /** Channel name (e.g. Slack channel display name). */
+    channelName: z.string().optional(),
+    /** Actor's language code (e.g. "en", "es"). */
+    languageCode: z.string().optional(),
+    /** Whether the actor is a bot. */
+    isBot: z.boolean().optional(),
+    /** Actor's IANA timezone (e.g. "America/Los_Angeles"). */
+    timezone: z.string().optional(),
+    /** Human-readable timezone label (e.g. "Pacific Daylight Time"). */
+    timezoneLabel: z.string().optional(),
+    /** UTC offset in seconds. */
+    timezoneOffsetSeconds: z.number().optional(),
+    /** Slack-specific: actor is from an external workspace (Slack Connect). */
+    isStranger: z.boolean().optional(),
+    /** Slack-specific: actor is a guest / restricted account. */
+    isRestricted: z.boolean().optional(),
+    /** Transport-layer hints forwarded from the channel adapter. */
+    hints: z.array(z.string()).optional(),
+    /** Transport-layer UX brief. */
+    uxBrief: z.string().optional(),
+    /** Client-provided timezone for date formatting. */
+    clientTimezone: z.string().optional(),
+    /** Channel command intent (e.g. Telegram /start). */
+    commandIntent: CommandIntentSchema.optional(),
+    /**
+     * Whether the message addresses the assistant by name, an @-mention on
+     * the platforms that have one. Stated by the channel's normalizer only
+     * where it proved the answer; absent means "not established". Read to
+     * decide whether a reply is expected before any text exists, never to
+     * admit or deny: admission is the gate's job, upstream of this.
+     */
+    botMentioned: z.boolean().optional(),
+    /**
+     * Slack-specific: the `edited.ts` float-string from a `message_changed`
+     * event. Used by the daemon to reject out-of-order edit deliveries whose
+     * edit timestamp is older than the one already stored.
+     */
+    slackEditedTs: z.string().optional(),
+    /** Slack workspace/team ID. */
+    account: z.string().optional(),
+    /**
+     * Slack-specific: team ID the inbound actor belongs to. Threads to the
+     * daemon as the `recipient_team_id` for channel reply streaming.
+     */
+    actorTeamId: z.string().optional(),
+
+    /**
+     * Slack-specific: what the sender had open when they messaged the app,
+     * ordered by relevance. Slack attaches this to `message.im` once the app
+     * subscribes to `app_context_changed` (which requires `agent_view`), so a
+     * DM like "summarise this" can be resolved against the channel, thread, or
+     * canvas the sender was actually looking at.
+     *
+     * Entity values are Slack ids; the entity `type` is a Slack type URI such
+     * as `slack#/types/channel_id`. Absent when the sender had nothing open.
+     */
+    appContext: z
+      .object({
+        entities: z.array(
+          z.object({
+            type: z.string(),
+            /**
+             * An id string for channel / canvas / list entities; an object for
+             * `slack#/types/message_context`, which points at a specific
+             * message or thread.
+             */
+            value: z.union([
+              z.string(),
+              z.object({
+                messageTs: z.string().optional(),
+                channelId: z.string().optional(),
+              }),
+            ]),
+            teamId: z.string().optional(),
+            enterpriseId: z.string().optional(),
+          }),
+        ),
+      })
+      .optional(),
+
+    /**
+     * Per-channel inbound admission policy attached by the gateway. The
+     * runtime admission-policy stage enforces the floor against the
+     * resolved trust class; when absent, the runtime falls back to
+     * `ADMISSION_POLICY_DEFAULT` (`trusted_contacts`).
+     */
+    admissionPolicy: AdmissionPolicySchema.optional(),
+
+    /**
+     * Per-actor trust verdict resolved by the gateway from its ACL DB;
+     * absent until the gateway stamps it. Consumers must treat absence as
+     * "not provided", never as a decision.
+     */
+    trustVerdict: TrustVerdictSchema.optional(),
+    /**
+     * The platform named no actor for this event; the actor id is the
+     * channel's synthetic system identity, never an identity claim.
+     */
+    actorUnattributed: z.boolean().optional(),
+
+    // Email-specific fields
+    /**
+     * Ingress provider that delivered the email to the gateway
+     * (e.g. "mailgun", "resend", or "platform" for the Vellum relay).
+     */
+    emailProvider: z.string().optional(),
+    /** Email subject line. */
+    emailSubject: z.string().optional(),
+    /** Email recipient address. */
+    emailRecipient: z.string().optional(),
+    /** Email In-Reply-To header. */
+    emailInReplyTo: z.string().optional(),
+    /** Email References header. */
+    emailReferences: z.string().optional(),
+  })
+  .passthrough();
+
+export type SourceMetadata = z.infer<typeof SourceMetadataSchema>;
+
+// ---------------------------------------------------------------------------
+// Runtime inbound payload — the full wire format
+// ---------------------------------------------------------------------------
+
+export const RuntimeInboundPayloadSchema = z.object({
+  sourceChannel: z.string(),
+  interface: z.string(),
+  conversationExternalId: z.string(),
+  externalMessageId: z.string(),
+  content: z.string(),
+  /** The named event family; absent only on replayed retry payloads,
+   *  where resolveInboundEventKind derives it from the legacy fields. */
+  eventKind: z.enum(INBOUND_EVENT_KINDS).optional(),
+  /** Structured reaction payload; replayed retry payloads carry the
+   *  callbackData string form resolveInboundReactionPayload reads. */
+  reaction: z
+    .object({
+      op: z.enum(["added", "removed"]),
+      emoji: z.string(),
+      ...ReactionEmojiFieldsSchema.shape,
+      targetMessageId: z.string(),
+    })
+    .optional(),
+  isEdit: z.boolean().optional(),
+  callbackQueryId: z.string().optional(),
+  callbackData: z.string().optional(),
+  actorDisplayName: z.string().optional(),
+  actorExternalId: z.string(),
+  actorUsername: z.string().optional(),
+  sourceMetadata: SourceMetadataSchema.optional(),
+  attachmentIds: z.array(z.string()).optional(),
+  replyCallbackUrl: z.string().optional(),
+});
+
+export type RuntimeInboundPayload = z.infer<typeof RuntimeInboundPayloadSchema>;

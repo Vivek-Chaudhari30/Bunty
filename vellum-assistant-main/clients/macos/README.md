@@ -1,0 +1,504 @@
+# Electron wrapper
+
+Desktop shell for the Vellum Assistant macOS app. Wraps [`clients/web/`](../web/)
+in an Electron `BrowserWindow`. Each assistant's background processes are owned
+entirely by the `vellum` CLI, which the app invokes as a subprocess — the
+Electron app is a GUI client, not a process manager.
+
+This package is the macOS distribution surface (outside the App Store).
+
+## Web content delivery
+
+**What:** The web UI (`clients/web/`) is bundled as static files inside the
+`.app` package. The Electron main process serves them via a custom
+[`app://` protocol](https://www.electronjs.org/docs/latest/api/protocol#protocolhandlescheme-handler)
+— the `BrowserWindow` loads `app://vellum.ai/assistant`, which resolves
+to files on disk at `process.resourcesPath/web-dist`.
+
+**How:** At build time, `bun run build:web` runs `vite build` in
+`clients/web/`, then copies `clients/web/dist/` into `resources/web-dist`.
+`electron-builder` packs that directory into the app's `extraResources`
+(see `electron-builder.config.cjs`). No network request is involved at
+runtime — the protocol handler reads files from the local bundle and
+falls back to `index.html` for client-side routes.
+
+**Why local bundle, not a remote URL:**
+
+- **Security** — loading remote content into Electron's renderer is
+  discouraged because the renderer has privileged IPC access to the main
+  process. The `app://` scheme keeps the origin local and avoids MITM /
+  supply-chain attack surface. See Electron's
+  [security checklist](https://www.electronjs.org/docs/latest/tutorial/security).
+- **Offline** — the UI loads without a network connection. The assistant
+  still needs its backend services for functionality, but the shell
+  renders instantly.
+- **Startup speed** — local file reads are ~instant; no DNS / TLS / CDN
+  roundtrip.
+- **Version coherence** — the web UI and Electron main process are
+  tightly coupled via IPC (`window.vellum.*`). Bundling them together
+  guarantees they are always compatible.
+
+## Auto-update
+
+The packaged app updates over the wire via
+[`electron-updater`](https://www.electron.build/auto-update).
+Configuration lives in `src/main/auto-update.ts`:
+
+- **Feed URL** — a cloud storage bucket per environment and architecture
+  (see `electron-builder.config.cjs`'s `publish` config).
+- **`autoDownload: true`** — updates download silently in the background.
+- **`autoInstallOnAppQuit: true`** — installs on next quit, not mid-session.
+- **Poll interval** — checks on launch, then every 4 hours.
+- **Manual trigger** — users can check via the `Vellum > Check for Updates…`
+  menu item (packaged builds only), or the renderer can invoke
+  `vellum:update:check` / `vellum:update:install` over IPC.
+
+Because the web UI is bundled locally, **web changes require an Electron
+release** to reach users. The update typically lands within hours (next
+app restart or the 4-hour poll), not instantly.
+
+> **Workflow filenames.** This directory is `clients/macos/` to match the
+> platform-named convention used by `clients/ios/`, and its CI workflow files are
+> `pr-macos.yaml` / `ci-main-macos.yaml`.
+
+## Prerequisites
+
+- Bun (see `.tool-versions` at the repo root)
+
+That's it — `bun run dev` and `bun run dev:electron-only` both run
+`bun install` for you on first launch (and verify on subsequent runs,
+which is a fast no-op when the lockfile already matches).
+
+## How it runs
+
+`bun run dev` is the one command. On launch it probes
+`http://localhost:3000` (the URL Swift Vellum hits — `vel up`'s edge
+proxy) with a 1.5s timeout and picks one of two paths:
+
+1. **vel up is running** → dispatches to `dev:electron-only` with
+   `VELLUM_DEV_URL=http://localhost:3000/assistant`. No Vite is spawned
+   here; the Electron BrowserWindow loads the edge proxy at the
+   `/assistant` path (the bare root is the marketing site) and reuses
+   vel's backends (Django, gateway, daemon) the same way Swift Vellum
+   does today. This is the common case once you have `vel up` going.
+
+2. **No vel up** → dispatches to `dev:standalone`, which uses
+   [`concurrently`](https://github.com/open-cli-tools/concurrently) to
+   run two children in parallel:
+   - `dev:web` → `cd ../web && bun run dev -- --port 5173 --strictPort`.
+     Going through `clients/web`'s own `dev` script means we use *its*
+     local Vite (8.x) and plugin tree, not whatever older Vite happens
+     to live in `clients/macos/node_modules`. Pinning the port via the
+     Vite CLI overrides `clients/web/.env` if `PORT` is set there.
+   - `dev:electron` → `scripts/wait-for-web.ts` polls `:5173` (180s
+     timeout), then runs `electron-vite dev` against it. The wait avoids
+     Electron racing the renderer. On timeout the script captures stack
+     samples of the Vite processes plus the port state to `/tmp` before
+     exiting — a hung Vite gets un-wedged by the ensuing teardown, so
+     that capture is the only record of where it was stuck.
+
+   `concurrently --kill-others` tears both down on Ctrl+C or on either
+   child exiting. Logs are prefixed and color-coded (`[web]` blue,
+   `[electron]` green). Standalone mode has no backends, so renderer
+   API calls will fail — useful for shell-only work (menus, IPC, window
+   chrome), not for feature development against the real stack.
+
+The main-process URL choice lives in `src/main/index.ts`:
+`process.env.VELLUM_DEV_URL ?? "http://localhost:5173/assistant"`.
+`VELLUM_DEV_URL` is treated as the full URL — callers must include the
+`/assistant` path themselves because `clients/web/vite.config.ts` sets
+`base: "/assistant/"` (so the bare origin lands the BrowserWindow on
+the marketing page in vel-up mode, or on a Vite 404 in standalone).
+Override the env var yourself (e.g.,
+`VELLUM_DEV_URL=http://localhost:3002/assistant bun run dev:electron-only`)
+if you need to point at a non-default service.
+
+The app shows up as **Vellum Electron** in the menu bar and Dock
+(via `app.setName`, gated to `!app.isPackaged` in `src/main/index.ts`),
+and writes preferences / electron-store data under
+`~/Library/Application Support/Vellum Electron/`. That keeps it cleanly
+separate from the Swift `Vellum.app`, `Vellum Local.app`, and
+`Vellum Dev.app` installs — running this locally won't clobber
+whichever Swift channel you have around.
+
+- **Dev (vel up)** — Electron loads `http://localhost:3000/assistant` (edge proxy + the path clients/web's Vite is configured for).
+- **Dev (standalone)** — Electron loads `http://localhost:5173/assistant` (our Vite, same path).
+- **Prod** — A custom `app://vellum.ai/` protocol serves the bundled
+  `web-dist/` files. See [Web content delivery](#web-content-delivery).
+- **Assistant process** — The app does not run or supervise any background
+  process of its own. Each local assistant runs its own processes, spawned and
+  managed by the `vellum` CLI; the main process only invokes the CLI as a
+  subprocess for lifecycle ops (hatch, retire, token). Packaging the CLI
+  runtime so this works in distributed builds is a known gap.
+
+## Native macOS integration
+
+- **Application menu** (`src/main/menu.ts`). Installs a standard macOS menu
+  bar with `Vellum`, `File`, `Edit`, `View`, `Window`, and `Help` submenus.
+  Most items are role-based so they work without renderer IPC; the `File`
+  items dispatch through the typed command bus in `src/main/commands.ts`,
+  which broadcasts to the focused window's renderer via a single
+  `vellum:command` IPC channel (subscribed to by `useVellumCommands` in
+  `clients/web/src/runtime/vellum-commands.ts`). Accelerators are read from
+  `settings.hotkeys.<kind>` with defaults from `DEFAULT_ACCELERATORS`.
+  `View > Toggle Developer Tools` is gated to dev builds only so the
+  packaged build doesn't expose devtools to end users.
+
+- **Share Sheet** (`src/main/share.ts`). The renderer's `shareFile`
+  (`clients/web/src/runtime/native-file.ts`) hands file bytes over the
+  `vellum:share:file` channel; the main process writes them to a temp file and
+  presents the native `NSSharingServicePicker` via Electron's `ShareMenu`.
+  Only the *share* intent routes here. A "Download" action goes through
+  `saveFile` and the download handler below, never this sheet. Two
+  gotchas here were verified against the pinned `electron@42` source and types,
+  **not** the published API docs (which are wrong):
+  - **Anchor with `window`, not `browserWindow`.** `ShareMenu.popup` forwards to
+    `Menu.popup`, whose options are read as `options.window` (a `BrowserWindow`
+    — in Electron that _is_ the native app window). The upstream `share-menu.md`
+    doc says `browserWindow`, but that key is silently ignored at runtime and
+    the sheet falls back to the focused window; the typed `PopupOptions` only
+    has `window`, so `browserWindow` wouldn't even compile. The same
+    `menu.popup({ window })` shape is used in `image-context-menu.ts` and
+    `text-context-menu.ts`.
+  - **Don't tear down the shared temp file on picker close.** The `popup`
+    callback fires on menu _close_ (a service was selected), not when that
+    service has finished reading the file — an in-flight AirDrop transfer or a
+    pasteboard/file-promise reference can still need it. Instead `share.ts`
+    reclaims only _stale_ temp dirs (older than an hour — long past any
+    transfer), sweeping at startup and before each new share, so it never
+    deletes a file still in use, including one from a second Vellum build
+    sharing at the same time.
+
+- **Downloads** (`@vellumai/electron-desktop`'s `downloads.ts`, shared with the
+  Windows shell). The counterpart intent to the Share Sheet. The renderer
+  downloads the browser way (`saveFile` → an `<a download>` click), which
+  Chromium raises as a `will-download` on the default session. Without a
+  handler Electron falls back to its default routine and prompts a Save panel
+  for every download, so this picks the save path itself: `~/Downloads`,
+  uniquified Finder-style (`report.pdf`, `report (1).pdf`) so a repeat download
+  never clobbers an existing file. On each terminal state the originating
+  window is sent a `DownloadDoneEvent` (`vellum:downloads:done`), which the
+  renderer surfaces as a completion toast whose "Show in Finder" action calls
+  back over `vellum:downloads:reveal` with the event's opaque id. Main
+  resolves the id to the saved path itself, so the channel can only reveal
+  files this handler saved. The Dock Downloads-stack still bounces via
+  `app.dock.downloadFinished` on completion. `setSavePath` is only honored
+  while the `will-download` listener is on the stack, hence the synchronous
+  `existsSync` collision check rather than the `node:fs/promises` style used
+  elsewhere in the main process. Any failure (unwritable directory, no free
+  name) simply skips `setSavePath` and lets Electron's Save panel take over.
+
+## Native notifier
+
+**What:** `native/notifier/` is an Objective-C++ Node addon that posts
+notifications through `UNUserNotificationCenter` directly. When a notification
+carries a sender avatar it donates an `INSendMessageIntent` and updates the
+content with it, so macOS renders the Communication Notification treatment: the
+assistant's avatar as the icon with the app icon badged in the corner, the
+assistant's name on line one, the conversation title on line two. Electron
+exposes no intent API, so this is the only path to that layout.
+
+`src/main/notifier.ts` loads the addon (`process.dlopen`, inside a try/catch)
+and `src/main/native-notifications.ts` adapts it to the `create` /
+`isSupported` seams of `@vellumai/electron-desktop/notifications`. A checkout
+with no built addon reports unavailable and the app falls back to Electron's
+own notifications, and so does an addon that loads but answers
+`isSupported()` with false, which is what an unbundled run does because
+`UNUserNotificationCenter` raises there. Set
+`VELLUM_DISABLE_NATIVE_NOTIFIER=1` to force that fallback in a build that
+would otherwise use the addon.
+
+**Which notifications the addon posts.** The addon posts only notifications
+that carry a sender; everything else uses Electron's presenter, through the
+shared `createElectronNotification`. The avatar is the one thing the addon
+renders that Electron cannot, and the renderer attaches a sender only under the
+`push-avatar-sender` flag, so turning that flag off restores Electron as the
+delivery path for every notification without shipping a new build.
+
+The sender is process-local prepared state, not a value reconstructed in the
+preload or main process. The renderer supplies it only when the prepared scope,
+assistant, and native sender id exactly match the selected notification
+identity. A name or conversation title is presentation data and never becomes
+sender identity. The optional preload field preserves compatibility with older
+packaged shells;
+missing support and native unavailability take the existing plain Electron
+path. `local-notification-avatar` does not select the Electron sender route.
+
+**Permission confirmation.** Under `push-avatar-sender`, the notifications
+permission flow captures the exact selected identity before prompting. After a
+grant, it revalidates that identity and the prepared in-memory avatar, then asks
+the native notifier for one confirmation. Stale or missing identity, missing
+avatar resolution, or unavailable native support posts the confirmation
+plainly. Denied or unknown permission posts no confirmation. A confirmation
+failure does not change a granted permission result. Windows does not receive
+a sender through this permission-confirmation path.
+
+Packaged sender, fallback, and permission evidence is tracked in the canonical
+[notification avatar and local delivery QA ledger](../../docs/notification-avatar-local-qa.md).
+
+Notification categories carry the action buttons, and
+`setNotificationCategories:` applies asynchronously, so a category first
+registered in the runloop turn its notification is posted can miss it and the
+buttons never render. `src/main/index.ts` registers every action set through
+`registerCategories` at startup instead, deriving the set from the shared
+`NOTIFICATION_CATEGORIES` and `CATEGORY_ACTIONS` pair so it covers every set
+the app can post, and the addon unions its own set with whatever the
+notification center already holds rather than replacing it. That union is a
+read-modify-write, and Electron's own post path does the same one under no
+shared lock, so the addon re-reads what landed and re-applies once when its
+categories were written over. An identifier that
+is still unregistered when a notification is posted cannot be repaired in that
+same runloop turn, so the notification goes out with no category and the
+`shown` event carries the reason.
+
+**Delegate rule.** Electron's `NotificationPresenterMac` claims
+`UNUserNotificationCenter.currentNotificationCenter.delegate` the moment it is
+constructed, which `new Notification()`, `Notification.isSupported()`, and the
+renderer's Web Notification API all do. Three consequences:
+
+- The client must pass `isSupported` to `configureNotifications` alongside
+  `create`. The shared module otherwise falls back to
+  `electron.Notification.isSupported()`, and that call alone builds the
+  presenter, at whatever moment the first notification arrives.
+- The notifications permission probe in `src/main/permissions-service.ts` goes
+  through the addon's `requestAuthorization()` whenever the addon is loaded.
+  Constructing an `electron.Notification` there hands the presenter the
+  delegate and strands clicks on notifications already on screen.
+- The addon installs its own delegate, holds a strong reference to the one it
+  displaced, and forwards every response it does not own there. Electron's
+  presenter discards responses for identifiers it does not own, so the addon
+  has to be in front of it before anything the addon posted can be clicked:
+  `src/main/index.ts` builds Electron's presenter deliberately at startup, with
+  nothing on screen, then calls the addon's `ensureDelegate()`, which leaves the
+  addon's proxy in front and Electron's presenter as the delegate it forwards
+  to for the life of the process. `show`, `requestAuthorization`, and every
+  sender-less post through Electron re-assert it too. `restoreDelegate()` hands
+  the seat back at `before-quit`.
+
+**Rebuild:**
+
+```sh
+bash scripts/build-notifier.sh   # also runs as part of `bun run setup` and `bun run pack`
+```
+
+It compiles against the headers for the Electron version pinned in
+`package.json` and writes `resources/notifier/<arch>/vellum-notifier.node`,
+which `electron-builder` packs to `bin/notifier/` and `scripts/afterSign.js`
+re-signs with `inherit.plist`. `ELECTRON_TARGET_ARCH` picks the architecture,
+defaulting to the host's so a local `bun run setup` on any Mac builds an addon
+that machine's Electron can load. `pack.sh` exports the variable (arm64 unless
+it is already set, the same default `electron-builder.config.cjs` uses), so a
+pack builds the addon for the app it is packaging rather than for the builder.
+The script fails when the compiled slice is
+not the one that was asked for, and `afterSign.js` fails again when the packed
+addon is not the architecture being packaged, because a mismatched addon does
+not load and the app quietly falls back to plain notifications.
+
+**Provisioning profile switch.** `com.apple.developer.usernotifications.communication`
+is a restricted entitlement: an app declaring it without an authorizing
+provisioning profile is killed at launch. `electron-builder.config.cjs` sets
+`mac.provisioningProfile` only when `VELLUM_MAC_PROVISIONING_PROFILE` names a
+profile that exists on disk, and throws when the variable is set to a file that
+is not there rather than quietly signing the plain entitlements under a name
+that says otherwise. The release workflows decode one there from the
+`MAC_PROVISIONING_PROFILE` secret, then assert with `PlistBuddy` that its
+entitlements grant `com.apple.developer.usernotifications.communication` and
+that its `application-identifier` ends with the bundle id the environment
+packs, before exporting the variable. An unset secret is a warning saying the
+native notifier ships disabled.
+
+That build signs with an entitlements plist derived at pack time by
+`scripts/entitlements/derive-communication-entitlements.js`, which reads
+`scripts/entitlements/app.plist`, adds the one restricted key, and writes
+`build/entitlements/app-communication.plist` (gitignored), so `app.plist` stays
+the only place the entitlement set is edited. `scripts/afterSign.js` re-signs
+the outer app with whatever electron-builder was configured with, read back off
+`context.packager.platformSpecificBuildOptions`, so the two passes cannot
+disagree. Every other build signs with `app.plist` itself, the intent path
+fails closed inside `contentByUpdatingWithProvider:`, and notifications post
+plainly.
+
+## Scripts
+
+```sh
+bun run dev                # probe vel-up at :3000, dispatch to dev:electron-only or dev:standalone
+bun run dev:standalone     # explicit: spawn our Vite (:5173) + electron-vite dev (no backends)
+bun run dev:electron-only  # explicit: electron-vite dev only, honors $VELLUM_DEV_URL (default :5173)
+bun run install:all        # workspace bun install + Electron setup (called automatically by dev)
+bun run dev:web            # clients/web Vite (port 5173, strict) — invoked by dev:standalone
+bun run dev:electron       # wait for :5173 (hang capture on timeout) then electron-vite dev — invoked by dev:standalone
+bun run build              # electron-vite build — bundles main + preload to out/
+bun run typecheck          # tsc --noEmit
+bun run test               # bun test — single Bun process (fastest for local iteration)
+bun run test:ci            # bun scripts/run-tests.ts — each file in its own subprocess (mock-safe; what CI runs)
+```
+
+## Testing
+
+Pure functions under `src/main/` and `src/preload/` are unit-tested with
+[Bun's built-in test runner](https://bun.sh/docs/test/writing). Tests
+colocate next to source files (`commands.ts` → `commands.test.ts`).
+
+The real `electron` module isn't loadable off-Electron, so
+[`test-setup.ts`](./test-setup.ts) is preloaded by
+[`bunfig.toml`](./bunfig.toml) and mocks the surface every `src/main/`
+file imports at the top level. Tests that exercise a specific Electron
+API (e.g. `screen.getDisplayMatching`) re-mock it locally via
+`mock.module("electron", …)` inside the test file.
+
+`scripts/run-tests.ts` runs each test file in its own Bun subprocess —
+[`mock.module()` mutates a process-global registry](https://bun.sh/docs/test/mocking#mock-module),
+so mocks set in one file would leak into the next. Use `bun run test`
+for fast local iteration on a single file and `bun run test:ci` (or a
+single targeted file: `bun scripts/run-tests.ts src/main/foo.test.ts`)
+when running the full suite.
+
+## Layout
+
+```
+clients/macos/
+├── electron.vite.config.ts   # main + preload Vite entries (no renderer)
+├── scripts/
+│   └── dev.ts                # probes vel-up at :3000, dispatches to standalone or electron-only
+├── src/
+│   ├── main/index.ts         # app:// protocol, app lifecycle, popup hardening
+│   ├── main/windows.ts       # hardened window-creation seam (webPreferences + nav policy)
+│   ├── main/commands.ts      # typed command bus + accelerator resolver
+│   ├── main/settings.ts      # electron-store schema + IPC-backed accessors
+│   ├── main/menu.ts          # macOS application menu
+│   └── preload/index.ts      # contextBridge: window.vellum.*
+└── tsconfig.json
+```
+
+## Renderer bridge
+
+The preload script exposes a typed `window.vellum` API to the renderer:
+
+- `platform: "electron"` — host discriminator.
+- `settings.get<T>(key)` / `settings.set<T>(key, value)` — persisted preferences,
+  backed by `electron-store` in the main process. Writes are validated against
+  a JSON schema (`hotkeys`, `theme`, `featureFlags`); a schema violation
+  surfaces as a rejected `Promise`.
+- `commands.on(callback)` — subscribe to main-process commands dispatched
+  by the application menu (and, eventually, global hotkeys). Returns an
+  unsubscribe function. The renderer-side wrapper is
+  [`clients/web/src/runtime/vellum-commands.ts`](../web/src/runtime/vellum-commands.ts);
+  feature code mounts the `useVellumCommands` hook with a partial handler
+  map at whichever component owns the relevant state.
+- `dock.setBadge(count)` / `dock.setSignedIn(signedIn)` — publish the
+  inputs that drive the Dock unread badge and visibility state machine
+  in [`src/main/dock.ts`](src/main/dock.ts). Renderer wrapper at
+  [`clients/web/src/runtime/dock.ts`](../web/src/runtime/dock.ts) (no-ops
+  off Electron); feature code calls
+  `useElectronDockSync(conversations)` from `ChatLayout` to keep them in
+  sync. The accessory-mode (Dock-hidden) transition is gated on
+  `ALLOW_ACCESSORY_MODE` until a menu-bar (tray) entry point exists;
+  until then the icon stays in the Dock so the user always has a way
+  back to the window.
+- `localMode.*` — provisions and retires local assistants and reads/writes
+  the lockfile that records them. `hatch(species)` and `retire(assistantId)`
+  drive the Vellum CLI as a subprocess; `readLockfile()`,
+  `saveLockfileAssistant(assistant, activeAssistant?)`, and
+  `replacePlatformAssistants(platformAssistants)` read and write the lockfile
+  on disk. Every method is a thin wrapper over [`@vellumai/local-mode`](../../packages/local-mode/),
+  the shared host library that also backs the web app's dev-server middleware,
+  so the spawn/parse and lockfile logic lives in one place. The renderer-side
+  transport seam is [`clients/web/src/runtime/local-mode-host.ts`](../web/src/runtime/local-mode-host.ts),
+  which selects this bridge on Electron and the dev-server `/assistant/__local/*`
+  middleware on web/dev so both hosts honor the same contract.
+- `helper.hotkey.setModifierHold(hold)` points the native helper at the
+  modifier set the voice key rides on (Fn by default), watched globally as a
+  hold. `helper.hotkey.onEvent(callback)` streams its `down` / `up` edges, and
+  the `up` says why it closed, which is how the renderer tells a hold from a
+  double tap. `helper.hotkey.readFrontSelection()` reads what is highlighted
+  in the application in front, which a hold asks for once it has armed.
+  The result distinguishes no selection (`null`) from an unavailable capture
+  (`{ unavailable: true }`). Chromium activation uses Electron's manual AX
+  flag with Chrome's enhanced UI flag as fallback. Main retries reads with a
+  three-second wait budget without reactivating the tree or blocking the native event
+  loop. Retries are bound to the original hold and foreground process. An
+  unavailable capture preserves the transcript for copying and never pastes.
+- `helper.ping()` — health-checks the native helper over JSON-RPC stdio.
+- `auth.*` — typed stubs that reject with "not implemented yet" until the
+  corresponding feature tickets land.
+
+The native helper lives in `native/mac-helper/` as a small Swift package.
+`MacHelperCore` owns JSON-RPC 2.0 NDJSON framing, standard error codes, and
+method routing so protocol behavior is unit-testable without spawning a
+process. The `vellum-mac-helper` executable is the thin AppKit/Carbon entrypoint;
+it logs to stderr and keeps stdout reserved for RPC frames and notifications.
+
+Verify the bridge from the renderer:
+
+```js
+console.log(window.vellum.platform); // "electron"
+await window.vellum.settings.set("theme", "dark");
+console.log(await window.vellum.settings.get("theme")); // "dark"
+```
+
+### When to extend the bridge with new methods
+
+The generic `settings.{get,set}` surface is appropriate for user preferences
+where the renderer is the source of truth and the value is non-sensitive
+(theme, layout, feature-flag overrides, etc.). For higher-sensitivity
+capabilities — auth tokens, biometric keys, file paths, anything where the
+renderer should not be free to read or write arbitrary keys — add a
+dedicated bridge method (`window.vellum.<capability>.<verb>()`) with its
+own IPC channel. This follows Electron's "one method per IPC message"
+guidance from the [security tutorial](https://www.electronjs.org/docs/latest/tutorial/security#17-validate-the-sender-of-all-ipc-messages),
+which keeps the renderer-exposed surface narrow and auditable.
+
+Renderer-side consumers in `clients/web/` should wrap bridge access in a
+per-capability module (see `clients/web/src/runtime/native-biometric.ts` for
+the established shape) rather than reaching into `window.vellum.*`
+directly from feature code. That keeps the platform-branching logic in
+one place and makes the cross-platform contract (web / iOS / Electron)
+live in TypeScript types.
+
+## Companion tour permissions
+
+The existing companion coachmarks check and request only the access needed by
+their current lesson. Every permission step is skippable.
+
+| Lesson | Permission | Purpose |
+| --- | --- | --- |
+| Try a call | Microphone | Capture your voice during calls |
+| Voice key | Input Monitoring | Detect the global voice-key shortcut |
+| Share | Screen Recording | Share a screen or window through Vellum Helper |
+
+Microphone uses the native prompt. Input Monitoring and Screen Recording lift
+the coachmark's permission control into a guide beside System Settings. Drag
+Vellum Helper into the privacy list and authenticate if asked.
+**Show in Finder** provides a keyboard and manual-drag alternative. The bundle
+label and icon reflect the actual installed helper, including development builds.
+
+The informational introduction and **Start the tour** button appear before the
+coachmarks. Closing that introduction dismisses it immediately. Both the companion
+and its introduction wait for sign-in and assistant selection to finish. Losing
+assistant readiness clears an interrupted tour; an unfinished tour returns to its
+introduction when the assistant is ready again. Talk and voice-key practice are
+rehearsals: neither requests microphone access nor starts a real call. The final
+step accepts the avatar or a double-tap of the voice key through the same call
+action, with microphone access checked by the native host. The Talk success
+message stays visible until **Next** is pressed.
+
+The guide follows the main Settings window using the helper's window inventory;
+when unavailable it stays near the bottom of the current display. Before a drag
+or Finder reveal it stops following and drops its floating level to leave native
+authentication visible. A confirmed grant closes the guide without raising the
+companion over Settings. Vellum returns to the same coachmark only after the
+request settles and System Settings leaves the foreground. Settings keeps focus
+through its **Quit & Reopen** confirmation; an unknown foreground application or
+active authentication agent also defers the return. **Back to the tour** returns
+to the same coachmark. Leaving the lesson, replacing the guide, or a five-minute
+timeout also closes it. Motion respects macOS Reduce Motion.
+
+Accessibility, Speech Recognition, Automation, and Notifications serve other app
+features and are not requested by this tour. General Privacy settings retain their
+existing controls.
+
+Implementation: `companion-permission-guide.ts` owns the native guide, helper app
+drag, Finder fallback, and polling. `permissions-service.ts` owns permission state.
+The tour uses the optional `permissions.setup` bridge; its detached guide renders
+at the internal `/assistant/floating/permission-guide` route. There is no separate
+permission setup page or menu entry.

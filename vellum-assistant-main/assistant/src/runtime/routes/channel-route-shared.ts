@@ -1,0 +1,82 @@
+/**
+ * Shared types, constants, and utilities used across channel route modules.
+ */
+import type { ChannelId } from "../../channels/types.js";
+import {
+  type ApprovalDecisionResult,
+  type ApprovalUIMetadata,
+  isApprovalAction,
+} from "../channel-approval-types.js";
+
+// ---------------------------------------------------------------------------
+// Actor role
+// ---------------------------------------------------------------------------
+
+/** Guardian approval request expiry (30 minutes). */
+export const GUARDIAN_APPROVAL_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * Keywords the plain-text parser accepts for approval decisions. We require
+ * these in generated plain-text prompts so text fallback remains actionable.
+ */
+export function requiredDecisionKeywords(
+  _actions: ApprovalUIMetadata["actions"],
+): string[] {
+  return ["yes", "no"];
+}
+
+// ---------------------------------------------------------------------------
+// Callback data parser — format: "apr:<requestId>:<action>"
+// ---------------------------------------------------------------------------
+
+export function parseCallbackData(
+  data: string,
+  sourceChannel?: string,
+): ApprovalDecisionResult | null {
+  const parts = data.split(":");
+  if (parts.length < 3 || parts[0] !== "apr") {
+    return null;
+  }
+  const requestId = parts[1];
+  const action = parts.slice(2).join(":");
+  if (!requestId || !isApprovalAction(action)) {
+    return null;
+  }
+  const source =
+    sourceChannel === "vellum"
+      ? ("vellum_surface" as const)
+      : ("button" as const);
+  return { action, source, requestId };
+}
+
+// ---------------------------------------------------------------------------
+// Context builders
+// ---------------------------------------------------------------------------
+
+/**
+ * Build contextual deny guidance for guardian-gated auto-deny paths.
+ * This is passed through the confirmation pipeline so the assistant can
+ * produce a single, user-facing message with next steps.
+ */
+export function buildGuardianDenyContext(
+  toolName: string,
+  denialReason: "no_binding" | "no_identity",
+  _sourceChannel: ChannelId,
+): string {
+  if (denialReason === "no_identity") {
+    return `Permission denied for "${toolName}": guardian approval was required, but requester identity could not be verified for this channel. In your next assistant reply, explain this clearly, avoid retrying yet, and ask the user to message from a verifiable direct account/chat before retrying.`;
+  }
+
+  return `Permission denied for "${toolName}": guardian approval was required, but no guardian is configured for this channel. In your next assistant reply, explain this and offer guardian setup. Mention that setup provides a verification code that the user replies with in the channel.`;
+}
+
+export function stripVerificationFailurePrefix(reason: string): string {
+  const trimmed = reason.trim();
+  return trimmed.replace(/^verification failed\.?\s*/i, "").trim() || trimmed;
+}
+let _testPollMaxWaitOverride: number | null = null;
+
+/** @internal — test-only: set an override for the poll max-wait. */
+export function _setTestPollMaxWait(ms: number | null): void {
+  _testPollMaxWaitOverride = ms;
+}

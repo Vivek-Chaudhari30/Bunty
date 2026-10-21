@@ -1,0 +1,482 @@
+import { describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
+
+import {
+  ensureProviderApiKey,
+  injectGatewayApiKey,
+  promptLine,
+  promptProviderChoice,
+  promptSecret,
+  readGatewayApiKey,
+  type ProviderSecretFetch,
+} from "../lib/provider-secrets.js";
+
+interface RecordedFetchCall {
+  url: string;
+  init?: RequestInit;
+  body: unknown;
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function makeFetch(responses: Response[]): {
+  calls: RecordedFetchCall[];
+  fetchImpl: ProviderSecretFetch;
+} {
+  const calls: RecordedFetchCall[] = [];
+  const fetchImpl: ProviderSecretFetch = async (input, init) => {
+    calls.push({
+      url: String(input),
+      init,
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : init?.body,
+    });
+    const response = responses.shift();
+    if (!response) {
+      throw new Error("Unexpected fetch call.");
+    }
+    return response;
+  };
+
+  return { calls, fetchImpl };
+}
+
+class FakePromptInput extends EventEmitter {
+  isTTY = true;
+  isRaw = false;
+  private paused = false;
+  pauseCount = 0;
+  rawModes: boolean[] = [];
+  events: string[] = [];
+
+  isPaused(): boolean {
+    return this.paused;
+  }
+
+  resume(): this {
+    this.paused = false;
+    return this;
+  }
+
+  pause(): this {
+    this.paused = true;
+    this.pauseCount += 1;
+    return this;
+  }
+
+  setRawMode(value: boolean): this {
+    this.isRaw = value;
+    this.rawModes.push(value);
+    this.events.push(`raw:${value}`);
+    return this;
+  }
+}
+
+describe("provider secret helpers", () => {
+  test("reads provider keys from the api_key namespace", async () => {
+    const { calls, fetchImpl } = makeFetch([jsonResponse({ found: true })]);
+
+    await readGatewayApiKey(
+      "http://127.0.0.1:3000/",
+      "anthropic",
+      "guardian-token",
+      fetchImpl,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("http://127.0.0.1:3000/v1/secrets/read");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(calls[0].init?.headers).toMatchObject({
+      Authorization: "Bearer guardian-token",
+      "Content-Type": "application/json",
+    });
+    expect(calls[0].body).toEqual({
+      type: "api_key",
+      name: "anthropic",
+      reveal: false,
+    });
+  });
+
+  test("explains a missing secret route as a wrong active assistant URL", async () => {
+    const { fetchImpl } = makeFetch([
+      jsonResponse(
+        {
+          error: {
+            code: "not_found",
+            message: "Not found",
+            path: "/v1/secrets/read",
+          },
+        },
+        404,
+      ),
+    ]);
+
+    await expect(
+      readGatewayApiKey(
+        "https://platform.vellum.ai",
+        "anthropic",
+        undefined,
+        fetchImpl,
+      ),
+    ).rejects.toThrow("does not expose /v1/secrets/read");
+  });
+
+  test("injects provider keys into the api_key namespace", async () => {
+    const { calls, fetchImpl } = makeFetch([jsonResponse({ success: true })]);
+
+    await injectGatewayApiKey(
+      "http://127.0.0.1:3000",
+      "openai",
+      "test-provider-key",
+      "guardian-token",
+      fetchImpl,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("http://127.0.0.1:3000/v1/secrets");
+    expect(calls[0].body).toEqual({
+      type: "api_key",
+      name: "openai",
+      value: "test-provider-key",
+    });
+  });
+
+  test("does not prompt or rewrite an existing provider key", async () => {
+    const { calls, fetchImpl } = makeFetch([jsonResponse({ found: true })]);
+    let prompted = false;
+
+    const result = await ensureProviderApiKey({
+      gatewayUrl: "http://127.0.0.1:3000",
+      provider: "anthropic",
+      env: { ANTHROPIC_API_KEY: "test-provider-key" },
+      fetchImpl,
+      prompt: async () => {
+        prompted = true;
+        return "unused";
+      },
+    });
+
+    expect(result).toEqual({
+      status: "already_configured",
+      provider: "anthropic",
+    });
+    expect(prompted).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("stores a provider key from the matching environment variable", async () => {
+    const { calls, fetchImpl } = makeFetch([
+      jsonResponse({ found: false }),
+      jsonResponse({ success: true }),
+    ]);
+
+    const result = await ensureProviderApiKey({
+      gatewayUrl: "http://127.0.0.1:3000",
+      provider: "anthropic",
+      env: { ANTHROPIC_API_KEY: " test-provider-key " },
+      fetchImpl,
+      stdinIsTTY: false,
+    });
+
+    expect(result).toEqual({
+      status: "configured",
+      provider: "anthropic",
+      source: "env",
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[1].body).toEqual({
+      type: "api_key",
+      name: "anthropic",
+      value: "test-provider-key",
+    });
+  });
+
+  test("prompts when no matching provider key is in the environment", async () => {
+    const { calls, fetchImpl } = makeFetch([
+      jsonResponse({ found: false }),
+      jsonResponse({ success: true }),
+    ]);
+    let promptText = "";
+
+    const result = await ensureProviderApiKey({
+      gatewayUrl: "http://127.0.0.1:3000",
+      provider: "openai",
+      env: {},
+      fetchImpl,
+      prompt: async (prompt) => {
+        promptText = prompt;
+        return "test-openai-key";
+      },
+    });
+
+    expect(result).toEqual({
+      status: "configured",
+      provider: "openai",
+      source: "prompt",
+    });
+    expect(promptText).toContain("OpenAI");
+    expect(promptText).toContain("OPENAI_API_KEY");
+    expect(calls[1].body).toEqual({
+      type: "api_key",
+      name: "openai",
+      value: "test-openai-key",
+    });
+  });
+
+  test("pauses prompt input after reading a secret", async () => {
+    const input = new FakePromptInput();
+    let outputText = "";
+    const output = {
+      write: (text: string) => {
+        input.events.push(`write:${text}`);
+        outputText += text;
+        return true;
+      },
+    };
+
+    const resultPromise = promptSecret("Enter key: ", {
+      input: input as unknown as NodeJS.ReadStream,
+      output: output as unknown as NodeJS.WriteStream,
+    });
+    input.emit("data", Buffer.from("test-provider-key\n"));
+
+    await expect(resultPromise).resolves.toBe("test-provider-key");
+    expect(input.pauseCount).toBe(1);
+    expect(input.listenerCount("data")).toBe(0);
+    expect(input.rawModes).toEqual([true, false]);
+    expect(input.events[0]).toBe("raw:true");
+    expect(input.events[1]).toBe("write:Enter key: ");
+    expect(outputText).toBe("Enter key: \n");
+  });
+
+  test("refuses to read a secret when hidden input is unavailable", async () => {
+    const input = new FakePromptInput();
+    input.isTTY = false;
+
+    await expect(
+      promptSecret("Enter key: ", {
+        input: input as unknown as NodeJS.ReadStream,
+      }),
+    ).rejects.toThrow("requires an interactive terminal");
+    expect(input.listenerCount("data")).toBe(0);
+  });
+
+  test("restores terminal mode when the prompt cannot be written", async () => {
+    const input = new FakePromptInput();
+    const output = {
+      write: () => {
+        throw new Error("output unavailable");
+      },
+    };
+
+    await expect(
+      promptSecret("Enter key: ", {
+        input: input as unknown as NodeJS.ReadStream,
+        output: output as unknown as NodeJS.WriteStream,
+      }),
+    ).rejects.toThrow("output unavailable");
+    expect(input.rawModes).toEqual([true, false]);
+  });
+
+  test("returns a missing-key result in non-interactive shells", async () => {
+    const { calls, fetchImpl } = makeFetch([jsonResponse({ found: false })]);
+
+    const result = await ensureProviderApiKey({
+      gatewayUrl: "http://127.0.0.1:3000",
+      provider: "anthropic",
+      env: {},
+      fetchImpl,
+      stdinIsTTY: false,
+    });
+
+    expect(result).toEqual({
+      status: "missing",
+      provider: "anthropic",
+      message:
+        "Missing ANTHROPIC_API_KEY. Set it in the environment or run vellum setup from an interactive terminal.",
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("reports an unavailable credential store without prompting", async () => {
+    const { calls, fetchImpl } = makeFetch([
+      jsonResponse({ found: false, unreachable: true }),
+    ]);
+    let prompted = false;
+
+    const result = await ensureProviderApiKey({
+      gatewayUrl: "http://127.0.0.1:3000",
+      provider: "anthropic",
+      env: {},
+      fetchImpl,
+      prompt: async () => {
+        prompted = true;
+        return "unused";
+      },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(prompted).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+function fakeOutput(): { write: (text: string) => boolean; text: string } {
+  const state = { write: (_text: string) => true, text: "" };
+  state.write = (text: string) => {
+    state.text += text;
+    return true;
+  };
+  return state;
+}
+
+describe("promptLine", () => {
+  test("resolves on newline", async () => {
+    const input = new FakePromptInput();
+    const output = fakeOutput();
+
+    const resultPromise = promptLine("Pick one: ", {
+      input: input as unknown as NodeJS.ReadStream,
+      output: output as unknown as NodeJS.WriteStream,
+    });
+    input.emit("data", Buffer.from("2\n"));
+
+    await expect(resultPromise).resolves.toBe("2");
+    expect(output.text).toBe("Pick one: ");
+    expect(input.rawModes).toEqual([]);
+  });
+
+  test("buffers across multiple data chunks", async () => {
+    const input = new FakePromptInput();
+    const output = fakeOutput();
+
+    const resultPromise = promptLine("Pick one: ", {
+      input: input as unknown as NodeJS.ReadStream,
+      output: output as unknown as NodeJS.WriteStream,
+    });
+    input.emit("data", Buffer.from("1"));
+    input.emit("data", Buffer.from("0"));
+    input.emit("data", Buffer.from("\n"));
+
+    await expect(resultPromise).resolves.toBe("10");
+    expect(input.rawModes).toEqual([]);
+  });
+
+  test("resolves to an empty string on EOF instead of hanging", async () => {
+    const input = new FakePromptInput();
+    const output = fakeOutput();
+
+    const resultPromise = promptLine("Pick one: ", {
+      input: input as unknown as NodeJS.ReadStream,
+      output: output as unknown as NodeJS.WriteStream,
+    });
+    input.emit("end");
+
+    await expect(resultPromise).resolves.toBe("");
+  });
+});
+
+describe("promptProviderChoice", () => {
+  const choices = ["anthropic", "openai", "gemini"] as const;
+
+  test("resolves the selected provider immediately", async () => {
+    const input = new FakePromptInput();
+    const output = fakeOutput();
+
+    const resultPromise = promptProviderChoice({
+      input: input as unknown as NodeJS.ReadStream,
+      output: output as unknown as NodeJS.WriteStream,
+      choices,
+    });
+    input.emit("data", Buffer.from("2\n"));
+
+    await expect(resultPromise).resolves.toBe("openai");
+    expect(output.text).toContain("1) Anthropic (default)");
+    expect(output.text).toContain("2) OpenAI");
+  });
+
+  test("re-prompts on invalid input before accepting a valid choice", async () => {
+    const input = new FakePromptInput();
+    const output = fakeOutput();
+
+    const resultPromise = promptProviderChoice({
+      input: input as unknown as NodeJS.ReadStream,
+      output: output as unknown as NodeJS.WriteStream,
+      choices,
+    });
+    input.emit("data", Buffer.from("nope\n"));
+    input.emit("data", Buffer.from("99\n"));
+    input.emit("data", Buffer.from("3\n"));
+
+    await expect(resultPromise).resolves.toBe("gemini");
+    expect(output.text).toContain(
+      "Please enter a number between 1 and 3, or press Enter to skip.",
+    );
+  });
+
+  test("does not lose lines pasted in a single chunk ahead of a retry", async () => {
+    const input = new FakePromptInput();
+    const output = fakeOutput();
+
+    const resultPromise = promptProviderChoice({
+      input: input as unknown as NodeJS.ReadStream,
+      output: output as unknown as NodeJS.WriteStream,
+      choices,
+    });
+    // A paste can deliver several lines in one "data" event, all before the
+    // retry loop has re-registered for the next answer.
+    input.emit("data", Buffer.from("99\n3\n"));
+
+    await expect(resultPromise).resolves.toBe("gemini");
+  });
+
+  test("resolves null on blank input", async () => {
+    const input = new FakePromptInput();
+    const output = fakeOutput();
+
+    const resultPromise = promptProviderChoice({
+      input: input as unknown as NodeJS.ReadStream,
+      output: output as unknown as NodeJS.WriteStream,
+      choices,
+    });
+    input.emit("data", Buffer.from("\n"));
+
+    await expect(resultPromise).resolves.toBeNull();
+  });
+
+  test("resolves null instead of hanging when input hits EOF (Ctrl-D)", async () => {
+    const input = new FakePromptInput();
+    const output = fakeOutput();
+
+    const resultPromise = promptProviderChoice({
+      input: input as unknown as NodeJS.ReadStream,
+      output: output as unknown as NodeJS.WriteStream,
+      choices,
+    });
+    input.emit("end");
+
+    await expect(resultPromise).resolves.toBeNull();
+  });
+
+  test("validates against a custom, shorter choice list", async () => {
+    const input = new FakePromptInput();
+    const output = fakeOutput();
+
+    const resultPromise = promptProviderChoice({
+      input: input as unknown as NodeJS.ReadStream,
+      output: output as unknown as NodeJS.WriteStream,
+      choices: ["anthropic", "openai"],
+    });
+    input.emit("data", Buffer.from("3\n"));
+    input.emit("data", Buffer.from("1\n"));
+
+    await expect(resultPromise).resolves.toBe("anthropic");
+    expect(output.text).toContain(
+      "Please enter a number between 1 and 2, or press Enter to skip.",
+    );
+  });
+});

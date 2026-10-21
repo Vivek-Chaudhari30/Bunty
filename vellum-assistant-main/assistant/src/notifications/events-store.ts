@@ -1,0 +1,210 @@
+/**
+ * Notification event persistence.
+ *
+ * Each row represents a single notification signal that was emitted by
+ * the system. The event captures the source event name, attention hints,
+ * and context payload. Decision/delivery records are tracked separately.
+ */
+
+import { and, desc, eq, gte, inArray, or } from "drizzle-orm";
+
+import { getDb } from "../persistence/db-connection.js";
+import {
+  notificationDecisions,
+  notificationDeliveries,
+  notificationEvents,
+} from "../persistence/schema/index.js";
+import type { AttentionHints } from "./signal.js";
+
+export interface NotificationEventRow {
+  id: string;
+  sourceEventName: string;
+  sourceChannel: string;
+  sourceContextId: string;
+  attentionHintsJson: string;
+  payloadJson: string;
+  dedupeKey: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+function rowToEvent(
+  row: typeof notificationEvents.$inferSelect,
+): NotificationEventRow {
+  return {
+    id: row.id,
+    sourceEventName: row.sourceEventName,
+    sourceChannel: row.sourceChannel,
+    sourceContextId: row.sourceContextId,
+    attentionHintsJson: row.attentionHintsJson,
+    payloadJson: row.payloadJson,
+    dedupeKey: row.dedupeKey,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+export interface CreateEventParams {
+  id: string;
+  sourceEventName: string;
+  sourceChannel: string;
+  sourceContextId: string;
+  attentionHints: AttentionHints;
+  payload: Record<string, unknown>;
+  dedupeKey?: string;
+}
+
+/** Create a new notification event. Returns null if a duplicate dedupe_key exists. */
+export function createEvent(
+  params: CreateEventParams,
+): NotificationEventRow | null {
+  const db = getDb();
+  const now = Date.now();
+
+  // Normalize empty strings to null so the falsy check below and the DB
+  // unique index stay in agreement (empty string is falsy in JS but would
+  // be stored as a non-null value in SQLite).
+  const normalizedDedupeKey = params.dedupeKey || null;
+
+  // If there's a dedupe key, check for duplicates first
+  if (normalizedDedupeKey) {
+    const existing = db
+      .select()
+      .from(notificationEvents)
+      .where(and(eq(notificationEvents.dedupeKey, normalizedDedupeKey)))
+      .get();
+    if (existing) {
+      return null;
+    }
+  }
+
+  const row = {
+    id: params.id,
+    sourceEventName: params.sourceEventName,
+    sourceChannel: params.sourceChannel,
+    sourceContextId: params.sourceContextId,
+    attentionHintsJson: JSON.stringify(params.attentionHints),
+    payloadJson: JSON.stringify(params.payload),
+    dedupeKey: normalizedDedupeKey,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  db.insert(notificationEvents).values(row).run();
+
+  return row;
+}
+
+/**
+ * Write an existing event's dedupe key. A string claims that key, which is
+ * how a decision-engine-generated key lands on the row. `null` releases the
+ * claim so a later event may take it while this row stays for the audit
+ * trail.
+ */
+export function setEventDedupeKey(
+  eventId: string,
+  dedupeKey: string | null,
+): void {
+  const db = getDb();
+  db.update(notificationEvents)
+    .set({ dedupeKey, updatedAt: Date.now() })
+    .where(eq(notificationEvents.id, eventId))
+    .run();
+}
+
+export interface ListEventsFilters {
+  sourceEventName?: string;
+  limit?: number;
+}
+
+/** List notification events with optional filters. */
+export function listEvents(
+  filters?: ListEventsFilters,
+): NotificationEventRow[] {
+  const db = getDb();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const conditions: any[] = [];
+
+  if (filters?.sourceEventName) {
+    conditions.push(
+      eq(notificationEvents.sourceEventName, filters.sourceEventName),
+    );
+  }
+
+  const limit = filters?.limit ?? 50;
+
+  const query = db.select().from(notificationEvents);
+
+  const rows = (conditions.length > 0 ? query.where(and(...conditions)) : query)
+    .orderBy(desc(notificationEvents.createdAt))
+    .limit(limit)
+    .all();
+
+  return rows.map(rowToEvent);
+}
+
+/**
+ * True when a notification emitted against `sourceContextId` at or after
+ * `sinceMs` reached a verdict the user can be said to have received.
+ *
+ * The schedule-result producer's "did this run already speak for itself?"
+ * probe. A run's conversation id is the `sourceContextId` every notification
+ * the run emits carries — `assistant notifications send` resolves it from
+ * `__CONVERSATION_ID` — so a hit means the agent notified on its own and the
+ * fallback must stay quiet.
+ *
+ * An event row alone is not a hit. `emitNotificationSignal` persists the event
+ * first and the pipeline can still fail after that, leaving an audit row for a
+ * notification nobody received; counting it would suppress the fallback in
+ * exactly the case it exists for. A hit therefore needs one of:
+ *
+ * - a decision **not** to notify. The engine ruled on the run's own signal
+ *   (preferences, quiet hours, its own judgment), and the fallback exists to
+ *   cover runs that never asked, not to appeal verdicts the user's settings
+ *   produced; or
+ * - a delivery row that is `sent` or still `pending` — something went out, or
+ *   is about to. An event whose every delivery `failed`, or that never got a
+ *   decision row at all, does not count.
+ *
+ * The `sinceMs` bound is load-bearing rather than an optimization: a recurring
+ * schedule with `reuseConversation` runs every firing in the same conversation,
+ * so an unbounded probe would see last week's notification and silence every
+ * run after the first.
+ */
+export function hasNotifiedSourceContextSince(
+  sourceContextId: string,
+  sinceMs: number,
+  sourceEventNames?: readonly string[],
+): boolean {
+  const db = getDb();
+  const row = db
+    .select({ id: notificationEvents.id })
+    .from(notificationEvents)
+    .innerJoin(
+      notificationDecisions,
+      eq(notificationDecisions.notificationEventId, notificationEvents.id),
+    )
+    .leftJoin(
+      notificationDeliveries,
+      eq(
+        notificationDeliveries.notificationDecisionId,
+        notificationDecisions.id,
+      ),
+    )
+    .where(
+      and(
+        eq(notificationEvents.sourceContextId, sourceContextId),
+        gte(notificationEvents.createdAt, sinceMs),
+        sourceEventNames
+          ? inArray(notificationEvents.sourceEventName, [...sourceEventNames])
+          : undefined,
+        or(
+          eq(notificationDecisions.shouldNotify, 0),
+          inArray(notificationDeliveries.status, ["pending", "sent"]),
+        ),
+      ),
+    )
+    .limit(1)
+    .get();
+  return row !== undefined;
+}

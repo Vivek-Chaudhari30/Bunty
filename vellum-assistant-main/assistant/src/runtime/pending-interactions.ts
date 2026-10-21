@@ -1,0 +1,402 @@
+/**
+ * In-memory tracker that maps requestId to conversation info for pending
+ * confirmation, secret, host_bash, host_file, host_cu, host_browser, and
+ * host_transfer interactions.
+ *
+ * All request types self-register with their full RPC lifecycle state
+ * (resolve/reject callbacks, timer, abort detach):
+ *
+ * - Host proxies (host_bash, host_file, host_cu, host_browser,
+ *   host_app_control, host_transfer): register in request(), using
+ *   rpcResolve/rpcReject/timer/detachAbort/metadata.
+ *
+ * - Prompters (PermissionPrompter, SecretPrompter): register in prompt(),
+ *   using promptResolve/promptReject/timer/toolUseId.
+ *
+ * Standalone HTTP endpoints (/v1/confirm, /v1/secret, /v1/trust-rules,
+ * /v1/host-bash-result, etc.) look up the conversation from this tracker to
+ * resolve the interaction.
+ */
+
+import type { InteractionResolutionState } from "../api/events/interaction-resolved.js";
+import type { QuestionEntry } from "../api/events/question-request.js";
+import { findConversationOrSubagent } from "../daemon/conversation-registry.js";
+import type { UserDecision } from "../permissions/types.js";
+import { getLogger } from "../util/logger.js";
+import {
+  assistantEventHub,
+  broadcastMessage,
+} from "./assistant-event-hub.js";
+
+const log = getLogger("pending-interactions");
+
+export type { InteractionResolutionState } from "../api/events/interaction-resolved.js";
+
+export interface ConfirmationDetails {
+  toolName: string;
+  input: Record<string, unknown>;
+  riskLevel: string;
+  executionTarget?: "sandbox" | "host";
+  allowlistOptions: Array<{
+    label: string;
+    description: string;
+    pattern: string;
+  }>;
+  scopeOptions: Array<{ label: string; scope: string }>;
+  directoryScopeOptions?: Array<{ label: string; scope: string }>;
+  persistentDecisionsAllowed?: boolean;
+  /** ACP tool kind from the agent (e.g. "read", "edit", "execute"). */
+  acpToolKind?: string;
+  /** ACP permission options from the agent. */
+  acpOptions?: Array<{
+    optionId: string;
+    name: string;
+    kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+  }>;
+}
+
+/**
+ * Full batched question payload carried on a pending `question` interaction, so
+ * a history-load render can stamp the outstanding prompt back onto its tool
+ * call and rehydrate the question card on a cold reconnect. Mirrors the
+ * `question_request` event's `questions[]` — `metadata` only retains the
+ * `orderedIds`/`optionsById` the response route needs to validate submissions,
+ * which is insufficient to reconstruct the card.
+ */
+export interface QuestionDetails {
+  entries: QuestionEntry[];
+}
+
+/**
+ * Public prompt metadata for a pending `secret` interaction, retained so a
+ * cold conversation load can rehydrate the secret prompt with its full
+ * descriptive context. SECURITY: never carries the secret value — only the
+ * public fields already broadcast on the `secret_request` event.
+ */
+export interface SecretDetails {
+  service: string;
+  field: string;
+  label: string;
+  description?: string;
+  placeholder?: string;
+  purpose?: string;
+  allowedTools?: string[];
+  allowedDomains?: string[];
+  allowOneTimeSend?: boolean;
+}
+
+export interface PendingInteraction {
+  /**
+   * Owning conversation, when the interaction was raised inside one. Absent
+   * for interactions raised outside any conversation (e.g. the CLI
+   * `credentials prompt` command), which resolve via {@link rpcResolve}.
+   */
+  conversationId?: string;
+  kind:
+    | "confirmation"
+    | "secret"
+    | "question"
+    | "host_bash"
+    | "host_file"
+    | "host_cu"
+    | "host_browser"
+    | "host_app_control"
+    | "host_transfer"
+    | "host_ui_snapshot"
+    | "acp_confirmation";
+  confirmationDetails?: ConfirmationDetails;
+  /** For a pending `question`: the full batched entries, so a history-load render can rehydrate the question card. */
+  questionDetails?: QuestionDetails;
+  /** For a pending `secret`: the public prompt metadata, so a cold load can rehydrate the secret prompt. */
+  secretDetails?: SecretDetails;
+  /** For ACP permissions: resolves directly without a Conversation object. */
+  directResolve?: (decision: UserDecision) => void;
+  /** When set, the host_bash request should be routed to this specific client. */
+  targetClientId?: string;
+  /**
+   * Hub connection that was active for `targetClientId` at dispatch. Results
+   * must arrive while this connection is still subscribed so a reconnect
+   * cannot submit under the same client id.
+   */
+  targetConnectionId?: string;
+  /**
+   * Actor principal captured at registration. Targeted requests snapshot the
+   * target client's actor so a brief SSE reconnect does not 403 a legitimate
+   * result. Untargeted requests snapshot the turn's source actor so a
+   * different principal cannot forge stdout/stderr/exitCode.
+   */
+  targetActorPrincipalId?: string;
+
+  // -- RPC lifecycle (all interaction types) --
+
+  /** Resolve the caller's Promise. Typed as unknown; callers cast at use sites. */
+  rpcResolve?: (value: unknown) => void;
+  /** Reject the caller's Promise with an error. */
+  rpcReject?: (err: Error) => void;
+  /** Timeout timer. Cleared automatically on resolve(). */
+  timer?: ReturnType<typeof setTimeout>;
+  /** Detach the abort listener from the caller's signal. No-op when no signal was passed. */
+  detachAbort?: () => void;
+  /** Proxy-specific metadata (e.g. timeoutSec for bash, operation/path for file). */
+  metadata?: Record<string, unknown>;
+  /** toolUseId associated with a confirmation_request (PermissionPrompter). */
+  toolUseId?: string;
+}
+
+const pending = new Map<string, PendingInteraction>();
+
+function invalidateModeSessionStructuralWait(
+  requestId: string,
+  interaction: PendingInteraction,
+): void {
+  const kind =
+    interaction.kind === "acp_confirmation"
+      ? "confirmation"
+      : interaction.kind === "confirmation" ||
+          interaction.kind === "question" ||
+          interaction.kind === "secret"
+        ? interaction.kind
+        : undefined;
+  if (!kind) {
+    return;
+  }
+  try {
+    findConversationOrSubagent(
+      interaction.conversationId,
+    )?.modeSessions.invalidateStructuralWait({ kind, responseId: requestId });
+  } catch (err) {
+    log.warn(
+      { err, requestId, conversationId: interaction.conversationId, kind },
+      "Could not invalidate mode session structural wait",
+    );
+  }
+}
+
+export function register(
+  requestId: string,
+  interaction: PendingInteraction,
+): void {
+  const targetConnectionId =
+    interaction.targetConnectionId ??
+    (interaction.targetClientId
+      ? assistantEventHub.getClientById?.(interaction.targetClientId)
+          ?.connectionId
+      : undefined);
+  pending.set(requestId, {
+    ...interaction,
+    ...(targetConnectionId != null ? { targetConnectionId } : {}),
+  });
+}
+
+/**
+ * Remove and return the pending interaction for the given requestId.
+ * Auto-clears the proxy timer and detaches the abort listener if present.
+ * Returns undefined if no interaction is registered.
+ *
+ * Emits `interaction_resolved` on the event hub when an interaction is
+ * actually removed (no-op when the entry was already consumed by another
+ * path). Callers pass `state` to communicate the lifecycle outcome
+ * — defaults to `"cancelled"`, the safest value when the call site has
+ * no extra context.
+ */
+export function resolve(
+  requestId: string,
+  state: InteractionResolutionState = "cancelled",
+): PendingInteraction | undefined {
+  const interaction = pending.get(requestId);
+  if (!interaction) {
+    return undefined;
+  }
+  pending.delete(requestId);
+  invalidateModeSessionStructuralWait(requestId, interaction);
+  if (interaction.timer != null) {
+    clearTimeout(interaction.timer);
+  }
+  interaction.detachAbort?.();
+  emitResolved(requestId, interaction, state);
+  return interaction;
+}
+
+function emitResolved(
+  requestId: string,
+  interaction: PendingInteraction,
+  state: InteractionResolutionState,
+): void {
+  log.info(
+    {
+      requestId,
+      conversationId: interaction.conversationId,
+      kind: interaction.kind,
+      state,
+    },
+    "Pending interaction resolved",
+  );
+  // interaction_resolved is conversation-scoped on the wire; a conversation-less
+  // interaction has no conversation for clients to route the event to, so skip
+  // the broadcast.
+  if (interaction.conversationId === undefined) {
+    return;
+  }
+  broadcastMessage({
+    type: "interaction_resolved",
+    requestId,
+    conversationId: interaction.conversationId,
+    kind: interaction.kind,
+    state,
+  });
+}
+
+/**
+ * Return the pending interaction without removing it.
+ * Used by trust-rule endpoint which doesn't resolve the confirmation itself.
+ */
+export function get(requestId: string): PendingInteraction | undefined {
+  return pending.get(requestId);
+}
+
+/**
+ * Return all pending interactions for a given conversation.
+ * Needed by channel approval migration.
+ */
+export function getByConversation(
+  conversationId: string,
+): Array<{ requestId: string } & PendingInteraction> {
+  const results: Array<{ requestId: string } & PendingInteraction> = [];
+  for (const [requestId, interaction] of pending) {
+    if (interaction.conversationId === conversationId) {
+      results.push({ requestId, ...interaction });
+    }
+  }
+  return results;
+}
+
+/**
+ * Remove pending confirmation and secret interactions for a given conversation.
+ * Used when auto-denying all pending interactions (e.g. new user message).
+ *
+ * host_bash, host_file, host_cu, host_browser, host_app_control, and
+ * host_transfer interactions are intentionally skipped — they represent
+ * in-flight tool executions proxied to the client, not confirmations to
+ * auto-deny. Removing them would orphan the request: the client would POST to
+ * /v1/host-bash-result, /v1/host-file-result, /v1/host-cu-result,
+ * /v1/host-browser-result, /v1/host-app-control-result, or
+ * /v1/host-transfer-result after completing the operation, get a 404, and the
+ * proxy timer would fire with a spurious timeout error.
+ *
+ * `question` interactions are also skipped: a new message settles an open
+ * ask_question at the enqueue path (see `daemon/handlers/conversations.ts`),
+ * either by answering it with the typed text or by steering to the message,
+ * which aborts the parked turn and settles the question via its abort signal.
+ * Clearing the entry here instead would drop it without settling the prompt's
+ * Promise (questions carry no `rpcResolve` fallback like secrets do) and would
+ * strip both paths of the entry they need, which can co-occur with a
+ * confirmation since one model response can open both tools concurrently.
+ */
+export function removeByConversation(
+  conversationId: string,
+  state: InteractionResolutionState = "superseded",
+): void {
+  // Snapshot keys to avoid mutation-during-iteration.
+  for (const [requestId, interaction] of [...pending]) {
+    if (
+      interaction.conversationId === conversationId &&
+      interaction.kind !== "host_bash" &&
+      interaction.kind !== "host_file" &&
+      interaction.kind !== "host_cu" &&
+      interaction.kind !== "host_browser" &&
+      interaction.kind !== "host_app_control" &&
+      interaction.kind !== "host_transfer" &&
+      interaction.kind !== "acp_confirmation" &&
+      interaction.kind !== "question"
+    ) {
+      if (interaction.kind === "secret") {
+        settleSecret(requestId, state);
+        continue;
+      }
+      // resolve() clears the stored timer and detaches abort listeners.
+      resolve(requestId, state);
+    }
+  }
+}
+
+/**
+ * Remove a pending `secret` interaction and settle the Promise its caller is
+ * parked on.
+ *
+ * Secret prompts have no abort-signal teardown (unlike questions) and are not
+ * pre-settled by denyAllPendingConfirmations (unlike confirmations), so
+ * removing the entry alone would leave the caller's Promise (the CLI
+ * `credentials prompt` command, or the in-conversation SecretPrompter) hanging
+ * until its IPC client times out. The result is a null value tagged with the
+ * resolution state, so callers report a supersession honestly instead of a
+ * user cancel. rpcResolve is idempotent, so any later resolveSecret/dispose
+ * call is a no-op.
+ */
+function settleSecret(
+  requestId: string,
+  state: InteractionResolutionState,
+): void {
+  // resolve() clears the stored timer and detaches abort listeners.
+  const interaction = resolve(requestId, state);
+  interaction?.rpcResolve?.({
+    value: null,
+    delivery: "store",
+    reason: state === "superseded" ? "superseded" : "cancelled",
+  });
+}
+
+/**
+ * Settle every pending `secret` interaction a conversation owns, because
+ * something superseded the turn that raised them.
+ *
+ * {@link removeByConversation} covers secrets too, but the confirmation sweep
+ * that calls it only runs when the conversation has a pending confirmation. A
+ * turn parked on a secret prompt alone needs this: nothing else settles it, so
+ * the dialog stays live and a later submission resolves the Promise the
+ * abandoned tool is parked on, resuming work its abort was meant to end.
+ */
+export function supersedePendingSecrets(
+  conversationId: string,
+  state: InteractionResolutionState = "superseded",
+): void {
+  // Snapshot keys to avoid mutation-during-iteration.
+  for (const [requestId, interaction] of [...pending]) {
+    if (
+      interaction.conversationId === conversationId &&
+      interaction.kind === "secret"
+    ) {
+      settleSecret(requestId, state);
+    }
+  }
+}
+
+/**
+ * Return all pending interactions of a given kind.
+ */
+export function getByKind(
+  kind: PendingInteraction["kind"],
+): Array<{ requestId: string } & PendingInteraction> {
+  const results: Array<{ requestId: string } & PendingInteraction> = [];
+  for (const [requestId, interaction] of pending) {
+    if (interaction.kind === kind) {
+      results.push({ requestId, ...interaction });
+    }
+  }
+  return results;
+}
+
+/**
+ * Return all pending interactions across all conversations.
+ */
+export function getAll(): Array<{ requestId: string } & PendingInteraction> {
+  const results: Array<{ requestId: string } & PendingInteraction> = [];
+  for (const [requestId, interaction] of pending) {
+    results.push({ requestId, ...interaction });
+  }
+  return results;
+}
+
+/** Clear all pending interactions. Useful for testing. */
+export function clear(): void {
+  pending.clear();
+}

@@ -1,0 +1,176 @@
+"use client";
+
+import { DocsContent } from "@/app/docs/_components/docs-content";
+import { SectionHeading } from "@/app/docs/_components/section-heading";
+import { TableOfContents } from "@/app/docs/_components/table-of-contents";
+
+const TOC_ITEMS = [
+  { id: "what-it-does", label: "What it does", level: 2 },
+  { id: "setup-required", label: "Setup required", level: 2 },
+  { id: "permissions", label: "Permissions", level: 2 },
+  { id: "common-prompts", label: "Common prompts", level: 2 },
+  { id: "configuration", label: "Configuration", level: 2 },
+  { id: "tips-gotchas", label: "Tips & gotchas", level: 2 },
+];
+
+export function SkillsReferenceACPContent() {
+  return (
+    <>
+      <DocsContent title="ACP" breadcrumb="Docs / Skills Reference / ACP">
+        <section id="what-it-does">
+          <SectionHeading id="what-it-does" level={2}>
+            What it does
+          </SectionHeading>
+          <p className="mb-0 text-zinc-600">
+            Sets up, authenticates, and runs external coding tools such as Claude Code, Codex, and
+            Gemini CLI through the Agent Client Protocol, so your assistant can hand development
+            tasks to them.
+          </p>
+        </section>
+
+        <section id="setup-required" className="mt-12">
+          <SectionHeading id="setup-required" level={2}>
+            Setup required
+          </SectionHeading>
+          <p className="mb-0 text-zinc-600">
+            The protocol adapter is installed automatically the first time you use an agent, at the
+            version your Assistant pins, and an adapter already on your PATH is left as it is.
+            For Claude Code that is everything: sign-in runs through an in-app Connect card,
+            so there is nothing to install yourself. The Codex adapter,
+            @agentclientprotocol/codex-acp, includes Codex and reuses your existing Codex login. Say
+            &ldquo;Set up ACP&rdquo; to walk through authentication. Naming Claude Code or Codex is
+            also enough: the assistant offers once to connect it here, then continues.
+          </p>
+        </section>
+
+        <section id="permissions" className="mt-12">
+          <SectionHeading id="permissions" level={2}>
+            Permissions
+          </SectionHeading>
+          <ul className="mb-0 list-disc space-y-2 pl-6 text-zinc-600">
+            <li>Host shell access for spawning external processes</li>
+          </ul>
+        </section>
+
+        <section id="common-prompts" className="mt-12">
+          <SectionHeading id="common-prompts" level={2}>
+            Common prompts
+          </SectionHeading>
+          <div className="mb-0 overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="bg-zinc-50">
+                  <th className="px-4 py-2 text-left text-sm font-medium text-zinc-500">
+                    You say...
+                  </th>
+                  <th className="px-4 py-2 text-left text-sm font-medium text-zinc-500">
+                    What happens
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="[&>tr:nth-child(even)]:bg-zinc-50">
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Claude Code will do it&rdquo;
+                  </td>
+                  <td className="px-3 py-2">
+                    Offers once to connect Claude Code here, then continues
+                  </td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Use Claude Code to fix the bug in server.ts&rdquo;
+                  </td>
+                  <td className="px-3 py-2">
+                    Delegates to Claude Code agent
+                  </td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Ask Codex to refactor this module&rdquo;
+                  </td>
+                  <td className="px-3 py-2">Delegates to Codex</td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Run Claude Code on sonnet for this&rdquo;
+                  </td>
+                  <td className="px-3 py-2">
+                    Starts the session on the model you named
+                  </td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Check on my coding agent&rdquo;
+                  </td>
+                  <td className="px-3 py-2">Gets active or resumable idle agent status</td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Cancel the coding agent&rdquo;
+                  </td>
+                  <td className="px-3 py-2">Aborts the agent</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="configuration" className="mt-12">
+          <SectionHeading id="configuration" level={2}>
+            Configuration
+          </SectionHeading>
+          <ul className="mb-0 list-disc space-y-2 pl-6 text-zinc-600">
+            <li>Supports multiple external development tools (Claude Code, Codex, Gemini CLI)</li>
+            <li>Agents run as separate processes with their own context</li>
+            <li>Status checks include running sessions and completed sessions that are idle and resumable</li>
+          </ul>
+        </section>
+
+        <section id="tips-gotchas" className="mt-12">
+          <SectionHeading id="tips-gotchas" level={2}>
+            Tips &amp; gotchas
+          </SectionHeading>
+          <ul className="mb-0 list-disc space-y-2 pl-6 text-zinc-600">
+            <li>
+              <strong>Name it to connect.</strong> Mentioning Claude Code or Codex is enough for a
+              one-time offer to connect and run it here. The assistant does not start the agent
+              unless you accept.
+            </li>
+            <li>
+              <strong>Fully independent.</strong> ACP agents are separate processes with their own
+              context window and tools.
+            </li>
+            <li>
+              <strong>Self-contained tasks.</strong> Best for tasks like fixing a bug, refactoring a
+              file, or writing tests.
+            </li>
+            <li>
+              <strong>Coordinated results.</strong> Your assistant coordinates with the agent and
+              reports back results.
+            </li>
+            <li>
+              <strong>Keep iterating in context.</strong> Completed sessions with durable resume
+              metadata remain discoverable as idle. Follow-up work attempts to reuse the same
+              session instead of starting a new agent and losing its prior context.
+            </li>
+            <li>
+              <strong>Choose the right agent.</strong> Claude Code for general development, Codex for
+              code generation, Gemini CLI for Google ecosystem integration.
+            </li>
+            <li>
+              <strong>Ask for a model.</strong> Claude Code runs on Opus unless you name a model,
+              and every other agent starts on its own default. Say which model a session should run
+              on, for example &ldquo;use sonnet&rdquo;, and it starts there. A session keeps the
+              model it started on, so ask for a new one to change it. A standing default per agent
+              lives in your Assistant config as <code>acp.agents.&lt;id&gt;.model</code>. The spawn
+              result reports both the requested model and the model the top-level ACP session says
+              it is actually using. The latter is authoritative.
+            </li>
+          </ul>
+        </section>
+      </DocsContent>
+      <TableOfContents items={TOC_ITEMS} />
+    </>
+  );
+}

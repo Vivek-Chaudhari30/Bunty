@@ -1,0 +1,641 @@
+import { beforeEach, describe, expect, mock, test } from "bun:test";
+
+import type { ChannelReplyPayload } from "@vellumai/gateway-client";
+import { ChannelDeliveryError } from "@vellumai/gateway-client/http-delivery";
+
+// Replace each channel's provider-API send layer with spies so the dispatcher's
+// routing and sub-operation selection can be asserted without network calls.
+const slack = {
+  sendSlackReply: mock((..._args: unknown[]) =>
+    Promise.resolve({ ts: "slack-ts" }),
+  ),
+  sendSlackReaction: mock((..._args: unknown[]) =>
+    Promise.resolve({ ok: true }),
+  ),
+  sendSlackAgentSessionStatus: mock((..._args: unknown[]) => Promise.resolve()),
+  sendSlackAttachments: mock((..._args: unknown[]) =>
+    Promise.resolve({ allFailed: false, failureCount: 0 }),
+  ),
+  sendSlackStreamOp: mock((..._args: unknown[]) =>
+    Promise.resolve({ ok: true, ts: "stream-ts" }),
+  ),
+  updateSlackMessage: mock((..._args: unknown[]) =>
+    Promise.resolve({ ts: "slack-ts" }),
+  ),
+};
+const telegram = {
+  // Spread the real module so a stub listing only what today's tests touch
+  // cannot break the next import a transport adds; the mocks below then
+  // override exactly the calls this suite asserts on.
+  ...(await import("../telegram-bot/send.js")),
+  editTelegramMessage: mock((..._args: unknown[]) => Promise.resolve()),
+  sendTelegramReaction: mock((..._args: unknown[]) =>
+    Promise.resolve({ ok: true }),
+  ),
+  sendTelegramReply: mock((..._args: unknown[]) =>
+    Promise.resolve({ lastMessageId: "tg-2", messageIds: ["tg-1", "tg-2"] }),
+  ),
+  sendTelegramRichReply: mock((..._args: unknown[]) =>
+    Promise.resolve({ lastMessageId: "tg-rich", messageIds: ["tg-rich"] }),
+  ),
+  sendTelegramTypingIndicator: mock((..._args: unknown[]) => Promise.resolve()),
+  sendTelegramAttachments: mock((..._args: unknown[]) =>
+    Promise.resolve({ allFailed: false, failureCount: 0 }),
+  ),
+};
+const whatsapp = {
+  sendWhatsAppReply: mock((..._args: unknown[]) =>
+    Promise.resolve({ messageIds: ["wamid.1", "wamid.2"] }),
+  ),
+  sendWhatsAppAttachments: mock((..._args: unknown[]) =>
+    Promise.resolve({ allFailed: false, failureCount: 0 }),
+  ),
+};
+const a2a = {
+  deliverA2AReply: mock((..._args: unknown[]) => Promise.resolve({ ok: true })),
+};
+const discord = {
+  sendDiscordReply: mock((..._args: unknown[]) =>
+    Promise.resolve({
+      lastMessageId: "discord-id",
+      messageIds: ["discord-id-0", "discord-id"],
+    }),
+  ),
+  sendDiscordTypingIndicator: mock((..._args: unknown[]) =>
+    Promise.resolve(true),
+  ),
+  editDiscordMessage: mock((..._args: unknown[]) => Promise.resolve()),
+  sendDiscordReaction: mock((..._args: unknown[]) =>
+    Promise.resolve({ ok: true }),
+  ),
+  sendDiscordAttachments: mock((..._args: unknown[]) =>
+    Promise.resolve({ allFailed: false, failureCount: 0, totalCount: 0 }),
+  ),
+};
+
+// The transports also import the adapters' pure helpers from these modules;
+// spreading the real module keeps the mock complete as that surface grows.
+const actualSlackSend = await import("../slack/send.js");
+mock.module("../slack/send.js", () => ({ ...actualSlackSend, ...slack }));
+mock.module("../telegram-bot/send.js", () => telegram);
+mock.module("../whatsapp/send.js", () => whatsapp);
+mock.module("../a2a/deliver.js", () => a2a);
+const actualDiscordSend = await import("../discord/send.js");
+mock.module("../discord/send.js", () => ({ ...actualDiscordSend, ...discord }));
+mock.module("../../../util/logger.js", () => ({
+  getLogger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+}));
+
+const {
+  deliverDirect,
+  editChannelMessage,
+  sendChannelReaction,
+  sendChannelStreamOp,
+  setChannelActivity,
+  supportsChannelActivity,
+  supportsChannelReaction,
+  isDirectDelivery,
+  getTransportForCallback,
+} = await import("../index.js");
+
+const BASE = "https://gateway.internal";
+
+function payload(
+  overrides: Partial<ChannelReplyPayload> = {},
+): ChannelReplyPayload {
+  return { chatId: "C1", ...overrides };
+}
+
+beforeEach(() => {
+  for (const group of [slack, telegram, whatsapp, a2a, discord]) {
+    for (const value of Object.values(group)) {
+      // A group spreads its real module so a stub cannot fall behind the
+      // exports a transport imports, which means it also carries constants
+      // and untouched functions. Only the spies have anything to clear.
+      const spy = value as { mockClear?: () => void };
+      spy.mockClear?.();
+    }
+  }
+});
+
+describe("routing", () => {
+  test("resolves each channel's callback path to its transport", () => {
+    expect(
+      getTransportForCallback(`${BASE}/deliver/slack?threadTs=1`)?.channel,
+    ).toBe("slack");
+    expect(getTransportForCallback(`${BASE}/deliver/telegram`)?.channel).toBe(
+      "telegram",
+    );
+    expect(getTransportForCallback(`${BASE}/deliver/whatsapp`)?.channel).toBe(
+      "whatsapp",
+    );
+    expect(
+      getTransportForCallback(`${BASE}/deliver/a2a?taskId=t1`)?.channel,
+    ).toBe("a2a");
+    expect(getTransportForCallback(`${BASE}/deliver/discord`)?.channel).toBe(
+      "discord",
+    );
+  });
+
+  test("isDirectDelivery is true for owned paths, false otherwise", () => {
+    expect(isDirectDelivery(`${BASE}/deliver/slack`)).toBe(true);
+    expect(isDirectDelivery(`${BASE}/deliver/a2a?taskId=t1`)).toBe(true);
+    expect(isDirectDelivery(`${BASE}/deliver/discord`)).toBe(true);
+    expect(isDirectDelivery(`${BASE}/v1/messages`)).toBe(false);
+    expect(
+      isDirectDelivery(
+        `${BASE}/v1/internal/managed-gateway/outbound-send/?route_id=r1`,
+      ),
+    ).toBe(false);
+    // `phone` is a canonical channel with no direct-delivery transport, so it
+    // stands in for the never-registered case discord used to cover.
+    expect(isDirectDelivery(`${BASE}/deliver/phone`)).toBe(false);
+    expect(getTransportForCallback(`${BASE}/deliver/phone`)).toBeUndefined();
+  });
+});
+
+describe("Slack sub-operation selection", () => {
+  test("text routes to sendSlackReply, threading the callback URL's threadTs", async () => {
+    await deliverDirect(
+      `${BASE}/deliver/slack?threadTs=1700.5`,
+      payload({ text: "hi" }),
+    );
+    expect(slack.sendSlackReply).toHaveBeenCalledTimes(1);
+    const opts = slack.sendSlackReply.mock.calls[0][2] as { threadTs?: string };
+    expect(opts.threadTs).toBe("1700.5");
+    expect(slack.sendSlackReaction).not.toHaveBeenCalled();
+  });
+
+  test("threads a base-less callback URL's threadTs", async () => {
+    await deliverDirect(
+      `/deliver/slack?threadTs=1700.9`,
+      payload({ text: "hi" }),
+    );
+    expect(slack.sendSlackReply).toHaveBeenCalledTimes(1);
+    const opts = slack.sendSlackReply.mock.calls[0][2] as { threadTs?: string };
+    expect(opts.threadTs).toBe("1700.9");
+  });
+
+  test("editChannelMessage updates in place instead of posting", async () => {
+    await editChannelMessage(`${BASE}/deliver/slack`, {
+      chatId: "C1",
+      messageId: "1700.5",
+      text: "revised",
+    });
+
+    expect(slack.updateSlackMessage).toHaveBeenCalledTimes(1);
+    // The distinction the split exists for: an edit never reaches the post
+    // path, so a failed edit cannot become a second visible message.
+    expect(slack.sendSlackReply).not.toHaveBeenCalled();
+  });
+
+  test("setChannelActivity reaches Slack without touching the text path", async () => {
+    await setChannelActivity(`${BASE}/deliver/slack`, {
+      chatId: "C1",
+      phase: "thinking",
+    });
+
+    expect(slack.sendSlackAgentSessionStatus).toHaveBeenCalledTimes(1);
+    expect(slack.sendSlackReply).not.toHaveBeenCalled();
+  });
+
+  test("a channel with no activity indicator resolves quietly", async () => {
+    const result = await setChannelActivity(`${BASE}/deliver/whatsapp`, {
+      chatId: "123",
+      phase: "thinking",
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(slack.sendSlackReply).not.toHaveBeenCalled();
+  });
+
+  test("sendChannelStreamOp reaches Slack without touching the text path", async () => {
+    const result = await sendChannelStreamOp(
+      `${BASE}/deliver/slack?threadTs=1700.5`,
+      "C1",
+      {
+        action: "start",
+        anchorMessageId: "1700.5",
+        text: "hi",
+        appended: "hi",
+      },
+    );
+    expect(slack.sendSlackStreamOp).toHaveBeenCalledTimes(1);
+    expect(slack.sendSlackStreamOp.mock.calls[0]).toEqual([
+      "C1",
+      {
+        action: "start",
+        anchorMessageId: "1700.5",
+        text: "hi",
+        appended: "hi",
+      },
+    ]);
+    expect(slack.sendSlackReply).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: true, ts: "stream-ts" });
+  });
+});
+
+describe("react dispatch", () => {
+  test("sendChannelReaction routes to the Slack reaction sender", async () => {
+    const result = await sendChannelReaction("slack", {
+      chatId: "C1",
+      messageId: "123.456",
+      emoji: "thumbsup",
+      action: "add",
+    });
+    expect(result.ok).toBe(true);
+    expect(slack.sendSlackReaction).toHaveBeenCalledWith(
+      "C1",
+      "thumbsup",
+      "123.456",
+      "add",
+    );
+  });
+
+  test("supportsChannelReaction follows the transport declaration", () => {
+    expect(supportsChannelReaction("slack")).toBe(true);
+    expect(supportsChannelReaction("telegram")).toBe(true);
+    expect(supportsChannelReaction("discord")).toBe(true);
+    expect(supportsChannelReaction("whatsapp")).toBe(false);
+    expect(supportsChannelReaction("some-plugin-channel")).toBe(false);
+    expect(supportsChannelReaction(undefined)).toBe(false);
+  });
+
+  test("sendChannelReaction routes to the Telegram reaction sender", async () => {
+    const result = await sendChannelReaction("telegram", {
+      chatId: "12345",
+      messageId: "678",
+      emoji: "👍",
+      action: "add",
+    });
+    expect(result.ok).toBe(true);
+    expect(telegram.sendTelegramReaction).toHaveBeenCalledWith(
+      "12345",
+      "👍",
+      "678",
+      "add",
+    );
+  });
+
+  test("a Discord thread reaction addresses the thread channel, not the parent", async () => {
+    await sendChannelReaction("discord", {
+      chatId: "PARENT",
+      threadId: "THREAD",
+      messageId: "M1",
+      emoji: "👍",
+      action: "add",
+    });
+    expect(discord.sendDiscordReaction).toHaveBeenCalledWith(
+      "THREAD",
+      "👍",
+      "M1",
+      "add",
+    );
+  });
+
+  test("Slack ignores the thread coordinate: chatId plus ts addresses the message", async () => {
+    await sendChannelReaction("slack", {
+      chatId: "C1",
+      threadId: "1716000000.000001",
+      messageId: "1716000000.000002",
+      emoji: "thumbsup",
+      action: "add",
+    });
+    expect(slack.sendSlackReaction).toHaveBeenCalledWith(
+      "C1",
+      "thumbsup",
+      "1716000000.000002",
+      "add",
+    );
+  });
+
+  test("sendChannelReaction routes to the Discord reaction sender", async () => {
+    const result = await sendChannelReaction("discord", {
+      chatId: "C9",
+      messageId: "M9",
+      emoji: "<:vex:12345>",
+      action: "remove",
+    });
+    expect(result.ok).toBe(true);
+    expect(discord.sendDiscordReaction).toHaveBeenCalledWith(
+      "C9",
+      "<:vex:12345>",
+      "M9",
+      "remove",
+    );
+  });
+
+  test("a channel without react resolves to nothing and sends nothing", async () => {
+    const result = await sendChannelReaction("whatsapp", {
+      chatId: "W1",
+      messageId: "m1",
+      emoji: "thumbsup",
+      action: "add",
+    });
+    expect(result).toEqual({ ok: true });
+    expect(whatsapp.sendWhatsAppReply).not.toHaveBeenCalled();
+  });
+});
+
+describe("capability gating across channels", () => {
+  test("Slack renders a muted edit as its own context block", async () => {
+    await editChannelMessage(`${BASE}/deliver/slack`, {
+      chatId: "C1",
+      messageId: "1700.5",
+      text: "This approval request has been resolved.",
+      emphasis: "muted",
+    });
+
+    // The producer asked for a settled message and named no markup. Slack
+    // decides that means a context block.
+    const [, , , options] = slack.updateSlackMessage.mock.calls[0]!;
+    expect((options as { blocks?: unknown[] }).blocks).toEqual([
+      {
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: "This approval request has been resolved.",
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("an edit with no emphasis carries no channel markup", async () => {
+    await editChannelMessage(`${BASE}/deliver/slack`, {
+      chatId: "C1",
+      messageId: "1700.5",
+      text: "revised",
+    });
+
+    const [, , , options] = slack.updateSlackMessage.mock.calls[0]!;
+    expect((options as { blocks?: unknown[] }).blocks).toBeUndefined();
+  });
+
+  test("editChannelMessage now reaches Telegram, not only Slack", async () => {
+    // The capability gate is what let Telegram gain this: no caller changed,
+    // the transport grew the method.
+    await editChannelMessage(`${BASE}/deliver/telegram`, {
+      chatId: "123",
+      messageId: "456",
+      text: "revised",
+    });
+
+    expect(telegram.editTelegramMessage).toHaveBeenCalledTimes(1);
+    expect(telegram.sendTelegramReply).not.toHaveBeenCalled();
+  });
+
+  test("a channel that cannot revise a sent message resolves quietly", async () => {
+    // WhatsApp has no `edit`. A channel without the method is not a failed
+    // delivery: nothing is attempted, nothing throws, and no fresh message is
+    // posted in place of the revision.
+    expect(
+      await editChannelMessage(`${BASE}/deliver/whatsapp`, {
+        chatId: "C1",
+        messageId: "1",
+        text: "revised",
+      }),
+    ).toEqual({ ok: true });
+    expect(whatsapp.sendWhatsAppReply).not.toHaveBeenCalled();
+  });
+
+  test("Discord edits in place instead of posting", async () => {
+    await editChannelMessage(`${BASE}/deliver/discord`, {
+      chatId: "C1",
+      messageId: "M9",
+      text: "revised",
+    });
+
+    expect(discord.editDiscordMessage).toHaveBeenCalledTimes(1);
+    // Same distinction the Slack case asserts: an edit never reaches the post
+    // path, so a failed edit cannot become a second visible message.
+    expect(discord.sendDiscordReply).not.toHaveBeenCalled();
+  });
+
+  test("Discord renders a muted edit as subtext", async () => {
+    await editChannelMessage(`${BASE}/deliver/discord`, {
+      chatId: "C1",
+      messageId: "M9",
+      text: "This approval request has been resolved.",
+      emphasis: "muted",
+    });
+
+    // `muted` is surface-agnostic and each channel picks its own token. Slack
+    // uses a context block; Discord's nearest equivalent is subtext, which it
+    // renders at the size and colour of a dismiss line.
+    expect(discord.editDiscordMessage.mock.calls[0][3]).toEqual({
+      emphasis: "muted",
+    });
+  });
+
+  test("the activity capability is read from the transport, not the channel name", () => {
+    // The gate in background-dispatch asks this rather than testing
+    // `sourceChannel === "slack"`, so a channel that implements the method
+    // starts showing an indicator without a caller being changed. All three
+    // answer the same question now, which is the point of the single method:
+    // Slack holds its indicator and the other two re-assert theirs, and a
+    // caller cannot tell the difference.
+    expect(supportsChannelActivity(`${BASE}/deliver/slack`)).toBe(true);
+    expect(supportsChannelActivity(`${BASE}/deliver/telegram`)).toBe(true);
+    expect(supportsChannelActivity(`${BASE}/deliver/discord`)).toBe(true);
+    expect(supportsChannelActivity(`${BASE}/deliver/whatsapp`)).toBe(false);
+  });
+
+  test("setChannelActivity reaches Telegram's typing indicator", async () => {
+    await setChannelActivity(`${BASE}/deliver/telegram`, {
+      chatId: "123",
+      phase: "thinking",
+    });
+
+    expect(telegram.sendTelegramTypingIndicator).toHaveBeenCalledTimes(1);
+  });
+
+  test("WhatsApp text routes to sendWhatsAppReply", async () => {
+    await deliverDirect(`${BASE}/deliver/whatsapp`, payload({ text: "hi" }));
+    expect(whatsapp.sendWhatsAppReply).toHaveBeenCalledTimes(1);
+  });
+
+  test("A2A routes to deliverA2AReply with the callback URL", async () => {
+    const url = `${BASE}/deliver/a2a?taskId=t1`;
+    await deliverDirect(url, payload({ text: "hi" }));
+    expect(a2a.deliverA2AReply).toHaveBeenCalledTimes(1);
+    expect(a2a.deliverA2AReply.mock.calls[0][0]).toBe(url);
+  });
+
+  test("Discord text routes to sendDiscordReply, targeting the channel", async () => {
+    await deliverDirect(`${BASE}/deliver/discord`, payload({ text: "hi" }));
+    expect(discord.sendDiscordReply).toHaveBeenCalledTimes(1);
+    expect(discord.sendDiscordReply.mock.calls[0][0]).toEqual({
+      channelId: "C1",
+    });
+    expect(discord.sendDiscordReply.mock.calls[0][1]).toBe("hi");
+  });
+
+  test("Discord threads a reply to the thread id, not the parent channel", async () => {
+    await deliverDirect(
+      `${BASE}/deliver/discord?threadId=T9`,
+      payload({ text: "hi" }),
+    );
+    expect(discord.sendDiscordReply).toHaveBeenCalledTimes(1);
+    // A Discord thread is itself a channel: the reply must post to the thread
+    // snowflake, never to the parent channel the payload's chatId carries.
+    expect(discord.sendDiscordReply.mock.calls[0][0]).toEqual({
+      channelId: "T9",
+    });
+  });
+
+  test("setChannelActivity reaches Discord's typing indicator", async () => {
+    await setChannelActivity(`${BASE}/deliver/discord`, {
+      chatId: "999",
+      phase: "thinking",
+    });
+
+    expect(discord.sendDiscordTypingIndicator).toHaveBeenCalledTimes(1);
+  });
+
+  test("a channel that cannot stream resolves quietly, and posts nothing", async () => {
+    const result = await sendChannelStreamOp(`${BASE}/deliver/discord`, "999", {
+      action: "start",
+      anchorMessageId: "1700.5",
+      text: "hi",
+      appended: "hi",
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(discord.sendDiscordReply).not.toHaveBeenCalled();
+  });
+});
+
+describe("acknowledged provider posts", () => {
+  // Every text post a delivery creates comes back in `messageIds`, in send
+  // order, so a recorder can name each one. `ts` keeps its meaning where a
+  // channel had one; it is not widened to stand in for the list.
+  test("Slack acknowledges its single text post as ts and as the one id", async () => {
+    const result = await deliverDirect(
+      `${BASE}/deliver/slack`,
+      payload({ text: "hi" }),
+    );
+    expect(result).toEqual({
+      ok: true,
+      ts: "slack-ts",
+      messageIds: ["slack-ts"],
+    });
+  });
+
+  test("Telegram acknowledges every chunk of a plain send", async () => {
+    const result = await deliverDirect(
+      `${BASE}/deliver/telegram`,
+      payload({ text: "hi" }),
+    );
+    expect(result).toEqual({ ok: true, messageIds: ["tg-1", "tg-2"] });
+  });
+
+  test("Telegram acknowledges a rich send's message", async () => {
+    const result = await deliverDirect(
+      `${BASE}/deliver/telegram`,
+      payload({ text: "hi", renderRichly: true }),
+    );
+    expect(result).toEqual({ ok: true, messageIds: ["tg-rich"] });
+  });
+
+  test("Discord acknowledges every chunk, with the last one as ts", async () => {
+    const result = await deliverDirect(
+      `${BASE}/deliver/discord`,
+      payload({ text: "hi" }),
+    );
+    expect(result).toEqual({
+      ok: true,
+      ts: "discord-id",
+      messageIds: ["discord-id-0", "discord-id"],
+    });
+  });
+
+  test("WhatsApp acknowledges every message the text became", async () => {
+    const result = await deliverDirect(
+      `${BASE}/deliver/whatsapp`,
+      payload({ text: "hi" }),
+    );
+    expect(result).toEqual({ ok: true, messageIds: ["wamid.1", "wamid.2"] });
+  });
+
+  test("a delivery with no text acknowledges no post", async () => {
+    const attachments = [
+      {
+        id: "att-1",
+        filename: "a.txt",
+        mimeType: "text/plain",
+        sizeBytes: 1,
+        kind: "file",
+      },
+    ];
+    const result = await deliverDirect(
+      `${BASE}/deliver/telegram`,
+      payload({ attachments }),
+    );
+    expect(result).toEqual({ ok: true, messageIds: [] });
+    expect(telegram.sendTelegramReply).not.toHaveBeenCalled();
+    expect(telegram.sendTelegramAttachments).toHaveBeenCalledTimes(1);
+    expect(telegram.sendTelegramAttachments.mock.calls[0]?.slice(0, 2)).toEqual(
+      ["C1", attachments],
+    );
+  });
+});
+
+describe("attachment-only delivery failure", () => {
+  const attachments = [
+    {
+      id: "att-1",
+      filename: "a.txt",
+      mimeType: "text/plain",
+      sizeBytes: 1,
+      kind: "file",
+    },
+    {
+      id: "att-2",
+      filename: "b.txt",
+      mimeType: "text/plain",
+      sizeBytes: 1,
+      kind: "file",
+    },
+  ];
+  const allFailed = { allFailed: true, failureCount: 2, totalCount: 2 };
+
+  for (const { channel, sendAttachments } of [
+    { channel: "telegram", sendAttachments: telegram.sendTelegramAttachments },
+    { channel: "whatsapp", sendAttachments: whatsapp.sendWhatsAppAttachments },
+  ]) {
+    test(`${channel} fails with 502 when every attachment fails and there is no text`, async () => {
+      sendAttachments.mockImplementationOnce(() => Promise.resolve(allFailed));
+
+      const delivery = deliverDirect(
+        `${BASE}/deliver/${channel}`,
+        payload({ attachments }),
+      );
+
+      await expect(delivery).rejects.toBeInstanceOf(ChannelDeliveryError);
+      await expect(delivery).rejects.toMatchObject({ statusCode: 502 });
+      expect(sendAttachments).toHaveBeenCalledTimes(1);
+    });
+
+    test(`${channel} succeeds when every attachment fails but the text went out`, async () => {
+      sendAttachments.mockImplementationOnce(() => Promise.resolve(allFailed));
+
+      const result = await deliverDirect(
+        `${BASE}/deliver/${channel}`,
+        payload({ text: "hi", attachments }),
+      );
+
+      expect(result.ok).toBe(true);
+      expect(sendAttachments).toHaveBeenCalledTimes(1);
+    });
+  }
+});
+
+describe("unsupported callback", () => {
+  test("throws when no transport owns the callback", async () => {
+    await expect(
+      deliverDirect(`${BASE}/deliver/phone`, payload({ text: "hi" })),
+    ).rejects.toThrow(/unsupported callback/);
+  });
+});

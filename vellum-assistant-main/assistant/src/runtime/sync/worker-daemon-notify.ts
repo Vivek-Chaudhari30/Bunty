@@ -1,0 +1,183 @@
+/**
+ * Worker → daemon hand-off for sync notifications a sidecar cannot deliver.
+ *
+ * Sidecar worker processes (schedule, memory) disable SSE seq stamping — the
+ * daemon is the sole seq authority — so a worker's own `getCurrentSeq()`
+ * reports `0` and its `sync_changed` broadcasts reach no SSE subscriber (those
+ * live in the daemon). A worker hands the notification here instead and the
+ * daemon republishes it to real subscribers (see
+ * `ipc/routes/conversation-sync-ipc-routes.ts`,
+ * `ipc/routes/documents-sync-ipc-routes.ts`,
+ * `ipc/routes/activation-sync-ipc-routes.ts`).
+ */
+
+import { cliIpcCall } from "../../ipc/cli-client.js";
+import { getLogger } from "../../util/logger.js";
+
+const log = getLogger("worker-daemon-notify");
+
+/**
+ * IPC method the daemon exposes for the worker hand-off. Shared by the worker
+ * caller and the daemon route registration so the wire name cannot drift.
+ */
+export const NOTIFY_CONVERSATION_PERSISTED_IPC_METHOD =
+  "notify_conversation_persisted_externally";
+
+/**
+ * IPC method the daemon exposes for the documents-changed hand-off. Shared by
+ * the worker caller and the daemon route registration so the wire name cannot
+ * drift.
+ */
+export const NOTIFY_DOCUMENTS_CHANGED_IPC_METHOD =
+  "notify_documents_changed_externally";
+
+/**
+ * IPC method the daemon exposes for the conversation-list hand-off. Shared by
+ * the worker caller and the daemon route registration so the wire name cannot
+ * drift.
+ */
+export const NOTIFY_CONVERSATION_LIST_CHANGED_IPC_METHOD =
+  "notify_conversation_list_changed_externally";
+
+/**
+ * IPC method the daemon exposes for the activation-progress hand-off. Shared
+ * by the worker caller and the daemon route registration so the wire name
+ * cannot drift.
+ */
+export const NOTIFY_ACTIVATION_PROGRESS_CHANGED_IPC_METHOD =
+  "notify_activation_progress_changed_externally";
+
+/**
+ * Short timeout: this is a fire-and-forget invalidation, not a request whose
+ * result the worker consumes. A busy or unreachable daemon simply leaves the
+ * anchor stale until the client repairs it on its next snapshot fetch.
+ */
+const NOTIFY_TIMEOUT_MS = 3_000;
+
+/**
+ * Ask the daemon to record the snapshot anchor and republish the
+ * messages-changed invalidation for `conversationId`.
+ *
+ * Best-effort by design: a daemon that is down, unreachable, or still running
+ * migrations (the IPC method is DB-migration gated) yields a failed result that
+ * is logged at debug and swallowed. No retries or queueing — the worker
+ * persisted the rows regardless, and clients self-repair the stale anchor on
+ * their next `/messages` fetch (switch/reload).
+ */
+export async function notifyDaemonConversationPersisted(
+  conversationId: string,
+): Promise<void> {
+  try {
+    const result = await cliIpcCall(
+      NOTIFY_CONVERSATION_PERSISTED_IPC_METHOD,
+      { body: { conversationId } },
+      { timeoutMs: NOTIFY_TIMEOUT_MS },
+    );
+    if (!result.ok) {
+      log.debug(
+        { conversationId, error: result.error },
+        "daemon conversation-persisted notify was not acknowledged",
+      );
+    }
+  } catch (err) {
+    log.debug(
+      { err, conversationId },
+      "daemon conversation-persisted notify failed",
+    );
+  }
+}
+
+/**
+ * Ask the daemon to republish a conversation-list-and-metadata invalidation.
+ *
+ * A worker turn can change which rows the sidebar should hold, not just what
+ * one row contains: clearing `archived_at` on a Done conversation the turn
+ * woke is the case that matters. The list tag has to reach real subscribers
+ * for the conversation to reappear, and the worker's own hub has none.
+ *
+ * Best-effort by design, like the other hand-offs: an unreachable daemon is
+ * logged at debug and swallowed, and the client picks the change up on its
+ * next list fetch.
+ */
+export async function notifyDaemonConversationListChanged(
+  reason: string,
+  conversationIds: string[],
+): Promise<void> {
+  try {
+    const result = await cliIpcCall(
+      NOTIFY_CONVERSATION_LIST_CHANGED_IPC_METHOD,
+      { body: { reason, conversationIds } },
+      { timeoutMs: NOTIFY_TIMEOUT_MS },
+    );
+    if (!result.ok) {
+      log.debug(
+        { reason, conversationIds, error: result.error },
+        "daemon conversation-list-changed notify was not acknowledged",
+      );
+    }
+  } catch (err) {
+    log.debug(
+      { err, reason, conversationIds },
+      "daemon conversation-list-changed notify failed",
+    );
+  }
+}
+
+/**
+ * Ask the daemon to republish the documents-list invalidation.
+ *
+ * A scheduled or background turn runs its document tools in a sidecar worker,
+ * so the edit is real but the worker's own broadcast reaches nobody. This is
+ * the path that lets the user learn a document changed while they were not
+ * looking.
+ *
+ * Best-effort by design, like the conversation hand-off: an unreachable daemon
+ * is logged at debug and swallowed, and the client picks the change up on its
+ * next document-list fetch.
+ */
+export async function notifyDaemonDocumentsChanged(): Promise<void> {
+  try {
+    const result = await cliIpcCall(
+      NOTIFY_DOCUMENTS_CHANGED_IPC_METHOD,
+      { body: {} },
+      { timeoutMs: NOTIFY_TIMEOUT_MS },
+    );
+    if (!result.ok) {
+      log.debug(
+        { error: result.error },
+        "daemon documents-changed notify was not acknowledged",
+      );
+    }
+  } catch (err) {
+    log.debug({ err }, "daemon documents-changed notify failed");
+  }
+}
+
+/**
+ * Ask the daemon to republish the activation-progress invalidation.
+ *
+ * A scheduled or background turn working a checklist task moves that task's
+ * step count and finishes it, but the worker's own broadcast reaches nobody.
+ * This is the path that lets the checklist row stop showing Working.
+ *
+ * Best-effort by design, like the other hand-offs: an unreachable daemon is
+ * logged at debug and swallowed, and the client picks the change up on its
+ * next progress fetch.
+ */
+export async function notifyDaemonActivationProgressChanged(): Promise<void> {
+  try {
+    const result = await cliIpcCall(
+      NOTIFY_ACTIVATION_PROGRESS_CHANGED_IPC_METHOD,
+      { body: {} },
+      { timeoutMs: NOTIFY_TIMEOUT_MS },
+    );
+    if (!result.ok) {
+      log.debug(
+        { error: result.error },
+        "daemon activation-progress notify was not acknowledged",
+      );
+    }
+  } catch (err) {
+    log.debug({ err }, "daemon activation-progress notify failed");
+  }
+}

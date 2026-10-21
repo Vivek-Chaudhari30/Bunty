@@ -1,0 +1,165 @@
+# Plugin icon contract
+
+This doc is the single cross-repo source of truth for **marketplace plugin icons** — the small glyph shown next to a plugin in `assistant plugins search`, the desktop/web catalog, and the marketing site. It mirrors how skill icons work. Two repos consume this contract and MUST enforce identical rules:
+
+- **`vellum-ai/vellum-assistant`** (this repo) — the assistant validator at [`assistant/src/cli/lib/plugin-icon-file.ts`](../assistant/src/cli/lib/plugin-icon-file.ts) is the authoritative implementation. In-repo curation lives here (`plugins/marketplace.json`, `plugins/assets/`, `plugins/plugin-icons.json`).
+- **`vellum-ai/vellum-assistant-platform`** — a Django validator behind `/v1/plugins/` that MUST match this doc byte-for-byte. Uploads the PNGs to GCS and serves the combined catalog `icon` value.
+
+Any change to the format, limits, or manifest shape below is a **coordinated cross-repo change** — the TS validator and the Python validator move together, or a plugin that validates in one repo silently gets "no icon" in the other.
+
+## PNG icon rules (author-bundled)
+
+A plugin MAY ship a raster icon. The rules exist so third-party bytes served from a Vellum origin can never become a stored-XSS or path-traversal vector, and so a bad file degrades to "no icon" rather than an error.
+
+- **PNG only.** No SVG. SVG is executable markup; serving attacker-authored SVG from a Vellum origin is a stored-XSS risk. A single well-known container (PNG magic + IHDR) also keeps the parser tiny and dependency-free.
+- **Fixed filename, fixed location.** The file is always `icon.png` at the plugin root — `<source.path>/icon.png` for a plugin pinned to a repo subdirectory (`source.path`), or `icon.png` at the repo root when `source.path` is omitted. There is **no author-controlled path**, so there is no traversal surface.
+- **Dimensions ≤ 128×128 px**, validated against the PNG IHDR width/height (not a trusted sidecar).
+- **Size ≤ 32 KB.** The size gate runs before the bytes are read, so an oversized file never enters memory.
+- **Fail-closed.** Any problem — missing file, wrong magic bytes, non-IHDR first chunk, oversized bytes, oversized dimensions, unreadable — resolves to "no icon". Validation **never throws**; callers surface "no icon" uniformly with no per-source error handling.
+
+### `iconVersion`
+
+`iconVersion` is the **first 16 hex chars of `sha256(bytes)`** of the validated `icon.png`. It is a stable content hash: identical bytes ⇒ identical version, any byte change ⇒ new version. It is the cache-bust token (see [Bucket convention](#bucket-convention)) and the value recorded in the manifest.
+
+The authoritative constants — `MAX_ICON_BYTES = 32 * 1024`, `MAX_ICON_DIMENSION = 128`, the PNG magic signature, the IHDR checks, and the 16-hex `iconVersion` slice — all live in [`plugin-icon-file.ts`](../assistant/src/cli/lib/plugin-icon-file.ts). Treat that file as the spec; this doc explains it.
+
+## Marketplace icon sources
+
+A plugin's icon comes from **either** a curated emoji **or** a PNG. Curate one
+source per plugin, not both. GitHub plugin PNGs and bundled local plugin PNGs
+are both vendored into the shared asset catalog. Local package PNGs stay the
+source of truth in their package. The platform resolves these sources into a
+single catalog `icon` value (see
+[Platform combination](#platform-combination-and-precedence)). A plugin that
+ships a PNG does not also need a marketplace `icon` emoji.
+
+### 1. Emoji — `icon` field on the marketplace entry
+
+Each entry in [`plugins/marketplace.json`](../plugins/marketplace.json) MAY carry an optional `icon` string holding a single emoji. This is human-curated by whoever reviews the marketplace entry — the cheapest way to give a plugin a recognizable glyph with no asset pipeline.
+
+```json
+{
+  "name": "caveman",
+  "icon": "🪨",
+  "source": { "source": "github", "repo": "JuliusBrussee/caveman", "ref": "<full-commit-sha>" }
+}
+```
+
+The marketplace entry schema (name, a discriminated `source`, description, category, homepage, license, and the optional `icon`) is defined in [`plugin-marketplace.ts`](../assistant/src/cli/lib/plugin-marketplace.ts). GitHub sources pin `ref` to a **full commit SHA**; local sources name an exact package path and version embedded in the assistant distribution. The `icon` field is curated in-repo, not fetched from the third-party plugin. It is wired end to end: `marketplaceEntrySchema` carries it through `marketplaceMatch` into the catalog projection and the `assistant plugins search` response, and the platform's `/v1/plugins/` reads the same curated emoji independently to render the marketing site.
+
+### 2. PNG — vendored asset + derived manifest
+
+An author-bundled `icon.png` (validated per the rules above) is **vendored into this repo** rather than served from the third-party source, so the bytes we serve are the exact bytes we reviewed:
+
+- **Asset:** `plugins/assets/<name>/icon.png` — the validated icon for marketplace plugin `<name>`.
+- **Manifest:** `plugins/plugin-icons.json` — a derived index. **An entry is present if and only if a valid vendored icon exists** for that plugin.
+
+```json
+{
+  "version": 1,
+  "plugins": {
+    "<name>": { "iconVersion": "<16hex>" }
+  }
+}
+```
+
+Both the vendored asset and the manifest are generated, not hand-edited (see [Adding or updating a plugin icon](#adding-or-updating-a-plugin-icon)).
+
+## Bundled local plugin icons
+
+A marketplace plugin whose source is `local` keeps the canonical `icon.png` in
+its package root at `<source.path>/icon.png`. The file follows the same PNG,
+dimension, byte-size, and fixed-name rules as every author-bundled icon. Icon
+attribution belongs in the package so it travels with the installed plugin.
+
+Adding or changing package content requires a package version bump. The
+`version` in `plugin.json` and the marketplace `source.version` must match.
+
+The web catalog loads static integration logos by filename, so bundled local MCP
+plugins also have a derived compatibility copy at
+`clients/web/public/images/integrations/<name>-mcp.png`. The marketplace
+`integration.logo` must name that file. Existing OAuth logo filenames remain
+independent even when an OAuth provider and an MCP plugin share a brand.
+
+The platform marketing catalog serves icons from the plugin assets bucket, so
+the icon generator also vendors each valid local package icon to
+`plugins/assets/<name>/icon.png` and indexes it in `plugins/plugin-icons.json`.
+It reads the package file from disk and never fetches it. Its check mode fails
+when a vendored copy differs from the package icon.
+
+Generate or verify these copies without network access:
+
+```bash
+node scripts/plugins/sync-local-plugin-icons.mjs
+node scripts/plugins/sync-local-plugin-icons.mjs --check
+node scripts/plugins/generate-plugin-icons.mjs --check
+```
+
+After you change a local package icon, run
+`node scripts/plugins/generate-plugin-icons.mjs` to refresh the vendored copy
+and manifest.
+
+The package icon is the source of truth. The sync command validates it with the
+authoritative PNG contract and writes a byte-identical web copy. Check mode
+also rejects missing, changed, or stale `<name>-mcp.png` files and verifies the
+package path, version match, and marketplace logo filename.
+
+## Platform combination and precedence
+
+The platform serves each plugin a single `icon` value in `/v1/plugins/`, matching how skills expose one `icon`. It is a **URL-or-emoji** value resolved by this precedence:
+
+1. **PNG URL** — if `plugins/plugin-icons.json` has an entry for the plugin, the platform serves the GCS URL of the vendored `icon.png` (cache-busted by `iconVersion`; see below).
+2. **Emoji** — else if the marketplace entry has an `icon` emoji, serve that string.
+3. **`null`** — else no icon. The client then falls back to a generic 📦/🧩 glyph (per [PR #37087](https://github.com/vellum-ai/vellum-assistant/pull/37087)).
+
+A vendored PNG always wins over a curated emoji, so a plugin only needs one source: give it a PNG **or** an emoji, not both. The platform serves that single `icon`, and clients render it best-effort — there is no separate emoji field riding alongside a PNG URL.
+
+## Bucket convention
+
+Vendored PNGs are uploaded to GCS and served publicly, mirroring the skill asset convention (`gs://<GCS_SKILL_ASSETS_BUCKET>/<id>/assets/icon.svg`, uploaded by [`.github/workflows/upload-skill-assets.yaml`](../.github/workflows/upload-skill-assets.yaml)).
+
+- **Object path:** `gs://<GCS_PLUGIN_ASSETS_BUCKET>/<name>/icon.png`.
+- **Serving:** public, long-lived cache (`Cache-Control: public, max-age=…`, matching the skill bucket's `max-age=86400`).
+- **Cache-busting:** because the object path is stable but the bytes can change, consumers request `…/<name>/icon.png?v=<iconVersion>`. A content change produces a new `iconVersion`, so the query string changes and caches miss exactly when they should.
+
+## Adding or updating a plugin icon
+
+The one-command path handles all three artifacts (curated emoji, vendored PNG,
+bundled copy) in one shot:
+
+```bash
+# Curate an emoji for a plugin that ships no bundled PNG:
+node scripts/plugins/add-plugin-icon.mjs <plugin-name> --emoji ☕
+
+# Vendor a bundled PNG (the plugin publishes its own icon.png upstream):
+node scripts/plugins/add-plugin-icon.mjs <plugin-name>
+```
+
+It (1) optionally patches the plugin's `icon` field in `plugins/marketplace.json`
+— a surgical, churn-free edit that preserves the file's exact serialization —
+(2) runs the generator to vendor `plugins/assets/<name>/icon.png` and regenerate
+`plugins/plugin-icons.json`, then (3) runs `meta/sync-bundled-copies.ts` so
+`assistant/src/cli/lib/bundled-marketplace.json` stays in lockstep. Set
+`GITHUB_TOKEN` to lift the generator's unauthenticated GitHub rate limit. Then
+commit whatever changed (`marketplace.json`, the vendored asset,
+`plugin-icons.json`, and the bundled copy).
+
+The plugin must already exist in `plugins/marketplace.json` — an icon only
+attaches to a catalogued plugin. A plugin whose upstream `icon.png` fails
+validation simply gets no manifest entry, so its `icon` resolves to the curated
+emoji if one is set, otherwise null.
+
+### Under the hood
+
+If you'd rather run the steps by hand, or need only one of them:
+
+**Emoji:**
+
+1. Set (or change) the `icon` string on the plugin's entry in `plugins/marketplace.json`.
+2. Run `sync-bundled-copies` (`meta/sync-bundled-copies.ts`) so the bundled offline copy at `assistant/src/cli/lib/bundled-marketplace.json` stays in sync.
+3. Commit both files.
+
+**PNG:**
+
+1. For GitHub marketplace entries, run the generator `scripts/plugins/generate-plugin-icons.mjs`. It fetches the plugin's `icon.png`, validates it against the rules above, vendors the valid bytes to `plugins/assets/<name>/icon.png`, and regenerates `plugins/plugin-icons.json`. Local entries are read from `<source.path>/icon.png` on disk, never fetched, and vendored the same way. Their web copies are handled by `sync-local-plugin-icons.mjs`.
+2. Commit the vendored asset **and** the regenerated `plugins/plugin-icons.json` together. A plugin whose icon fails validation simply gets no manifest entry (and falls back to emoji or the generic glyph).

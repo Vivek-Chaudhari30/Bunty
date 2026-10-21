@@ -1,0 +1,678 @@
+/**
+ * Home-feed side effect for the notification pipeline.
+ *
+ * Writes a `FeedItem` into the home activity feed when a notification
+ * signal originates from a non-interactive (background or scheduled)
+ * conversation, or carries the `isAsyncBackground` attention hint.
+ *
+ * Producer flows like the scheduler, watchers, and background activity
+ * jobs already emit through `emitNotificationSignal()` — this helper
+ * mirrors the high-signal subset of that traffic into the home feed so
+ * the macOS Home page surfaces them alongside other activity.
+ */
+import {
+  type FeedItem,
+  type FeedItemCategory,
+  type FeedItemDetailPanelKind,
+  feedItemSchema,
+  type FeedItemUpdate,
+  feedItemUpdateSchema,
+} from "../home/feed-types.js";
+import { appendFeedItem } from "../home/feed-writer.js";
+import {
+  addMessage,
+  getConversation,
+  getMessageById,
+  updateMessageContent,
+} from "../persistence/conversation-crud.js";
+import { ASSISTANT_INITIATED_SOURCE } from "../persistence/conversation-types.js";
+import { publishConversationMessagesChanged } from "../runtime/sync/resource-sync-events.js";
+import { getLogger } from "../util/logger.js";
+import { isPlainObject } from "../util/object.js";
+import { normalizeTitle, stripMarkdown } from "../util/short-title.js";
+import { isConversationSeedSane } from "./conversation-seed-composer.js";
+import { deriveTitle } from "./copy-composer.js";
+import {
+  buildPendingGuardianProjection,
+  guardianFeedItemId,
+  isGuardianRequestSignalEvent,
+  receiptGuardianFeedItemIfRequestTerminal,
+} from "./guardian-feed-projection.js";
+import { signalMirrorsToHomeFeed } from "./home-feed-mirror.js";
+import { readPayloadString } from "./notification-utils.js";
+import type { NotificationSignal } from "./signal.js";
+import type {
+  NotificationDecision,
+  NotificationDeliveryResult,
+  RenderedChannelCopy,
+} from "./types.js";
+
+const log = getLogger("home-feed-side-effect");
+
+/**
+ * Metadata key holding the id of the conversation message this module wrote
+ * for a card.
+ *
+ * Only cards holding a row no delivery adapter will rewrite carry it, and it
+ * is the handle `updateFeedItemConversationMessage` rewrites on an edit.
+ * `metadata` is a free-form record on the wire, so this stays a daemon-side
+ * convention and needs no schema field, the same way `scheduleId` rides along
+ * below.
+ *
+ * Reserved: producer `contextPayload` also lands in `metadata`, so the key is
+ * stripped from it before this module writes its own. A producer able to set
+ * it would otherwise hand an edit an arbitrary message id to overwrite.
+ */
+const CONVERSATION_MESSAGE_ID_KEY = "notificationConversationMessageId";
+
+/**
+ * Payload key a skill-update receipt carries its entries under. Read here
+ * through the wire schema and mapped onto the item's typed `updates`, so the
+ * panel the client opens is decided by the shape, never by copy.
+ */
+const UPDATES_KEY = "updates";
+
+/**
+ * The receipt entries in `contextPayload`, when it carries a non-empty list
+ * that parses as the wire shape; otherwise undefined, and the item renders
+ * as an ordinary notification. A malformed list is dropped rather than
+ * mirrored, since a client would render whatever survived.
+ */
+function readUpdates(contextPayload: unknown): FeedItemUpdate[] | undefined {
+  if (!isPlainObject(contextPayload)) {
+    return undefined;
+  }
+  const parsed = feedItemUpdateSchema
+    .array()
+    .min(1)
+    .safeParse(contextPayload[UPDATES_KEY]);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * Append a `FeedItem` for the given notification signal when the
+ * filter criteria pass.
+ *
+ * `vellumDelivery` is this signal's vellum delivery outcome, and it settles
+ * two questions here.
+ *
+ * Its conversation is a navigation target standing in for a
+ * `signal.sourceContextId` that doesn't resolve to a real conversation row,
+ * so producers passing a sentinel (heartbeat startup, credential health,
+ * watcher emits, scheduler retries-exhausted) still render a "Go to Convo"
+ * button.
+ *
+ * It also settles which row backs the card and who rewrites it on an edit,
+ * which `resolveOwnedConversationMessageId` works through below.
+ *
+ * Returns the persisted `FeedItem`, or `null` if the signal does not
+ * qualify for home-feed mirroring (non-background origin AND no
+ * `isAsyncBackground` hint) or if schema validation fails.
+ */
+export async function writeHomeFeedItemForSignal(
+  signal: NotificationSignal,
+  decision: NotificationDecision,
+  vellumDelivery?: NotificationDeliveryResult,
+): Promise<FeedItem | null> {
+  const { mirror, sourceConversationId, sourceScheduleJobId } =
+    resolveHomeFeedMirror(signal, vellumDelivery?.conversationId);
+  if (!mirror) {
+    return null;
+  }
+
+  const renderedCopy =
+    decision.renderedCopy.vellum ??
+    firstSelectedRenderedCopy(decision.renderedCopy, decision.selectedChannels);
+  const payloadTitle =
+    readPayloadString(signal.contextPayload, "title") ??
+    readPayloadString(signal.contextPayload, "requestedTitle");
+  const payloadBody =
+    readPayloadString(signal.contextPayload, "body") ??
+    readPayloadString(signal.contextPayload, "requestedMessage");
+
+  // A receipt's summary is the producer's own list of what changed, which
+  // the panel renders from the typed entries and a client without the panel
+  // reads as-is. Model copy is not allowed to rewrite it: a paraphrase can
+  // drop an entry, and the list is the receipt's whole point.
+  const updates = readUpdates(signal.contextPayload);
+
+  // Prefer conversationSeedMessage over body for the home feed: the seed
+  // message is richer and may contain structured markdown (lists, headers,
+  // bold) that the detail panel renders. The popup-oriented `body` is
+  // intentionally short (≤ 2 sentences) and loses formatting.
+  const seedCandidate = renderedCopy?.conversationSeedMessage;
+  const resolvedSummary =
+    (updates ? payloadBody?.trim() : undefined) ||
+    (isConversationSeedSane(seedCandidate)
+      ? seedCandidate.trim()
+      : undefined) ||
+    renderedCopy?.body?.trim() ||
+    payloadBody?.trim() ||
+    // Guardian requests must never be dropped for missing copy: the
+    // producer's questionText (or, for access requests, the triggering
+    // message preview) is already the human-readable ask.
+    (isGuardianRequestSignalEvent(signal.sourceEventName)
+      ? (readPayloadString(signal.contextPayload, "questionText")?.trim() ??
+        readPayloadString(signal.contextPayload, "messagePreview")?.trim() ??
+        "")
+      : "");
+  if (!resolvedSummary) {
+    log.warn(
+      { signalId: signal.signalId, sourceEventName: signal.sourceEventName },
+      "Home-feed write skipped: no summary available (would have fallen back to event name)",
+    );
+    return null;
+  }
+
+  // Title order: payload, then the rendered copy, then a headline derived
+  // from the summary. `normalizeTitle` returns "" for empty, prose-shaped, and
+  // meta-failure candidates; the derivation always yields something, so every
+  // feed item lands with a title.
+  const resolvedTitle =
+    normalizeTitle(payloadTitle ?? "") ||
+    normalizeTitle(renderedCopy?.title ?? "") ||
+    deriveFallbackTitle(resolvedSummary);
+
+  const urgency = signal.attentionHints.urgency;
+  const now = new Date().toISOString();
+
+  const category = deriveCategory(signal);
+  const panelKind = updates ? "updatesList" : deriveDetailPanelKind(signal);
+
+  const baseMetadata =
+    signal.contextPayload &&
+    typeof signal.contextPayload === "object" &&
+    !Array.isArray(signal.contextPayload)
+      ? { ...signal.contextPayload }
+      : undefined;
+  // Producer payloads reach the card verbatim, and this key addresses a
+  // message row for rewriting, so only this module may set it.
+  delete baseMetadata?.[CONVERSATION_MESSAGE_ID_KEY];
+  // The entries ride on the item as its typed `updates`, not in the
+  // free-form bag, so a client reads them from one place.
+  delete baseMetadata?.[UPDATES_KEY];
+
+  // Link scheduled-run notifications back to their schedule. `notify`-mode
+  // jobs put `scheduleId` directly in the context payload; `execute`-mode (and
+  // other agent-backed) jobs only tag their conversation, so fall back to the
+  // source conversation's `scheduleJobId`.
+  const scheduleId =
+    readPayloadString(signal.contextPayload, "scheduleId") ??
+    sourceScheduleJobId ??
+    undefined;
+
+  const metadata =
+    scheduleId !== undefined
+      ? { ...(baseMetadata ?? {}), scheduleId }
+      : baseMetadata;
+
+  // A guardian request's item is keyed by the request rather than the
+  // signal, so the feed's replace-in-place merge keeps exactly one
+  // canonical "Needs attention" item per request across re-emits and
+  // the terminal-status receipt rewrite.
+  const guardianProjection = isGuardianRequestSignalEvent(
+    signal.sourceEventName,
+  )
+    ? buildPendingGuardianProjection(
+        signal.contextPayload,
+        signal.sourceEventName === "ingress.access_request"
+          ? "access_request"
+          : undefined,
+      )
+    : null;
+
+  const item: FeedItem = {
+    id: guardianProjection
+      ? guardianFeedItemId(guardianProjection.requestId)
+      : `notif:${signal.signalId}`,
+    type: "notification",
+    priority: 50,
+    title: resolvedTitle,
+    summary: resolvedSummary,
+    timestamp: now,
+    createdAt: now,
+    status: "new",
+    ...(category ? { category } : {}),
+    noteworthy: deriveNoteworthy(signal),
+    fromAssistant: signal.sourceChannel === "assistant_tool",
+    ...(guardianProjection ? { guardianRequest: guardianProjection } : {}),
+    ...(urgency ? { urgency } : {}),
+    ...(sourceConversationId ? { conversationId: sourceConversationId } : {}),
+    ...(panelKind ? { detailPanel: { kind: panelKind } } : {}),
+    ...(updates ? { updates } : {}),
+    ...(metadata ? { metadata } : {}),
+  };
+
+  try {
+    feedItemSchema.parse(item);
+  } catch (err) {
+    log.warn(
+      { err, signalId: signal.signalId },
+      "FeedItem failed schema validation; skipping home-feed write",
+    );
+    return null;
+  }
+
+  // Resolved once the card is known to be writable, since the only reason to
+  // put a notification body in a conversation is that a card sends the user
+  // there. Validating first keeps the one rejection this function controls
+  // from leaving a message behind with no card to explain it. The id joins
+  // free-form metadata, which no schema rule can turn away.
+  const conversationMessageId = await resolveOwnedConversationMessageId(
+    signal,
+    vellumDelivery,
+    sourceConversationId,
+    resolvedSummary,
+  );
+  const card: FeedItem = conversationMessageId
+    ? {
+        ...item,
+        metadata: {
+          ...(item.metadata ?? {}),
+          [CONVERSATION_MESSAGE_ID_KEY]: conversationMessageId,
+        },
+      }
+    : item;
+
+  await appendFeedItem(card);
+
+  // Converge the write-vs-resolve race: a request decided while this
+  // write was in flight already ran its receipt fan-out against an item
+  // that did not exist yet. Mirrors the delivery recorder's
+  // `withdrawIfRequestAlreadyTerminal`.
+  if (guardianProjection) {
+    await receiptGuardianFeedItemIfRequestTerminal(
+      guardianProjection.requestId,
+    );
+  }
+  return card;
+}
+
+/**
+ * Resolve the conversation row backing this card, writing one if the card
+ * would otherwise have no body in the conversation it opens.
+ *
+ * The card records the row whoever wrote it, rather than only the rows it
+ * expects an edit to miss. Whether a delivery adapter will actually rewrite a
+ * row is a property of the durable delivery state at edit time, which a
+ * dispatch result cannot predict: a send can succeed and lose its status
+ * write, leaving a row that reads pending. `editNotification` settles that
+ * question by rewriting through the card only when the delivery walk did not.
+ *
+ * A vellum delivery that paired a conversation already wrote the body there,
+ * so its row is the one to record. Guardian producers pair a fresh
+ * conversation instead of the one the card opens, and their row is left
+ * unrecorded: a handle has to address the conversation behind the button, and
+ * `updateFeedItemConversationMessage` refuses anything else.
+ */
+async function resolveOwnedConversationMessageId(
+  signal: NotificationSignal,
+  vellumDelivery: NotificationDeliveryResult | undefined,
+  sourceConversationId: string | undefined,
+  summary: string,
+): Promise<string | undefined> {
+  // The completed reply is already the source conversation's canonical row.
+  // This signal's body is a compact push preview, not conversation content.
+  if (signal.sourceEventName === "chat.assistant_reply") {
+    return undefined;
+  }
+  if (vellumDelivery?.conversationId) {
+    return vellumDelivery.conversationId === sourceConversationId
+      ? vellumDelivery.messageId
+      : undefined;
+  }
+  if (!sourceConversationId) {
+    return undefined;
+  }
+  return appendSummaryToFeedTarget(signal, sourceConversationId, summary);
+}
+
+/**
+ * Write the card's own summary into the conversation its "Go to Convo"
+ * button opens, returning the id of the row written.
+ *
+ * That button targets the producing conversation whatever the routing, but
+ * only the vellum delivery writes a notification body into a conversation
+ * (`pairDeliveryWithConversation` appends there for passive signals). A
+ * signal the decision engine routes to Slack or Telegram alone pairs no
+ * vellum conversation, so without this the button opens a conversation that
+ * never received what the card shows. A paired vellum id means that write
+ * already happened, and this is skipped.
+ *
+ * The caller has already read `sourceConversationId` back from the store to
+ * gate the mirror, so the row is known to exist and needs no second lookup:
+ * with no paired id to fall back on, a resolved target can only be the
+ * producing conversation itself.
+ *
+ * Indexing is skipped for parity with the other notification write paths:
+ * notification copy is delivery audit, not conversational memory. Failures
+ * are logged rather than thrown, so a conversation write cannot cost the
+ * user a card; the card just goes out without a rewritable row.
+ */
+async function appendSummaryToFeedTarget(
+  signal: NotificationSignal,
+  conversationId: string,
+  summary: string,
+): Promise<string | undefined> {
+  try {
+    const message = await addMessage(conversationId, "assistant", summary, {
+      skipIndexing: true,
+      // The body is bookkeeping about the conversation, not activity in it:
+      // a receipt for work the conversation already saw must not bounce a
+      // chat the user just marked Done back into the sidebar.
+      skipResurface: true,
+    });
+    publishConversationMessagesChanged(conversationId);
+    log.info(
+      {
+        signalId: signal.signalId,
+        conversationId,
+        messageId: message.id,
+      },
+      "Appended notification body to the feed item's conversation",
+    );
+    return message.id;
+  } catch (err) {
+    log.warn(
+      { err, signalId: signal.signalId, conversationId },
+      "Failed to append notification body to the feed item's conversation",
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Rewrite the conversation message behind a card, keeping an edited card and
+ * the conversation it opens in step.
+ *
+ * Notification edits reach conversation content through the delivery rows the
+ * broadcaster recorded, which is how the vellum adapter rewrites the row its
+ * pairing wrote. That walk covers a row only while its delivery reads sent, so
+ * this is the backstop for every way it can miss one: a delivery that failed,
+ * a row that was never recorded, a signal with no deliveries at all, and a
+ * send whose status write was lost after the message went out.
+ *
+ * `alreadyRewritten` carries the message ids the delivery walk reported
+ * rewriting, so the common case where the adapter got there first costs
+ * nothing and no row is written twice.
+ *
+ * The row holds the body, and the feed rewrites its summary only when the
+ * patch carries one, so the caller applies this for body edits alone.
+ *
+ * Never throws. It runs last, after the feed patch and the channel updates
+ * have landed, so anything it cannot do is reported as "no rewrite" rather
+ * than failing an edit that has already partly applied. Returns whether a row
+ * was rewritten.
+ */
+export function updateFeedItemConversationMessage(
+  item: FeedItem,
+  body: string,
+  alreadyRewritten?: ReadonlySet<string>,
+): boolean {
+  const messageId = item.metadata?.[CONVERSATION_MESSAGE_ID_KEY];
+  if (typeof messageId !== "string" || messageId.length === 0) {
+    return false;
+  }
+  if (alreadyRewritten?.has(messageId)) {
+    return false;
+  }
+  try {
+    // Scoped to the card's own conversation so the handle can only ever
+    // address a row inside what the card opens, whatever put it in the
+    // metadata. Guarded with the write: a store that cannot answer the
+    // question is not grounds for failing an edit already applied to the feed
+    // and the channels.
+    if (
+      !item.conversationId ||
+      !getMessageById(messageId, item.conversationId)
+    ) {
+      log.warn(
+        { feedItemId: item.id, messageId },
+        "Feed item message handle does not address a row in its conversation, leaving it alone",
+      );
+      return false;
+    }
+    updateMessageContent(messageId, body);
+    publishConversationMessagesChanged(item.conversationId);
+    log.info(
+      { feedItemId: item.id, messageId },
+      "Rewrote the conversation message behind an edited feed item",
+    );
+    return true;
+  } catch (err) {
+    log.error(
+      { err, feedItemId: item.id, messageId },
+      "Failed to rewrite the conversation message behind an edited feed item",
+    );
+    return false;
+  }
+}
+
+/**
+ * Derive the terminal fallback headline from the summary.
+ *
+ * The summary is preferentially a conversation seed, which carries structured
+ * markdown and hard line breaks, so flatten it to plain single-line text
+ * before slicing a headline off the front. A non-empty summary always yields a
+ * non-empty title.
+ */
+function deriveFallbackTitle(summary: string): string {
+  // Block markers are line-anchored, so they have to go before the whitespace
+  // collapse, and before `stripMarkdown` (whose inline-code rule would chew a
+  // fence into a stray backtick). Ordered markers matter most: the seed prompt
+  // asks the model for numbered lists, and a leading `1.` also reads as a
+  // sentence terminator, which would truncate the title to the first digit.
+  //
+  // Deliberately regex-based, unlike the remark-backed
+  // `stripMarkdownForPreview`. The leading-space allowance and rule set mirror
+  // `flattenToPlainText` in workspace migration 138, which must stay
+  // self-contained and so cannot share code with either: a backfilled title and
+  // a freshly written one have to match, which a parser swap would break.
+  const deblocked = summary
+    .replace(/^\s{0,3}(?:```|~~~).*$/gm, "")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s{0,3}>\s?/gm, "")
+    .replace(/^\s{0,3}(?:[-*+]|\d+[.)])\s+/gm, "");
+  const plain = flattenWhitespace(stripMarkdown(deblocked));
+  return deriveTitle(plain || flattenWhitespace(summary));
+}
+
+/** Collapse whitespace runs, including hard line breaks, into single spaces. */
+function flattenWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+// ── Category & detail-panel derivation ────────────────────────────────
+
+const EVENT_CATEGORY_MAP: Record<string, FeedItemCategory> = {
+  "credential.health_alert": "security",
+  "activity.failed": "background",
+  "activity.complete": "background",
+  "watcher.notification": "system",
+  "schedule.notify": "scheduling",
+  "schedule.result": "scheduling",
+  "guardian.question": "security",
+  "guardian.channel_activation": "security",
+  "ingress.access_request": "security",
+  "telegram.webhook_health_alert": "system",
+};
+
+/**
+ * Map a signal's source event to a feed category, or nothing when the event
+ * has no entry. An unmapped event, such as a deliberate assistant
+ * notification (`assistant.share`), carries no category rather than a
+ * catch-all bucket named for our architecture: readers that filter by
+ * category skip it, and nothing has to guess.
+ */
+function deriveCategory(
+  signal: NotificationSignal,
+): FeedItemCategory | undefined {
+  return EVENT_CATEGORY_MAP[signal.sourceEventName];
+}
+
+function deriveDetailPanelKind(
+  signal: NotificationSignal,
+): FeedItemDetailPanelKind | undefined {
+  if (signal.sourceEventName === "credential.health_alert") {
+    return "toolPermission";
+  }
+
+  // Every guardian request opens the permission-style panel: the client
+  // dispatches the guardian card off the item's `guardianRequest`
+  // projection, and the panel kind keeps pre-projection clients (and
+  // bucket-fallback derivations) treating the row as an approval.
+  if (isGuardianRequestSignalEvent(signal.sourceEventName)) {
+    return "permissionChat";
+  }
+
+  return undefined;
+}
+
+/**
+ * The lookup is best-effort and unified: a single `getConversation` call
+ * both gates the "background conversation" mirror branch and populates
+ * `sourceConversationId` for the "Go to Thread" navigation target. Misses
+ * (scheduler job ids, watcher event ids, CLI tool-call ids) leave
+ * `sourceConversationId` undefined so the client hides the affordance.
+ *
+ * Recipient-owned completions are excluded by `signalMirrorsToHomeFeed`.
+ * Other `assistant_tool` signals mirror because the documented
+ * `notifications send` skill (and background-job failure emits) deliberately
+ * does not require a background-typed conversation or the
+ * `isAsyncBackground` hint. `chat.assistant_reply` also mirrors: it is the
+ * durable in-app record for the push sent after a user leaves a chat, while
+ * retaining the normal interactive conversation as its navigation target.
+ *
+ * A delivery that materialized an assistant-initiated thread never mirrors.
+ * Under the `assistant-initiated-threads` flag, `conversation-pairing.ts`
+ * promotes a background `assistant.share` into a standard conversation
+ * stamped {@link ASSISTANT_INITIATED_SOURCE}, and that thread's row in the
+ * sidebar's assistant section is the share's one surface. Mirroring it here
+ * as well put the same share in the bell a second time, labeled by its
+ * source channel ("Heartbeat"). The check reads the paired conversation's
+ * `source` rather than re-deriving the promotion rule, so it holds however
+ * that rule narrows or widens. Guardian requests are checked first on
+ * purpose: the bell is their canonical home whatever conversation they pair
+ * with.
+ */
+function resolveHomeFeedMirror(
+  signal: NotificationSignal,
+  fallbackConversationId?: string,
+): {
+  mirror: boolean;
+  sourceConversationId?: string;
+  sourceScheduleJobId?: string;
+} {
+  let sourceRow: {
+    conversationType?: string;
+    scheduleJobId?: string | null;
+  } | null = null;
+  const conversationId = signal.sourceContextId;
+  if (conversationId) {
+    try {
+      sourceRow = getConversation(conversationId) ?? null;
+    } catch {
+      sourceRow = null;
+    }
+  }
+  // Link to the producing conversation when it exists.
+  // Signals with non-conversation source IDs use the paired delivery.
+  const sourceConversationId = sourceRow
+    ? conversationId
+    : fallbackConversationId;
+  const sourceScheduleJobId = sourceRow?.scheduleJobId ?? undefined;
+
+  // Guardian requests always project into the feed: the "Needs
+  // attention" item is the request's canonical home, and the request
+  // blocks on the guardian whatever kind of conversation raised it.
+  if (isGuardianRequestSignalEvent(signal.sourceEventName)) {
+    return { mirror: true, sourceConversationId, sourceScheduleJobId };
+  }
+  if (isAssistantInitiatedThreadDelivery(fallbackConversationId)) {
+    return { mirror: false };
+  }
+  if (signalMirrorsToHomeFeed(signal, sourceRow?.conversationType)) {
+    return { mirror: true, sourceConversationId, sourceScheduleJobId };
+  }
+  return { mirror: false };
+}
+
+/**
+ * Whether the vellum delivery this signal produced landed in a thread the
+ * sidebar's assistant section already shows.
+ *
+ * Best-effort like the source lookup above: a missing id, a missing row, or
+ * a lookup failure all read as "not an assistant thread", so a storage
+ * hiccup degrades to the pre-existing behavior (a bell row) rather than
+ * dropping the notification everywhere.
+ */
+function isAssistantInitiatedThreadDelivery(
+  deliveryConversationId: string | undefined,
+): boolean {
+  if (!deliveryConversationId) {
+    return false;
+  }
+  try {
+    return (
+      getConversation(deliveryConversationId)?.source ===
+      ASSISTANT_INITIATED_SOURCE
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Routing-intent enforcement can prune `selectedChannels` without also
+ * pruning `renderedCopy`, so iterating `renderedCopy` directly risks
+ * surfacing copy for a channel that was never delivered. Walk
+ * `selectedChannels` in order instead so the channel that actually shipped
+ * wins.
+ */
+function firstSelectedRenderedCopy(
+  renderedCopy: NotificationDecision["renderedCopy"],
+  selectedChannels: NotificationDecision["selectedChannels"],
+): RenderedChannelCopy | undefined {
+  for (const channel of selectedChannels) {
+    const copy = renderedCopy[channel];
+    if (copy && (copy.title?.trim() || copy.body?.trim())) {
+      return copy;
+    }
+  }
+  return undefined;
+}
+
+// ── Noteworthy derivation ─────────────────────────────────────────────
+//
+// Clients split the feed into inbox-style (noteworthy) and activity-style
+// (routine) surfaces. Assistant-initiated shares and a small allow-list of
+// high-importance system events land in the inbox; routine background
+// signals stay in activity.
+
+const NOTEWORTHY_EVENT_NAMES: ReadonlySet<string> = new Set([
+  "guardian.question",
+  "guardian.channel_activation",
+  "ingress.access_request",
+  "credential.health_alert",
+  // A dark messaging channel is inbox-worthy: the guardian may be waiting on
+  // replies that are silently queueing at Telegram.
+  "telegram.webhook_health_alert",
+]);
+
+function deriveNoteworthy(signal: NotificationSignal): boolean {
+  // Background-job failures emit with `sourceChannel: "assistant_tool"`
+  // (see `runtime/background-job-runner.ts`), so the activity.failed rule
+  // must run BEFORE the assistant_tool short-circuit — otherwise every
+  // routine watcher/heartbeat failure would land in the Inbox instead of
+  // staying in the activity feed.
+  if (signal.sourceEventName === "activity.failed") {
+    return signal.attentionHints.urgency === "critical";
+  }
+  if (signal.sourceChannel === "assistant_tool") {
+    return true;
+  }
+  if (NOTEWORTHY_EVENT_NAMES.has(signal.sourceEventName)) {
+    return true;
+  }
+  return false;
+}

@@ -1,0 +1,210 @@
+/**
+ * Memory v3 — synthetic capability rows (skills + `assistant` CLI commands).
+ *
+ * The assistant's invokable capabilities — installed/catalog skills and
+ * top-level CLI subcommands — are seeded as synthetic concept-collection rows
+ * (`skills/<id>`, `cli-commands/<name>`). The section-lane retrieval pipeline
+ * surfaces the relevant ones per turn, same as concept pages.
+ *
+ * Capability slugs have two render forms with different budgets:
+ *  - the INJECTION form ({@link renderCapabilityContent}) — what surfaces put
+ *    in front of the model. Skills render their capability statement (already
+ *    description-sized); CLI commands render a one-line summary with a
+ *    `--help` pointer, never their full help.
+ *  - the INDEX form ({@link renderCapabilityBody}) — the full `content`
+ *    (for CLI commands, the complete help text). It feeds the section index
+ *    and dense/needle lanes, where flag descriptions and examples are what
+ *    make a command semantically findable.
+ */
+
+import {
+  isCliCommandSlug,
+  isSkillSlug,
+} from "../substrate/capability-slugs.js";
+import { buildCliCommandSummary } from "../substrate/cli-command-content.js";
+import { getCliCommandCapability } from "../substrate/cli-command-store.js";
+import {
+  CLI_COMMAND_HEADER_PREFIX,
+  escapeInjectedBody,
+  SKILL_HEADER_PREFIX,
+} from "../substrate/injected-block-slugs.js";
+import { getSkillCapability } from "../substrate/skill-store.js";
+import {
+  type Section,
+  sectionKey,
+  type SectionRef,
+  type SelectedPage,
+  type Slug,
+} from "./types.js";
+
+/** True iff the slug is a synthetic skill or CLI-command capability row. */
+export function isCapabilitySlug(slug: Slug): boolean {
+  return isSkillSlug(slug) || isCliCommandSlug(slug);
+}
+
+/**
+ * The section-store key a selected page injects under: a capability slug
+ * always injects its whole capability content (`""`), a page with a matched
+ * section injects that section under its {@link sectionKey}, and a page
+ * selected without a match injects its lead (`""`).
+ */
+function injectionSectionKey(slug: Slug, section: Section | undefined): string {
+  if (isCapabilitySlug(slug) || !section) {
+    return "";
+  }
+  return sectionKey(section);
+}
+
+/** One injection unit of a selection: the page, the unit's section-store
+ *  key, and the matched section it renders (`undefined` for the lead and
+ *  for capability content). */
+export interface InjectionUnit extends SectionRef {
+  matched: Section | undefined;
+}
+
+/**
+ * The injection units of a turn's selections, in selection order: one per
+ * selected section, or one lead unit for a page selected with none, deduped
+ * by `(slug, key)` (a capability page's sections all inject as its whole
+ * content under the empty key, so it is one unit however many were
+ * selected). Shared by the injector (what to render or point at, against
+ * the section store) and the selection telemetry (`net_new_count`), so the
+ * two agree on what a turn injects.
+ */
+export function injectionUnits(selections: SelectedPage[]): InjectionUnit[] {
+  const units: InjectionUnit[] = [];
+  const seen = new Map<Slug, Set<string>>();
+  for (const { slug, sections } of selections) {
+    for (const matched of sections.length > 0 ? sections : [undefined]) {
+      const key = injectionSectionKey(slug, matched);
+      const keys = seen.get(slug) ?? new Set<string>();
+      if (keys.has(key)) {
+        continue;
+      }
+      keys.add(key);
+      seen.set(slug, keys);
+      units.push({ slug, key, matched });
+    }
+  }
+  return units;
+}
+
+interface SkillCapabilityEntry {
+  id: string;
+  content: string;
+}
+
+interface CliCapabilityEntry {
+  id: string;
+  description: string;
+  content: string;
+}
+
+export interface CapabilityResolvers {
+  skill: (idOrSlug: string) => SkillCapabilityEntry | null;
+  cli: (idOrSlug: string) => CliCapabilityEntry | null;
+}
+
+const defaultResolvers: CapabilityResolvers = {
+  skill: getSkillCapability,
+  cli: getCliCommandCapability,
+};
+
+/** The body text each render form places under a capability's header. */
+interface CapabilityBodies {
+  skill: (entry: SkillCapabilityEntry) => string;
+  cli: (entry: CliCapabilityEntry) => string;
+}
+
+/**
+ * Shared dispatch for the two render forms. Returns:
+ *  - the rendered block when the slug is a capability slug and resolves;
+ *  - `""` when it is a capability slug but the cache has no entry (degrade to a
+ *    blank section rather than throwing or falling through to an on-disk read
+ *    that would also miss);
+ *  - `null` when the slug is NOT a capability slug, so the caller falls through
+ *    to its normal on-disk page rendering.
+ */
+function renderCapability(
+  slug: Slug,
+  resolvers: CapabilityResolvers,
+  body: CapabilityBodies,
+): string | null {
+  if (isSkillSlug(slug)) {
+    const entry = resolvers.skill(slug);
+    return entry
+      ? `${SKILL_HEADER_PREFIX}${entry.id}\n${body.skill(entry)}`
+      : "";
+  }
+  if (isCliCommandSlug(slug)) {
+    const entry = resolvers.cli(slug);
+    return entry
+      ? `${CLI_COMMAND_HEADER_PREFIX}${entry.id}\n${body.cli(entry)}`
+      : "";
+  }
+  return null;
+}
+
+/**
+ * Render a synthetic skill/CLI slug's INJECTION form for the live `<memory>`
+ * block (and the graph node detail / inspector renders), mirroring the
+ * injected section renderer's `# header\n<content>` shape. CLI commands
+ * render {@link buildCliCommandSummary} — description plus a `--help`
+ * pointer — NOT their full help: the model fetches full usage itself, and a
+ * turn can select dozens of commands, so per-entry cost dominates the block.
+ * The body passes through `escapeInjectedBody`, so a line of capability text
+ * can never read as an injected-block chunk boundary.
+ * Return contract (block / `""` / `null`) is {@link renderCapability}'s.
+ *
+ * `resolvers` is injectable for tests; production uses the substrate caches.
+ */
+export function renderCapabilityContent(
+  slug: Slug,
+  resolvers: CapabilityResolvers = defaultResolvers,
+): string | null {
+  return renderCapability(slug, resolvers, {
+    skill: (entry) => escapeInjectedBody(entry.content),
+    cli: (entry) =>
+      escapeInjectedBody(buildCliCommandSummary(entry.id, entry.description)),
+  });
+}
+
+/**
+ * Render a synthetic skill/CLI slug's INDEX form: the full capability
+ * `content` (for CLI commands, the complete help text) under the same header
+ * as the injection form. This is the body the section index, needle/dense
+ * lanes, and section-embedding backfill see — retrieval keeps the full help
+ * for findability even though injection renders only the summary.
+ * Return contract (block / `""` / `null`) is {@link renderCapability}'s.
+ */
+export function renderCapabilityBody(
+  slug: Slug,
+  resolvers: CapabilityResolvers = defaultResolvers,
+): string | null {
+  return renderCapability(slug, resolvers, {
+    skill: (entry) => entry.content,
+    cli: (entry) => entry.content,
+  });
+}
+
+/**
+ * Resolve a slug's frontmatter-stripped body for the section index: synthetic
+ * skill/CLI capability slugs have no on-disk page, so they contribute their
+ * full INDEX-form capability content ({@link renderCapabilityBody}), while
+ * real pages fall through to `readDiskBody`. Shared by `initLanes`'
+ * `pageBody` and the full-backfill body reader so the capability-or-disk
+ * dispatch lives in one place.
+ *
+ * `readDiskBody` is injected (rather than imported) so this helper does not
+ * pull the page store into `capabilities.ts` — each caller supplies its own
+ * cached or direct disk reader.
+ */
+export async function capabilityOrDiskBody(
+  slug: Slug,
+  readDiskBody: (slug: Slug) => Promise<string>,
+): Promise<string> {
+  if (isCapabilitySlug(slug)) {
+    return renderCapabilityBody(slug) ?? "";
+  }
+  return readDiskBody(slug);
+}

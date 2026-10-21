@@ -1,0 +1,830 @@
+/**
+ * In-process pub/sub hub for assistant events.
+ *
+ * Provides subscribe / publish primitives used by the daemon send paths
+ * and the SSE route.
+ *
+ * Subscribers are typed via a discriminated union:
+ *   - **ClientEntry** — an SSE-connected client (macos, chrome-extension, …)
+ *     with identity, capabilities, and timestamps.
+ *   - **ProcessEntry** — an in-process consumer (future: file-append logger).
+ *
+ * Client-oriented queries (list, find-by-capability) are methods on the hub.
+ */
+
+import {
+  DESKTOP_PRESENCE_STATES,
+  type DesktopPresenceState,
+} from "@vellumai/service-contracts/desktop-presence";
+
+import type { AssistantEvent } from "../api/index.js";
+import type { HostProxyCapability, InterfaceId } from "../channels/types.js";
+
+export { DESKTOP_PRESENCE_STATES, type DesktopPresenceState };
+
+// ---------------------------------------------------------------------------
+// Message type → capability inference
+// ---------------------------------------------------------------------------
+
+const HOST_PREFIX_TO_CAPABILITY: Record<string, HostProxyCapability> = {
+  host_bash: "host_bash",
+  host_file: "host_file",
+  host_transfer: "host_file", // transfers piggyback on host_file capability
+  host_cu: "host_cu",
+  host_browser: "host_browser",
+  host_app_control: "host_app_control",
+  host_ui_snapshot: "host_ui_snapshot",
+};
+
+/**
+ * Infer the {@link HostProxyCapability} a message should be targeted at based
+ * on its `type` field.  Returns `undefined` for message types that are not
+ * host-proxy messages (i.e. they should broadcast to all subscribers).
+ */
+export function capabilityForMessageType(
+  type: string,
+): HostProxyCapability | undefined {
+  const stem = type.replace(/_(request|cancel)$/, "");
+  return HOST_PREFIX_TO_CAPABILITY[stem];
+}
+import type { AssistantEventEnvelope } from "../api/index.js";
+import { forwardEventPublishToDaemon } from "../ipc/events-publish-client.js";
+import {
+  type ClientConnectionEventReason,
+  recordClientConnectionEvent,
+} from "../persistence/client-connection-events-store.js";
+import { appendEventToStream } from "../signals/event-stream.js";
+import { getLogger } from "../util/logger.js";
+import { buildAssistantEvent } from "./assistant-event.js";
+import type { AssistantEventPublishOptions } from "./assistant-event-publish-options.js";
+import { matchesTargeting } from "./assistant-event-targeting.js";
+import { stampAndBuffer } from "./assistant-stream-state.js";
+import { isMainDaemonProcess } from "./process-role.js";
+
+const log = getLogger("assistant-event-hub");
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/** Filter that determines which events a subscriber receives. */
+export type AssistantEventFilter = {
+  /** When set, restrict delivery to events for this conversation. */
+  conversationId?: string;
+};
+
+export type AssistantEventCallback = (
+  event: AssistantEventEnvelope,
+) => void | Promise<void>;
+
+/** Opaque handle returned by `subscribe`. Call `dispose()` to remove the subscription. */
+export interface AssistantEventSubscription {
+  dispose(reason?: ClientConnectionEventReason): void;
+  /** True until `dispose()` has been called. */
+  readonly active: boolean;
+  /**
+   * Per-connection identifier, unique within the hub instance. Distinguishes
+   * connections that share a `clientId` (e.g. an old connection and the new
+   * one that replaced it on reconnect) so subscribe / dispose / shed log
+   * lines can be attributed to a specific connection.
+   */
+  readonly connectionId: string;
+}
+
+// ── Subscriber entries (discriminated union) ─────────────────────────────────
+
+interface BaseSubscriberEntry {
+  filter: AssistantEventFilter;
+  callback: AssistantEventCallback;
+  active: boolean;
+  onEvict: () => void;
+  connectedAt: Date;
+  lastActiveAt: Date;
+  /**
+   * Per-connection identifier, unique within the hub instance. Two entries
+   * with the same `clientId` (old vs reconnected connection) get distinct
+   * connection ids, making them traceable across subscribe / dispose / shed
+   * logs.
+   */
+  connectionId: string;
+}
+
+export interface ClientPresence {
+  state: DesktopPresenceState;
+  /** When the daemon last heard from the client. Drives staleness. */
+  reportedAt: Date;
+}
+
+/**
+ * Web tab visibility and conversation focus, as reported by a `web`-interface
+ * client (a browser tab or the Electron renderer). Distinct from
+ * {@link ClientPresence}: scoped to a single conversation rather than app-wide
+ * attendance, and reported by the shared web renderer rather than the macOS
+ * host-proxy bridge. See `runtime/web-presence.ts` for the read-side policy.
+ */
+export interface WebPresenceReport {
+  visible: boolean;
+  /** The conversation currently focused (chat composer on screen), or `null`. */
+  focusedConversationId: string | null;
+}
+
+export interface ClientWebPresence extends WebPresenceReport {
+  /** When the daemon last heard from the client. Drives staleness. */
+  reportedAt: Date;
+}
+
+interface ClientEntry extends BaseSubscriberEntry {
+  type: "client";
+  clientId: string;
+  interfaceId: InterfaceId;
+  capabilities: HostProxyCapability[];
+  machineName?: string;
+  /**
+   * The verified actor principal id (canonical user identity, parsed from JWT
+   * `sub`) of the user that opened this SSE connection, when available.
+   *
+   * Populated from `AuthContext.actorPrincipalId` at SSE subscription time.
+   * Used by host proxies to gate cross-client targeted execution to the same
+   * authenticated user identity. May be `undefined` for legacy or
+   * service-token connections that have no principal.
+   */
+  actorPrincipalId?: string;
+  /** Client-reported build version (e.g. extension manifest version). */
+  clientVersion?: string;
+  /** Whether the client advertised an SSE idle watchdog on this connection. */
+  sseWatchdog?: boolean;
+  /**
+   * Last desktop presence reported by this client, for clients that report it.
+   * In-memory only, so consumers must fail open when it is absent.
+   */
+  presence?: ClientPresence;
+  /**
+   * Last web tab visibility/focus reported by this client, for clients that
+   * report it. In-memory only, so consumers must fail open when it is absent.
+   */
+  webPresence?: ClientWebPresence;
+}
+
+interface ProcessEntry extends BaseSubscriberEntry {
+  type: "process";
+}
+
+type SubscriberEntry = ClientEntry | ProcessEntry;
+
+/** Distributive Omit that preserves union discrimination. */
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
+  ? Omit<T, K>
+  : never;
+
+/** Input shape for `subscribe()` — hub fills `active`, `connectedAt`, `lastActiveAt`, `connectionId` and defaults `filter`/`onEvict`. */
+type SubscriberInput = DistributiveOmit<
+  SubscriberEntry,
+  | "active"
+  | "connectedAt"
+  | "lastActiveAt"
+  | "filter"
+  | "onEvict"
+  | "connectionId"
+> & {
+  filter?: AssistantEventFilter;
+  onEvict?: () => void;
+};
+
+// ── Hub ───────────────────────────────────────────────────────────────────────
+
+/**
+ * Lightweight pub/sub hub for `AssistantEventEnvelope` messages.
+ *
+ * Filtering is applied at subscription level:
+ *   - `conversationId`: scoped events match subscribers with same conversationId
+ *     or no conversationId filter (broadcast to all).
+ *   - `targetCapability` (on publish): targeted events only reach subscribers
+ *     whose capabilities include the target. Untargeted events fan out to all.
+ *
+ * Client connections register as subscribers with metadata and are queryable
+ * via `listClients()`, `getMostRecentClientByCapability()`, etc.
+ */
+export type ClientConnectionRecorder = typeof recordClientConnectionEvent;
+
+export class AssistantEventHub {
+  private readonly subscribers = new Set<SubscriberEntry>();
+  private readonly maxSubscribers: number;
+  /** Monotonic source for per-connection ids, scoped to this hub. */
+  private connectionCounter = 0;
+  private readonly recordConnection: ClientConnectionRecorder;
+
+  constructor(options?: {
+    maxSubscribers?: number;
+    recordConnection?: ClientConnectionRecorder;
+  }) {
+    this.maxSubscribers = options?.maxSubscribers ?? Infinity;
+    this.recordConnection =
+      options?.recordConnection ?? recordClientConnectionEvent;
+  }
+
+  /**
+   * Register a subscriber that will be called for each matching event.
+   *
+   * **Client deduplication:** When a client subscriber is registered with a
+   * `clientId` that already exists, all stale entries for that clientId are
+   * disposed first. This prevents subscriber stacking when clients reconnect
+   * (e.g. Chrome extension reload, SSE token refresh) before the old
+   * connection's abort signal fires.
+   *
+   * When the subscriber cap (`maxSubscribers`) has been reached, the **oldest**
+   * subscriber is evicted to make room: its `onEvict` callback is invoked (so
+   * it can close its SSE stream) and its entry is removed from the hub.
+   */
+  subscribe(subscriber: SubscriberInput): AssistantEventSubscription {
+    // Deduplicate: dispose stale subscribers for the same clientId.
+    if (subscriber.type === "client") {
+      const stale: SubscriberEntry[] = [];
+      for (const existing of this.subscribers) {
+        if (
+          existing.type === "client" &&
+          existing.clientId === subscriber.clientId
+        ) {
+          stale.push(existing);
+        }
+      }
+      for (const entry of stale) {
+        entry.active = false;
+        this.subscribers.delete(entry);
+        this.recordClientLifecycle(entry, "stale_replaced");
+        try {
+          entry.onEvict();
+        } catch {
+          /* ignore eviction callback errors */
+        }
+      }
+      if (stale.length > 0) {
+        log.info(
+          {
+            clientId: subscriber.clientId,
+            count: stale.length,
+            disposedConnectionIds: stale.map((entry) => entry.connectionId),
+          },
+          "disposed stale subscribers for reconnecting client",
+        );
+      }
+    }
+
+    if (this.subscribers.size >= this.maxSubscribers) {
+      const [oldest] = this.subscribers;
+      if (!oldest) {
+        throw new RangeError(
+          `AssistantEventHub: subscriber cap reached (${this.maxSubscribers})`,
+        );
+      }
+      oldest.active = false;
+      this.subscribers.delete(oldest);
+      this.recordClientLifecycle(oldest, "cap_evicted");
+      try {
+        oldest.onEvict();
+      } catch {
+        /* ignore eviction callback errors */
+      }
+    }
+
+    const now = new Date();
+    const connectionId = `conn-${++this.connectionCounter}`;
+    const entry: SubscriberEntry = {
+      ...subscriber,
+      filter: subscriber.filter ?? {},
+      onEvict: subscriber.onEvict ?? (() => {}),
+      active: true,
+      connectedAt: now,
+      lastActiveAt: now,
+      connectionId,
+    } as SubscriberEntry;
+
+    if (entry.type === "client") {
+      log.info(
+        {
+          clientId: entry.clientId,
+          interfaceId: entry.interfaceId,
+          capabilities: entry.capabilities,
+          connectionId,
+        },
+        "subscriber registered (client)",
+      );
+      this.recordClientLifecycle(entry, "sse_open");
+    } else {
+      log.info({ connectionId }, "subscriber registered (process)");
+    }
+
+    this.subscribers.add(entry);
+
+    return {
+      dispose: (reason) => {
+        if (entry.active) {
+          entry.active = false;
+          this.subscribers.delete(entry);
+          if (entry.type === "client") {
+            this.recordClientLifecycle(entry, reason ?? "sse_close");
+            log.info(
+              {
+                clientId: entry.clientId,
+                interfaceId: entry.interfaceId,
+                connectionId,
+              },
+              "subscriber unregistered (client)",
+            );
+          } else {
+            log.info({ connectionId }, "subscriber unregistered (process)");
+          }
+        }
+      },
+      get active() {
+        return entry.active;
+      },
+      connectionId,
+    };
+  }
+
+  /**
+   * Publish an event to all matching subscribers.
+   *
+   * Matching rules:
+   * - the event's targeting (`excludeClientId`, `targetInterfaceId`,
+   *   `targetActorPrincipalId`, `targetClientId`, `targetCapability`) must
+   *   admit the subscriber, per {@link matchesTargeting}, the same check
+   *   replay applies
+   * - a subscriber's `filter.conversationId` must equal `event.conversationId`,
+   *   unless the event names a client with `targetClientId` (a web-origin
+   *   event's conversationId can differ from the conversation the targeted
+   *   macOS client subscribed to)
+   *
+   * Fanout is isolated: a throwing or rejecting subscriber does not abort
+   * delivery to remaining subscribers.
+   */
+  async publish(
+    event: AssistantEventEnvelope,
+    options?: AssistantEventPublishOptions,
+  ): Promise<void> {
+    // Only the main daemon owns the subscribers real clients connect to. In any
+    // other process (a sidecar worker, the route host) this hub has no SSE
+    // subscriber, so hand the event to the daemon — it republishes on the hub
+    // clients actually observe. Best-effort: a transport failure is logged, not
+    // thrown, and never blocks the caller.
+    if (!isMainDaemonProcess()) {
+      return forwardEventPublishToDaemon(event, options);
+    }
+    if (event.conversationId) {
+      try {
+        appendEventToStream(event.conversationId, event);
+      } catch {
+        // Best-effort; file I/O failures must not block subscriber fanout.
+      }
+    }
+
+    const snapshot = Array.from(this.subscribers);
+    const errors: unknown[] = [];
+
+    for (const entry of snapshot) {
+      if (!entry.active) {
+        continue;
+      }
+      if (!matchesTargeting(options, entry)) {
+        continue;
+      }
+      if (
+        options?.targetClientId == null &&
+        event.conversationId != null &&
+        entry.filter.conversationId != null &&
+        entry.filter.conversationId !== event.conversationId
+      ) {
+        continue;
+      }
+
+      try {
+        await entry.callback(event);
+      } catch (err) {
+        errors.push(err);
+      }
+    }
+
+    if (errors.length > 0) {
+      throw new AggregateError(
+        errors,
+        "One or more assistant-event subscribers threw",
+      );
+    }
+  }
+
+  /**
+   * Yield every active client entry with the given clientId. `subscribe`
+   * disposes any prior entries for the same clientId, so at most one entry
+   * matches.
+   */
+  private *activeClientEntries(clientId: string): Generator<ClientEntry> {
+    for (const entry of this.subscribers) {
+      if (
+        entry.active &&
+        entry.type === "client" &&
+        entry.clientId === clientId
+      ) {
+        yield entry;
+      }
+    }
+  }
+
+  /**
+   * Return the active client subscriber with the given clientId, or
+   * `undefined` if no such subscriber exists.
+   */
+  getClientById(clientId: string): ClientEntry | undefined {
+    for (const entry of this.activeClientEntries(clientId)) {
+      return entry;
+    }
+    return undefined;
+  }
+
+  /**
+   * Whether `connectionId` is still an active client subscription, optionally
+   * required to belong to `clientId`.
+   */
+  hasActiveClientConnection(
+    connectionId: string,
+    clientId?: string,
+  ): boolean {
+    for (const entry of this.subscribers) {
+      if (entry.connectionId !== connectionId) {
+        continue;
+      }
+      if (!entry.active || entry.type !== "client") {
+        return false;
+      }
+      if (clientId != null && entry.clientId !== clientId) {
+        return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Return the verified actor principal id captured at SSE subscription time
+   * for the given client, or `undefined` if the client is unknown or
+   * connected without a principal (e.g. legacy/service tokens).
+   *
+   * Used by host proxies to bind cross-client targeted execution to the same
+   * authenticated user identity that opened the target client's SSE stream.
+   */
+  getActorPrincipalIdForClient(clientId: string): string | undefined {
+    return this.getClientById(clientId)?.actorPrincipalId;
+  }
+
+  /**
+   * Whether the connection identified by `connectionId` is still an active
+   * client subscription that carries no `actorPrincipalId`.
+   *
+   * Drives the retrying SSE self-heal (`sse-actor-principal-heal.ts`): the loop
+   * re-checks before each attempt so it stops as soon as the connection closes,
+   * is replaced by a reconnect, or gets a principal from any path. Returns
+   * `false` for an unknown, inactive, or process-type connection.
+   */
+  needsActorPrincipalHeal(connectionId: string): boolean {
+    for (const entry of this.subscribers) {
+      if (entry.connectionId !== connectionId) {
+        continue;
+      }
+      return (
+        entry.active &&
+        entry.type === "client" &&
+        entry.actorPrincipalId == null
+      );
+    }
+    return false;
+  }
+
+  /**
+   * Fill a missing `actorPrincipalId` on a live client subscription.
+   *
+   * Used by the SSE dev-bypass self-heal: when the guardian-delivery cache is
+   * cold at subscribe time, the registration lands without a principal; the
+   * route resolves it async and patches the record here. Keyed by
+   * `connectionId` (not clientId) so a reconnect race cannot patch the
+   * subscription that replaced the one being healed. No-op when the
+   * connection is gone or already carries a principal: this only fills a
+   * missing value, never overwrites one. The value must come from the
+   * daemon's own server-side guardian lookup, never from client input.
+   */
+  fillClientActorPrincipalId(
+    connectionId: string,
+    actorPrincipalId: string,
+  ): void {
+    for (const entry of this.subscribers) {
+      if (entry.connectionId !== connectionId) {
+        continue;
+      }
+      if (
+        !entry.active ||
+        entry.type !== "client" ||
+        entry.actorPrincipalId != null
+      ) {
+        return;
+      }
+      entry.actorPrincipalId = actorPrincipalId;
+      log.info(
+        { clientId: entry.clientId, connectionId },
+        "filled missing actorPrincipalId for client subscription",
+      );
+      return;
+    }
+  }
+
+  /**
+   * Returns true when at least one active subscriber would receive the given
+   * event based on the same conversation matching rules as publish().
+   */
+  hasSubscribersForEvent(
+    event: Pick<AssistantEventEnvelope, "conversationId">,
+  ): boolean {
+    for (const entry of this.subscribers) {
+      if (!entry.active) {
+        continue;
+      }
+      if (
+        event.conversationId != null &&
+        entry.filter.conversationId != null &&
+        entry.filter.conversationId !== event.conversationId
+      ) {
+        continue;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  // ── Client queries ──────────────────────────────────────────────────────────
+
+  private clientEntries(): ClientEntry[] {
+    const clients: ClientEntry[] = [];
+    for (const entry of this.subscribers) {
+      if (entry.active && entry.type === "client") {
+        clients.push(entry);
+      }
+    }
+    return clients.sort(
+      (a, b) => b.lastActiveAt.getTime() - a.lastActiveAt.getTime(),
+    );
+  }
+
+  /**
+   * Return all active client subscribers, sorted by `lastActiveAt` descending.
+   */
+  listClients(): ClientEntry[] {
+    return this.clientEntries();
+  }
+
+  /**
+   * Return all client subscribers that support the given capability,
+   * sorted by `lastActiveAt` descending.
+   */
+  listClientsByCapability(capability: HostProxyCapability): ClientEntry[] {
+    return this.clientEntries().filter((c) =>
+      c.capabilities.includes(capability),
+    );
+  }
+
+  /**
+   * Return the most recently active client that supports the given
+   * capability, or `undefined` if none exists.
+   */
+  getMostRecentClientByCapability(
+    capability: HostProxyCapability,
+  ): ClientEntry | undefined {
+    return this.listClientsByCapability(capability)[0];
+  }
+
+  /**
+   * Return all client subscribers with the given interface type,
+   * sorted by `lastActiveAt` descending.
+   */
+  listClientsByInterface(interfaceId: InterfaceId): ClientEntry[] {
+    return this.clientEntries().filter((c) => c.interfaceId === interfaceId);
+  }
+
+  /**
+   * Touch a client subscriber — update `lastActiveAt`. Used by heartbeat.
+   */
+  touchClient(clientId: string): void {
+    const now = new Date();
+    for (const entry of this.activeClientEntries(clientId)) {
+      entry.lastActiveAt = now;
+    }
+  }
+
+  /**
+   * Record the desktop presence state reported by a client. `reportedAt`
+   * always advances. Returns true when at least one active client entry
+   * matched.
+   */
+  setClientPresence(clientId: string, state: DesktopPresenceState): boolean {
+    const now = new Date();
+    let matched = false;
+    for (const entry of this.activeClientEntries(clientId)) {
+      entry.presence = { state, reportedAt: now };
+      matched = true;
+    }
+    return matched;
+  }
+
+  /**
+   * Record the web tab visibility/focused-conversation reported by a client.
+   * `reportedAt` always advances. Returns true when at least one active
+   * client entry matched.
+   */
+  setClientWebPresence(clientId: string, report: WebPresenceReport): boolean {
+    const now = new Date();
+    let matched = false;
+    for (const entry of this.activeClientEntries(clientId)) {
+      entry.webPresence = { ...report, reportedAt: now };
+      matched = true;
+    }
+    return matched;
+  }
+
+  /**
+   * Force-disconnect a client by disposing all subscribers for the given
+   * `clientId`. Returns the number of disposed entries.
+   *
+   * Used by `assistant clients disconnect <clientId>` to forcibly remove
+   * stale or unwanted client connections.
+   */
+  disposeClient(clientId: string): number {
+    const targets: SubscriberEntry[] = [];
+    for (const entry of this.subscribers) {
+      if (entry.type === "client" && entry.clientId === clientId) {
+        targets.push(entry);
+      }
+    }
+    for (const entry of targets) {
+      entry.active = false;
+      this.subscribers.delete(entry);
+      this.recordClientLifecycle(entry, "force_disconnect");
+      try {
+        entry.onEvict();
+      } catch {
+        /* ignore eviction callback errors */
+      }
+    }
+    if (targets.length > 0) {
+      log.info(
+        { clientId, count: targets.length },
+        "force-disposed client subscribers",
+      );
+    }
+    return targets.length;
+  }
+
+  /**
+   * Best-effort history row for a client subscriber. Process subscribers
+   * and an unready database are skipped; a write failure never throws.
+   */
+  private recordClientLifecycle(
+    entry: SubscriberEntry,
+    reason: ClientConnectionEventReason,
+  ): void {
+    if (entry.type !== "client") {
+      return;
+    }
+    this.recordConnection({
+      clientId: entry.clientId,
+      interfaceId: entry.interfaceId,
+      connectionId: entry.connectionId,
+      reason,
+      actorPrincipalId: entry.actorPrincipalId,
+      clientVersion: entry.clientVersion,
+      sseWatchdog: entry.sseWatchdog,
+      machineName: entry.machineName,
+    });
+  }
+
+  /** Number of currently active subscribers (useful for tests and caps). */
+  subscriberCount(): number {
+    return this.subscribers.size;
+  }
+
+  /** Returns true if the hub can accept a subscriber without evicting anyone. */
+  hasCapacity(): boolean {
+    return this.subscribers.size < this.maxSubscribers;
+  }
+}
+
+// ── Process-level singleton ───────────────────────────────────────────────────
+
+/**
+ * Singleton hub shared across the entire runtime process.
+ *
+ * Import and use this in daemon send paths and the SSE route.
+ */
+export const assistantEventHub = new AssistantEventHub({ maxSubscribers: 100 });
+
+// ── Convenience: AssistantEvent → AssistantEventEnvelope publish ───────────────────────
+
+/**
+ * Promise chain that serializes publishes so subscribers always observe
+ * events in send order.
+ */
+let _hubChain = Promise.resolve();
+
+/** Targeting a caller of {@link broadcastMessage} may request. */
+export type BroadcastMessageOptions = Pick<
+  AssistantEventPublishOptions,
+  "targetClientId" | "targetInterfaceId" | "targetActorPrincipalId"
+>;
+
+/**
+ * Wraps a `AssistantEvent` in an `AssistantEventEnvelope` envelope and publishes it
+ * to the process-level hub.
+ *
+ * When `conversationId` is omitted, it is auto-extracted from the message
+ * payload (if present).
+ *
+ * Target capability is inferred automatically from the message type — callers
+ * never need to specify it.  Host-proxy messages (`host_bash_*`,
+ * `host_file_*`, `host_transfer_*`, `host_cu_*`, `host_browser_*`) are routed
+ * only to subscribers that declare the matching capability; all other messages
+ * broadcast to every subscriber.
+ *
+ * This is the primary entrypoint for emitting events — handlers, routes, and
+ * services should call this directly instead of threading a broadcast callback.
+ */
+export function broadcastMessage(
+  msg: AssistantEvent,
+  conversationId?: string,
+  options?: BroadcastMessageOptions,
+): void {
+  const resolvedConversationId = conversationId ?? extractConversationId(msg);
+  const targetClientId = options?.targetClientId;
+  const targetInterfaceId = options?.targetInterfaceId;
+  const targetActorPrincipalId = options?.targetActorPrincipalId;
+
+  const event = buildAssistantEvent(msg, resolvedConversationId);
+  // A reconnect can overlap an older executor with the same device ID.
+  // Filter at delivery too, not only when HostCuProxy resolves its target.
+  const targetCapability =
+    msg.type === "host_cu_request"
+      ? hostCuRequestCapability(msg.toolName, msg.input)
+      : capabilityForMessageType(msg.type);
+  // Self-echo suppression: a `sync_changed` carrying an `originClientId`
+  // means a specific client just mutated the resource. The hub must not
+  // re-deliver the invalidation to that client — it already updated its
+  // optimistic state locally and a redundant invalidation would clobber it
+  // with a flash of stale-then-fresh data. Assistant-internal emits (agent
+  // loop, FS watcher, cron) leave `originClientId` unset and the event
+  // fans out to every subscriber as before.
+  const excludeClientId =
+    msg.type === "sync_changed" &&
+    typeof msg.originClientId === "string" &&
+    msg.originClientId.length > 0
+      ? msg.originClientId
+      : undefined;
+  const publishOptions =
+    targetCapability != null ||
+    targetClientId != null ||
+    targetInterfaceId != null ||
+    targetActorPrincipalId != null ||
+    excludeClientId != null
+      ? {
+          targetCapability,
+          targetClientId,
+          targetInterfaceId,
+          targetActorPrincipalId,
+          excludeClientId,
+        }
+      : undefined;
+  stampAndBuffer(event, { targeting: publishOptions });
+  _hubChain = _hubChain
+    .then(() => assistantEventHub.publish(event, publishOptions))
+    .catch((err: unknown) => {
+      log.warn({ err }, "assistant-events hub subscriber threw during publish");
+    });
+}
+
+/**
+ * The capability a `host_cu_request` needs from the client that receives it.
+ * Window-scoped observation and batched actions are answered only by a helper
+ * that claimed them; an older helper would capture the whole desktop or end
+ * the session on the unknown tool.
+ */
+function hostCuRequestCapability(
+  toolName: string,
+  input: Record<string, unknown>,
+): HostProxyCapability {
+  if (Object.hasOwn(input, "capture_window_id")) {
+    return "host_cu_window_capture";
+  }
+  if (toolName === "computer_use_sequence") {
+    return "host_cu_sequence";
+  }
+  return "host_cu";
+}
+
+function extractConversationId(msg: AssistantEvent): string | undefined {
+  const record = msg as unknown as Record<string, unknown>;
+  if ("conversationId" in msg && typeof record.conversationId === "string") {
+    return record.conversationId as string;
+  }
+  return undefined;
+}

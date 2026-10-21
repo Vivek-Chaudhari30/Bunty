@@ -1,0 +1,123 @@
+import { createHash } from "crypto";
+
+export type EmbeddingTaskType =
+  | "SEMANTIC_SIMILARITY"
+  | "CLASSIFICATION"
+  | "CLUSTERING"
+  | "RETRIEVAL_DOCUMENT"
+  | "RETRIEVAL_QUERY"
+  | "CODE_RETRIEVAL_QUERY"
+  | "QUESTION_ANSWERING"
+  | "FACT_VERIFICATION";
+
+export interface TextEmbeddingInput {
+  type: "text";
+  text: string;
+}
+
+export interface ImageEmbeddingInput {
+  type: "image";
+  data: Buffer;
+  mimeType: string; // "image/png" | "image/jpeg"
+}
+
+export interface AudioEmbeddingInput {
+  type: "audio";
+  data: Buffer;
+  mimeType: string; // "audio/mp3" | "audio/wav"
+}
+
+export interface VideoEmbeddingInput {
+  type: "video";
+  data: Buffer;
+  mimeType: string; // "video/mp4" | "video/mov"
+}
+
+export type MultimodalEmbeddingInput =
+  | TextEmbeddingInput
+  | ImageEmbeddingInput
+  | AudioEmbeddingInput
+  | VideoEmbeddingInput;
+
+/** Accepts raw strings as shorthand for text inputs. */
+export type EmbeddingInput = string | MultimodalEmbeddingInput;
+
+export function normalizeEmbeddingInput(
+  input: EmbeddingInput,
+): MultimodalEmbeddingInput {
+  if (typeof input === "string") {
+    return { type: "text", text: input };
+  }
+  return input;
+}
+
+/** Sparse vector representation: parallel arrays of term indices and weights. */
+export interface SparseEmbedding {
+  indices: number[];
+  values: number[];
+}
+
+export function embeddingInputContentHash(input: EmbeddingInput): string {
+  const normalized = normalizeEmbeddingInput(input);
+  const hash = createHash("sha256");
+  hash.update(normalized.type);
+  if (normalized.type === "text") {
+    hash.update(normalized.text);
+  } else {
+    hash.update(normalized.mimeType);
+    hash.update(normalized.data);
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * Durable cache identity for an embedding input. Folds provider extras
+ * (Gemini task type / dimensions, custom endpoint URL / dimensions) into the
+ * bare content hash so a change that alters the vector for identical text is
+ * a cache miss. With no extras this is the bare {@link embeddingInputContentHash}.
+ */
+export function embeddingContentHashWithExtras(
+  input: EmbeddingInput,
+  extras: string[] = [],
+): string {
+  const base = embeddingInputContentHash(input);
+  if (extras.length === 0) {
+    return base;
+  }
+  return createHash("sha256")
+    .update(`${base}\0${extras.join("\0")}`)
+    .digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Backend interface types (extracted from embedding-backend.ts to break
+// circular imports between the factory and provider implementations)
+// ---------------------------------------------------------------------------
+
+export type EmbeddingProviderName =
+  | "local"
+  | "openai"
+  | "gemini"
+  | "ollama"
+  | "custom";
+
+export interface EmbeddingRequestOptions {
+  signal?: AbortSignal;
+}
+
+export interface EmbeddingBackend {
+  readonly provider: EmbeddingProviderName;
+  readonly model: string;
+  embed(
+    inputs: EmbeddingInput[],
+    options?: EmbeddingRequestOptions,
+  ): Promise<number[][]>;
+  dispose?(): void;
+}
+
+/**
+ * Fixed text embedded to measure a backend's output dimension. Shared so the
+ * startup reconcile probe and the per-query availability check agree on the
+ * input (and therefore the in-memory vector cache identity).
+ */
+export const EMBEDDING_DIMENSION_PROBE_TEXT = "embedding dimension probe";

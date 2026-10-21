@@ -1,0 +1,197 @@
+import { parseImageDimensions } from "../context/image-dimensions.js";
+import { STANDARD_VISION_TIER } from "../providers/anthropic/vision-tiers.js";
+import { convertImageToJpeg } from "../util/image-conversion.js";
+
+// Longest side an image keeps when it is read: the standard vision tier's
+// edge, which standard-tier models downscale to anyway. Images a conversation
+// reads stay in its requests, so a request can carry more than 20 of them,
+// and Anthropic then rejects any image over MANY_IMAGE_MAX_DIMENSION_PX
+// (providers/anthropic/vision-tiers.ts) on a side; this cap must stay within
+// it even though high-resolution-tier models accept larger images.
+export const MAX_IMAGE_DIMENSION = STANDARD_VISION_TIER.maxEdgePx;
+
+// Minimum per-side pixel floor for the image-recovery rejection path.
+// Anthropic rejects very small images with a 400 "Could not process image"
+// (observed with a 16×14 px upload) but does not document the floor, so it is
+// never enforced pre-send — images go out untouched and this gate only
+// identifies the likely offender after the provider has actually rejected a
+// turn. The value sits comfortably above the model's 28-px visual-patch size;
+// upscaling adds no information, so lifting a rejected image to this floor is
+// lossless.
+export const MIN_IMAGE_DIMENSION = 64;
+
+// Threshold below which we skip optimization — small images don't need it.
+const OPTIMIZE_THRESHOLD_BYTES = 300 * 1024; // 300 KB
+
+// Anthropic rejects any single image whose source payload exceeds 5 MB,
+// regardless of pixel dimensions. Cap at ~3.5 MB raw so the base64-encoded
+// form (raw * 4/3) stays comfortably under 5 MB even after re-encoding.
+const MAX_TRANSPORT_BYTES = Math.floor(3.5 * 1024 * 1024); // ~3.5 MB raw
+
+const JPEG_QUALITY = 80;
+
+/**
+ * Decide whether an image needs to be rescaled before sending.
+ *
+ * Two independent gates apply:
+ *   1. Pixel dimensions — Anthropic rejects many-image requests when any
+ *      image exceeds 2000 px on a side. A sparse screenshot can be under
+ *      300 KB while still being 3000+ px wide.
+ *   2. Byte size — Anthropic rejects any image whose source payload
+ *      exceeds 5 MB. A 1500×1500 high-color screenshot can produce a >5 MB
+ *      payload while staying well under the dimension cap.
+ *
+ * Exported for unit testing.
+ */
+export function shouldRescaleImage(
+  dims: { width: number; height: number } | null,
+  byteLength: number,
+): boolean {
+  if (byteLength > MAX_TRANSPORT_BYTES) {
+    return true;
+  }
+  if (dims) {
+    return (
+      dims.width > MAX_IMAGE_DIMENSION || dims.height > MAX_IMAGE_DIMENSION
+    );
+  }
+  // Dimensions unparseable — fall back to file size as a rough proxy.
+  return byteLength > OPTIMIZE_THRESHOLD_BYTES;
+}
+
+/**
+ * Whether an image sits below the {@link MIN_IMAGE_DIMENSION} floor on either
+ * side. Requires parsed dimensions — a byte-size proxy cannot distinguish a
+ * tiny image from a well-compressed large one.
+ *
+ * Only consulted by the image-recovery rejection path (the floor is
+ * undocumented, so it is never enforced pre-send). Exported for that gate and
+ * for unit testing.
+ */
+export function isBelowMinDimension(
+  dims: { width: number; height: number } | null,
+): boolean {
+  return (
+    dims != null &&
+    (dims.width < MIN_IMAGE_DIMENSION || dims.height < MIN_IMAGE_DIMENSION)
+  );
+}
+
+/**
+ * Aspect-preserving target dimensions that lift an undersized image's short
+ * side to {@link MIN_IMAGE_DIMENSION}. The scale factor is capped so the long
+ * side never exceeds {@link MAX_IMAGE_DIMENSION}; for pathological aspect ratios
+ * where no upscale is possible under that cap, returns null and the caller
+ * notes the image out instead.
+ *
+ * Exported for unit testing.
+ */
+export function upscaleTargetDimensions(dims: {
+  width: number;
+  height: number;
+}): { width: number; height: number } | null {
+  const shortSide = Math.min(dims.width, dims.height);
+  const longSide = Math.max(dims.width, dims.height);
+  if (shortSide <= 0) {
+    return null;
+  }
+  const scale = Math.min(
+    MIN_IMAGE_DIMENSION / shortSide,
+    MAX_IMAGE_DIMENSION / longSide,
+  );
+  if (scale <= 1) {
+    return null;
+  }
+  return {
+    width: Math.max(1, Math.round(dims.width * scale)),
+    height: Math.max(1, Math.round(dims.height * scale)),
+  };
+}
+
+/**
+ * Upscale an image the provider rejected as too small to the
+ * {@link MIN_IMAGE_DIMENSION} floor. Returns null when the image's dimensions
+ * are unparseable, no valid upscale exists, or conversion is unavailable on
+ * this host — the caller replaces the image with a note instead.
+ *
+ * Reactive only: called by the image-recovery plugin after an actual
+ * "Could not process image" rejection, never on the pre-send path.
+ */
+export async function upscaleImageToMinimum(
+  base64Data: string,
+  mediaType: string,
+): Promise<{ data: string; mediaType: string } | null> {
+  const dims = parseImageDimensions(base64Data, mediaType);
+  if (!dims) {
+    return null;
+  }
+  const target = upscaleTargetDimensions(dims);
+  if (!target) {
+    return null;
+  }
+  const upscaled = await convertImageToJpeg(Buffer.from(base64Data, "base64"), {
+    resizeToPx: target,
+    quality: JPEG_QUALITY,
+  });
+  if (!upscaled) {
+    return null;
+  }
+  return { data: upscaled.toString("base64"), mediaType: "image/jpeg" };
+}
+
+/**
+ * Downscale a base64 image to {@link MAX_IMAGE_DIMENSION} on its longest
+ * side. Returns the original data unchanged if the image is already small
+ * enough or if optimization fails.
+ *
+ * Standard-tier models apply the same scaling server-side, so for them this
+ * is zero quality loss. High-resolution-tier models would accept a larger
+ * image and give up some detail here, in exchange for request payloads that
+ * stay small as images accumulate in context and for every image clearing
+ * the many-image dimension cap.
+ *
+ * Conversion (and its content-addressed disk cache) is shared with attachment
+ * storage normalization — see `util/image-conversion.ts`.
+ */
+export interface TransportImage {
+  data: string;
+  mediaType: string;
+  /**
+   * True when `data` is still over the transport byte cap: conversion was
+   * unavailable or failed and the original is being returned, or the
+   * re-encoded JPEG itself came out over the cap. The send path treats such a
+   * payload as unsendable rather than shipping bytes a budget computed from
+   * a successful conversion never accounted for.
+   */
+  exceedsTransportCap: boolean;
+}
+
+export async function optimizeImageForTransport(
+  base64Data: string,
+  mediaType: string,
+): Promise<TransportImage> {
+  const rawBytes = Buffer.from(base64Data, "base64");
+  const dims = parseImageDimensions(base64Data, mediaType);
+
+  if (!shouldRescaleImage(dims, rawBytes.length)) {
+    return { data: base64Data, mediaType, exceedsTransportCap: false };
+  }
+
+  const optimized = await convertImageToJpeg(rawBytes, {
+    maxDimensionPx: MAX_IMAGE_DIMENSION,
+    quality: JPEG_QUALITY,
+  });
+  if (!optimized) {
+    return {
+      data: base64Data,
+      mediaType,
+      exceedsTransportCap: rawBytes.length > MAX_TRANSPORT_BYTES,
+    };
+  }
+
+  return {
+    data: optimized.toString("base64"),
+    mediaType: "image/jpeg",
+    exceedsTransportCap: optimized.length > MAX_TRANSPORT_BYTES,
+  };
+}

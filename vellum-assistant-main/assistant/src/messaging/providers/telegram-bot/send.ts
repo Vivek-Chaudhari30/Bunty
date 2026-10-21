@@ -1,0 +1,547 @@
+/**
+ * Telegram outbound message orchestration.
+ *
+ * Handles text splitting, approval inline keyboards, attachment delivery,
+ * and typing indicators by calling the Telegram Bot API directly via ./api.ts.
+ */
+
+import type {
+  ApprovalUIMetadata,
+  ChannelDeliveryResult,
+} from "@vellumai/gateway-client";
+
+import { getAttachmentContent } from "../../../persistence/attachments-store.js";
+import type { RuntimeAttachmentMetadata } from "../../../runtime/http-types.js";
+import { getLogger } from "../../../util/logger.js";
+import { type AcknowledgedSend, acknowledgedSend } from "../send-result.js";
+import {
+  callTelegramBotApi,
+  callTelegramBotApiMultipart,
+  type TelegramMessage,
+  TelegramNonRetryableError,
+} from "./api.js";
+import { renderTelegramHtml } from "./render.js";
+
+const log = getLogger("telegram-send");
+
+// Telegram Bot API supports up to 4096 characters per sendMessage call,
+// but the gateway uses 4000 as the safe limit — mirror that.
+const TELEGRAM_MAX_MESSAGE_LEN = 4000;
+
+/** Telegram Bot API enforces a 1-64 byte limit on InlineKeyboardButton callback_data. */
+const TELEGRAM_MAX_CALLBACK_DATA_BYTES = 64;
+
+// Bot API limits for a multipart upload: 10 MB for a photo, 50 MB for any
+// other file (https://core.telegram.org/bots/api#sending-files).
+const TELEGRAM_MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+const TELEGRAM_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+
+const TELEGRAM_IMAGE_MIME_PREFIXES = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+];
+
+/**
+ * Per-send options shared by the Telegram send helpers.
+ *
+ * `messageThreadId` targets a private-chat topic (the Telegram analog of a
+ * Slack thread); omitted, the send lands in the main chat. The value is the
+ * `message_thread_id` carried on the inbound update. Carried as a string
+ * because it originates as a URL param and multipart sends need the string
+ * form; payloads convert once in {@link threadIdPayloadFields}.
+ */
+export interface TelegramSendOptions {
+  messageThreadId?: string;
+}
+
+/**
+ * Topic-targeting field for a send payload, or undefined when the send
+ * targets the main chat — spread into the payload literal.
+ *
+ * `message_thread_id` is the Bot API topic field for both forum supergroups
+ * and private chats of bots with topic ("threaded") mode enabled — the same
+ * field inbound updates carry. (`direct_messages_topic_id` is a different
+ * surface — channel direct-messages/monoforum chats — and is not used here.)
+ */
+function threadIdPayloadFields(
+  opts?: TelegramSendOptions,
+): { message_thread_id: number } | undefined {
+  const id = opts?.messageThreadId?.trim();
+  return id ? { message_thread_id: Number(id) } : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Text splitting
+// ---------------------------------------------------------------------------
+
+function splitText(text: string, maxLen: number): string[] {
+  if (text.length <= maxLen) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    let end = Math.min(cursor + maxLen, text.length);
+    // Avoid splitting a surrogate pair
+    if (
+      end < text.length &&
+      text.charCodeAt(end - 1) >= 0xd800 &&
+      text.charCodeAt(end - 1) <= 0xdbff
+    ) {
+      end--;
+    }
+    chunks.push(text.slice(cursor, end));
+    cursor = end;
+  }
+  return chunks;
+}
+
+// ---------------------------------------------------------------------------
+// Inline keyboard (approval buttons)
+// ---------------------------------------------------------------------------
+
+function buildInlineKeyboard(approval: ApprovalUIMetadata): {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+} {
+  return {
+    inline_keyboard: approval.actions.map((action) => {
+      const callbackData = `apr:${approval.requestId}:${action.id}`;
+      if (Buffer.byteLength(callbackData) > TELEGRAM_MAX_CALLBACK_DATA_BYTES) {
+        throw new Error(
+          `callback_data for action "${action.id}" is ${Buffer.byteLength(callbackData)} bytes, exceeding Telegram's ${TELEGRAM_MAX_CALLBACK_DATA_BYTES}-byte limit`,
+        );
+      }
+      return [
+        {
+          text: action.label,
+          callback_data: callbackData,
+        },
+      ];
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of a Telegram reply send: `lastMessageId` is the final chunk (the
+ * message carrying the inline keyboard when an approval was attached) and
+ * `messageIds` every chunk the provider acknowledged, in send order. See
+ * {@link AcknowledgedSend} for why the two are derived separately.
+ */
+export type TelegramSendResult = AcknowledgedSend;
+
+/** The message id a Telegram send response carries, when it carries one. */
+function sentMessageId(sent: TelegramMessage | undefined): string | undefined {
+  return typeof sent?.message_id === "number"
+    ? String(sent.message_id)
+    : undefined;
+}
+
+/**
+ * Send a Telegram text reply, splitting long messages and optionally
+ * attaching inline keyboard buttons for approval prompts.
+ */
+/**
+ * Replace a Telegram message in place.
+ *
+ * Telegram rejects an edit whose text already matches the message. That is the
+ * request having been satisfied rather than a failure, so it resolves. Every
+ * other rejection throws: an edit that quietly became a new message would
+ * leave the original sitting beside it, which reads as answering twice.
+ *
+ * Unlike a send, this cannot split long text across messages, because an edit
+ * addresses exactly one. Telegram rejects text past its limit, and that
+ * rejection reaches the caller rather than being papered over.
+ *
+ * The empty `reply_markup` is load-bearing. `editMessageText` leaves an
+ * existing inline keyboard alone when the field is omitted, so a message
+ * revised to read as settled would keep its live buttons beside that text.
+ * Every caller here edits a message into a settled state, and the approval
+ * interception path says so outright, so the keyboard goes with the revision.
+ */
+export async function editTelegramMessage(
+  chatId: string,
+  messageId: string,
+  text: string,
+): Promise<void> {
+  try {
+    await callTelegramBotApi<TelegramMessage>("editMessageText", {
+      chat_id: chatId,
+      message_id: Number(messageId),
+      text,
+      reply_markup: { inline_keyboard: [] },
+    });
+  } catch (err) {
+    if (
+      err instanceof TelegramNonRetryableError &&
+      err.description?.includes("message is not modified")
+    ) {
+      log.debug({ chatId, messageId }, "Telegram edit already applied");
+      return;
+    }
+    throw err;
+  }
+  log.debug({ chatId, messageId }, "Telegram message edited");
+}
+
+export async function sendTelegramReply(
+  chatId: string,
+  text: string,
+  approval?: ApprovalUIMetadata,
+  opts?: TelegramSendOptions,
+): Promise<TelegramSendResult> {
+  const chunks = splitText(text, TELEGRAM_MAX_MESSAGE_LEN);
+
+  const ids: Array<string | undefined> = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const payload: Record<string, unknown> = {
+      chat_id: chatId,
+      text: chunks[i],
+      ...threadIdPayloadFields(opts),
+    };
+
+    // Attach inline keyboard only to the last chunk so buttons appear after
+    // the full message text.
+    if (approval && i === chunks.length - 1) {
+      payload.reply_markup = buildInlineKeyboard(approval);
+    }
+
+    const sent = await callTelegramBotApi<TelegramMessage>(
+      "sendMessage",
+      payload,
+    );
+    ids.push(sentMessageId(sent));
+  }
+
+  log.debug({ chatId, chunks: chunks.length }, "Telegram reply sent");
+  return acknowledgedSend(ids);
+}
+
+/**
+ * Send a Telegram reply as a rich message (Bot API 10.1) so tables, headings,
+ * code, and quotes render natively. On a non-retryable rejection of the rich
+ * send, fall back to the plain-text `sendTelegramReply` so the user still
+ * receives the message.
+ *
+ * The canonical reply markdown is rendered to Telegram rich HTML (see
+ * `render.ts`) and sent via `InputRichMessage.html`. HTML mode keeps text
+ * content literal, so canonical GFM that overlaps Telegram's Rich *Markdown*
+ * extensions (`$…$` math, `==highlight==`, `||spoiler||`) renders exactly as
+ * written instead of being reinterpreted. `skip_entity_detection` is set
+ * because the canonical parser already turns bare URLs and e-mails into links;
+ * leaving Telegram's auto-detection on would additionally linkify cashtags,
+ * hashtags, mentions, phone numbers, and bank-card-like digit runs that GFM
+ * treats as plain text.
+ *
+ * Old clients degrade the display client-side; the send itself does not fail on
+ * recipient version, so the only fallback trigger is a request-level rejection
+ * (content over Telegram's documented rich-message limits, or a Bot API server
+ * predating 10.1). The plain path splits at `TELEGRAM_MAX_MESSAGE_LEN`, so it
+ * also covers the rare oversize case the single-shot rich send cannot.
+ *
+ * Wire shapes verified against the official Bot API docs:
+ *   - sendRichMessage:  https://core.telegram.org/bots/api#sendrichmessage
+ *   - InputRichMessage: https://core.telegram.org/bots/api#inputrichmessage
+ *   - Rich HTML:        https://core.telegram.org/bots/api#rich-message-formatting-options
+ */
+export async function sendTelegramRichReply(
+  chatId: string,
+  markdown: string,
+  approval?: ApprovalUIMetadata,
+  opts?: TelegramSendOptions,
+): Promise<TelegramSendResult> {
+  const html = renderTelegramHtml(markdown);
+  if (html === undefined) {
+    // No renderable rich content — send as plain text.
+    return sendTelegramReply(chatId, markdown, approval, opts);
+  }
+
+  const payload: Record<string, unknown> = {
+    chat_id: chatId,
+    rich_message: { html, skip_entity_detection: true },
+    ...threadIdPayloadFields(opts),
+  };
+  if (approval) {
+    payload.reply_markup = buildInlineKeyboard(approval);
+  }
+
+  try {
+    // sendRichMessage returns the sent Message like sendMessage does.
+    const sent = await callTelegramBotApi<TelegramMessage>(
+      "sendRichMessage",
+      payload,
+    );
+    log.debug({ chatId }, "Telegram rich message sent");
+    return acknowledgedSend([sentMessageId(sent)]);
+  } catch (err) {
+    if (err instanceof TelegramNonRetryableError) {
+      log.warn(
+        { chatId, description: err.description },
+        "Telegram rejected rich message; falling back to plain text",
+      );
+      return sendTelegramReply(chatId, markdown, approval, opts);
+    }
+    throw err;
+  }
+}
+
+export type TelegramAttachmentResult = {
+  allFailed: boolean;
+  failureCount: number;
+  totalCount: number;
+};
+
+/**
+ * Send attachments to a Telegram chat, using sendPhoto for an image within
+ * the photo limit and sendDocument for everything else, so an image over it
+ * still arrives as a file.
+ */
+export async function sendTelegramAttachments(
+  chatId: string,
+  attachments: RuntimeAttachmentMetadata[],
+  opts?: TelegramSendOptions,
+): Promise<TelegramAttachmentResult> {
+  const failures: string[] = [];
+  const threadFields = threadIdPayloadFields(opts);
+
+  for (const meta of attachments) {
+    // Skip oversized attachments when size is known upfront
+    if (
+      meta.sizeBytes !== undefined &&
+      meta.sizeBytes > TELEGRAM_MAX_ATTACHMENT_BYTES
+    ) {
+      log.warn(
+        { attachmentId: meta.id, sizeBytes: meta.sizeBytes },
+        "Skipping oversized outbound attachment",
+      );
+      failures.push(meta.filename ?? meta.id);
+      continue;
+    }
+
+    try {
+      const content = getAttachmentContent(meta.id);
+      if (!content) {
+        log.error(
+          { attachmentId: meta.id },
+          "Attachment content not found in store",
+        );
+        failures.push(meta.filename ?? meta.id);
+        continue;
+      }
+
+      const mimeType = meta.mimeType ?? "application/octet-stream";
+      const filename = meta.filename ?? meta.id;
+
+      if (content.length > TELEGRAM_MAX_ATTACHMENT_BYTES) {
+        log.warn(
+          { attachmentId: meta.id, sizeBytes: content.length },
+          "Skipping oversized outbound attachment (detected after read)",
+        );
+        failures.push(filename);
+        continue;
+      }
+
+      const blob = new Blob([new Uint8Array(content)], { type: mimeType });
+      const form = new FormData();
+      form.set("chat_id", chatId);
+      if (threadFields) {
+        form.set("message_thread_id", String(threadFields.message_thread_id));
+      }
+
+      const sendsAsPhoto =
+        TELEGRAM_IMAGE_MIME_PREFIXES.some((p) => mimeType.startsWith(p)) &&
+        content.length <= TELEGRAM_MAX_PHOTO_BYTES;
+      if (sendsAsPhoto) {
+        form.set("photo", blob, filename);
+        await callTelegramBotApiMultipart("sendPhoto", form);
+      } else {
+        form.set("document", blob, filename);
+        await callTelegramBotApiMultipart("sendDocument", form);
+      }
+
+      log.debug(
+        { chatId, attachmentId: meta.id, filename },
+        "Attachment sent to Telegram",
+      );
+    } catch (err) {
+      const displayName = meta.filename ?? meta.id;
+      log.error(
+        { err, attachmentId: meta.id, filename: displayName },
+        "Failed to send attachment to Telegram",
+      );
+      failures.push(displayName);
+    }
+  }
+
+  if (failures.length > 0) {
+    const notice = `\u26a0\ufe0f ${failures.length} attachment(s) could not be delivered: ${failures.join(", ")}`;
+    try {
+      await sendTelegramReply(chatId, notice, undefined, opts);
+    } catch (err) {
+      log.error({ err, chatId }, "Failed to send attachment failure notice");
+    }
+  }
+
+  return {
+    allFailed: failures.length === attachments.length,
+    failureCount: failures.length,
+    totalCount: attachments.length,
+  };
+}
+
+/**
+ * Send a typing indicator ("chat action") to a Telegram chat.
+ * Returns true on success, false on failure (non-throwing).
+ */
+/**
+ * Set or clear the bot's emoji reaction on a message.
+ *
+ * `setMessageReaction` semantics (Bot API): a bot holds at most one
+ * reaction per message, so `add` replaces any prior one and `remove`
+ * clears it by sending the empty reaction list. `emoji` is the unicode
+ * emoji itself, and Telegram accepts only its allowed set (the standard
+ * reaction emoji, narrowed further by a chat's allowed-reactions
+ * setting); a rejected emoji reports `ok: false` rather than throwing.
+ */
+export async function sendTelegramReaction(
+  chatId: string,
+  emoji: string,
+  messageId: string,
+  action: "add" | "remove",
+): Promise<ChannelDeliveryResult> {
+  const messageIdNum = Number.parseInt(messageId, 10);
+  if (!Number.isFinite(messageIdNum)) {
+    log.warn({ chatId, messageId }, "Non-numeric Telegram reaction target");
+    return { ok: false };
+  }
+  try {
+    await callTelegramBotApi("setMessageReaction", {
+      chat_id: chatId,
+      message_id: messageIdNum,
+      reaction: action === "add" ? [{ type: "emoji", emoji }] : [],
+    });
+    return { ok: true };
+  } catch (err) {
+    log.warn(
+      { err, chatId, messageId, action },
+      "Failed to deliver Telegram reaction",
+    );
+    return { ok: false };
+  }
+}
+
+export async function sendTelegramTypingIndicator(
+  chatId: string,
+  opts?: TelegramSendOptions,
+): Promise<boolean> {
+  try {
+    await callTelegramBotApi("sendChatAction", {
+      chat_id: chatId,
+      action: "typing",
+      ...threadIdPayloadFields(opts),
+    });
+    return true;
+  } catch (err) {
+    log.debug({ err, chatId }, "Failed to send typing indicator");
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Live message drafts (sendMessageDraft)
+// ---------------------------------------------------------------------------
+
+/**
+ * Telegram caps a message, and so a draft's text, at 4096 characters.
+ *
+ * A draft is a preview rather than the reply, so an over-long partial keeps
+ * its tail rather than being split across drafts: splitting would animate the
+ * reader back to the start of the reply every time it grew past the cap. The
+ * tail is also the live end of the draft, so a reply past the cap keeps
+ * moving instead of freezing on a prefix, and anything drawn beneath it
+ * stays visible.
+ */
+export const TELEGRAM_DRAFT_TEXT_LIMIT = 4096;
+
+/**
+ * The tail of a draft that Telegram will accept, cut on a character boundary.
+ *
+ * The cap counts UTF-16 code units, so slicing to it can land between the two
+ * halves of an astral character (an emoji, which a plan's status glyphs and a
+ * reply's own text both carry) and send a lone surrogate. Dropping a leading
+ * low surrogate costs one character and keeps the text well-formed.
+ */
+function draftTail(text: string): string {
+  if (text.length <= TELEGRAM_DRAFT_TEXT_LIMIT) {
+    return text;
+  }
+  const tail = text.slice(-TELEGRAM_DRAFT_TEXT_LIMIT);
+  const first = tail.charCodeAt(0);
+  return first >= 0xdc00 && first <= 0xdfff ? tail.slice(1) : tail;
+}
+
+/**
+ * How long a draft survives without being re-sent: Telegram describes it as
+ * "a temporary 30-second preview". A draft that stops being advanced
+ * disappears rather than lingering with stale text.
+ */
+export const TELEGRAM_DRAFT_TTL_MS = 30_000;
+
+/**
+ * Show, or advance, the live draft of a reply still being written.
+ *
+ * `sendMessageDraft` takes the whole partial reply rather than a delta and
+ * lets Telegram's clients animate the difference, which is why every call
+ * passes the full text. Reusing one `draft_id` is what makes those calls read
+ * as one growing draft: a different id replaces the draft without animation.
+ * Empty text is meaningful, rendering Telegram's own "Thinking..." placeholder,
+ * so it is passed through rather than skipped.
+ *
+ * The draft is a preview and never the reply. Telegram's own words: "once the
+ * output is finalized, you must call sendMessage with the complete message to
+ * persist it". It also clears the moment the bot sends a real message, so
+ * nothing has to clear it, and it survives only {@link TELEGRAM_DRAFT_TTL_MS}
+ * without being re-sent.
+ *
+ * Private chats only, and `chat_id` here is an Integer rather than the
+ * "Integer or String" most methods accept, so a non-numeric chat id cannot
+ * address a draft at all and is refused rather than sent to be rejected.
+ *
+ * @see https://core.telegram.org/bots/api#sendmessagedraft
+ */
+export async function sendTelegramMessageDraft(
+  chatId: string,
+  draftId: number,
+  text: string,
+  opts?: TelegramSendOptions,
+): Promise<boolean> {
+  const numericChatId = Number(chatId);
+  if (!Number.isSafeInteger(numericChatId)) {
+    log.debug(
+      { chatId, draftId },
+      "Telegram drafts address a chat by integer id; skipping draft",
+    );
+    return false;
+  }
+  try {
+    await callTelegramBotApi("sendMessageDraft", {
+      chat_id: numericChatId,
+      draft_id: draftId,
+      text: draftTail(text),
+      ...threadIdPayloadFields(opts),
+    });
+    return true;
+  } catch (err) {
+    log.debug(
+      { err, chatId, draftId },
+      "Failed to send Telegram message draft",
+    );
+    return false;
+  }
+}

@@ -1,0 +1,103 @@
+// ---------------------------------------------------------------------------
+// Memory Tool definitions for agentic recall and remember.
+// ---------------------------------------------------------------------------
+
+import { toToolInputSchema } from "@vellumai/plugin-api";
+
+import { RememberInputSchema } from "../../../../api/remember-tool.js";
+import { RecallInputSchema } from "../context-search/recall-input.js";
+import type { ToolDefinition } from "../llm-helpers.js";
+
+/**
+ * Explicit local information search across memory, conversations, and
+ * workspace files.
+ */
+export const graphRecallDefinition = {
+  name: "recall",
+  description:
+    'Search local information the moment you feel uncertain. Use recall for memory, past conversations, and workspace files — before you guess, before you ask, before you hedge. Auto-injection is incomplete by design; it surfaces patterns, not the specifics you need to answer well. If you catch yourself reaching for "I think", "I believe", "if I remember", "didn\'t we", "last time" — that\'s the signal. Recall. If a turn references someone, a place, a decision, a document, or prior work you should be able to find locally — recall. Call it multiple times per conversation if the turn warrants it. Be specific in your query for best results. Results reflect what was true when the memory was written — do not use recall alone to answer questions about current system state (account connections, watchers, service health); verify those with live checks.',
+  input_schema: toToolInputSchema(RecallInputSchema),
+} satisfies ToolDefinition;
+
+/**
+ * `remember` tool description. The in-conversation pressure stays at a
+ * judgment framing (pause when something feels worth marking, not because
+ * the volume is required), but later capture is conditional and the model
+ * must not rely on it: the retrospective enqueue gate skips `scheduled`
+ * conversations outright (`isLowYieldRetrospectiveSource` in
+ * `memory-retrospective-enqueue.ts`) and the substrate sweep excludes
+ * `scheduled` and `background` types, so a durable fact surfaced by
+ * automated work survives only if it is saved inline.
+ */
+const REMEMBER_DESCRIPTION =
+  "Remember anything concrete shared in conversation: corrections, plans, decisions, felt moments, names, dates, commitments, preferences. Corrections are the highest priority: call `remember` the same turn the correction lands. A later pass may review an ordinary user conversation and save what you did not capture, but it is not guaranteed and never runs over scheduled work. If a fact must survive, especially in proactive, scheduled, or other automated work, save it now. Use judgment: pause and remember when something feels worth marking, not because the volume is required.";
+
+const REMEMBER_CONTENT_DESCRIPTION =
+  "The fact(s) to remember. Pass a single string for one fact, or an array of strings to record several independent facts in one call. When a turn surfaces multiple unrelated facts, pass them all as an array in one call rather than calling `remember` once per fact. Write naturally — a preference, a detail, a commitment, a plan. No need to categorize.";
+
+/**
+ * Appended to the `content` description only under the concept-page memory
+ * model, where the consolidation prompts treat `[[slug]]` hints as
+ * read-first candidates when filing buffer entries. v1/PKB workspaces have
+ * no wiki pages for the hints to reference, and the pkb filing job has no
+ * instruction to interpret or strip the markup, so it would persist as
+ * literal buffer text there.
+ */
+export const REMEMBER_PAGE_HINT_GUIDANCE =
+  "When a fact relates to memory pages already in your context, reference the most specific ones inline as [[slug]] wikilinks — consolidation reads hinted pages first when filing the fact, which matters most for corrections (the hint names the page carrying the outdated fact). Hint only pages you have actually seen, and prefer specific pages over broad hubs.";
+
+/**
+ * Build the `remember` input schema from {@link RememberInputSchema}, the one
+ * `execute` parses with, adding the descriptions the model reads.
+ * `pageHints` reflects whether concept-page memory is active and appends
+ * {@link REMEMBER_PAGE_HINT_GUIDANCE} to the `content` description. It is a
+ * thunk re-resolved on every read of that description: the registry's
+ * finalized tool shares the returned schema object by reference, so a
+ * runtime config edit is reflected on the next schema serialization without
+ * re-registering the tool.
+ */
+export function buildRememberInputSchema(options: {
+  pageHints: () => boolean;
+}): Record<string, unknown> {
+  const schema = toToolInputSchema(
+    RememberInputSchema.extend({
+      content: RememberInputSchema.shape.content.describe(
+        REMEMBER_CONTENT_DESCRIPTION,
+      ),
+      finish_turn: RememberInputSchema.shape.finish_turn.describe(
+        "When you have nothing else to say and want to yield the turn you MUST set this to true. When true, your turn ends after this tool call. It's critical that you do this in order to avoid unnecessary LLM calls.",
+      ),
+    }),
+  );
+  const properties = schema.properties;
+  const content =
+    typeof properties === "object" && properties !== null
+      ? Reflect.get(properties, "content")
+      : undefined;
+  if (typeof content === "object" && content !== null) {
+    Object.defineProperty(content, "description", {
+      enumerable: true,
+      configurable: true,
+      get: (): string =>
+        options.pageHints()
+          ? `${REMEMBER_CONTENT_DESCRIPTION} ${REMEMBER_PAGE_HINT_GUIDANCE}`
+          : REMEMBER_CONTENT_DESCRIPTION,
+    });
+  }
+  return schema;
+}
+
+/**
+ * Save a fact to the assistant's knowledge base. The fact is appended to
+ * `memory/buffer.md` (immediately available in the next conversation) and the
+ * daily archive (permanent date-indexed record). Consolidation of the buffer
+ * into concept pages runs as a separate periodic job. This base definition
+ * carries the mode-neutral schema; the registered tool appends the page-hint
+ * guidance on concept-page-memory installs via
+ * {@link buildRememberInputSchema}.
+ */
+export const graphRememberDefinition = {
+  name: "remember",
+  description: REMEMBER_DESCRIPTION,
+  input_schema: buildRememberInputSchema({ pageHints: () => false }),
+} satisfies ToolDefinition;

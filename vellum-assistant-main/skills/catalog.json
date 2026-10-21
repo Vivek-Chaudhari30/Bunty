@@ -1,0 +1,1448 @@
+{
+  "description": "Manifest of first-party Vellum skills. Fetched from GitHub at runtime so the assistant can discover and install new skills maintained by Vellum.",
+  "version": 1,
+  "skills": [
+    {
+      "id": "amazon",
+      "name": "amazon",
+      "description": "Shop on Amazon and Amazon Fresh through your browser",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🛒",
+        "vellum": {
+          "category": "commerce",
+          "display-name": "Amazon",
+          "includes": [
+            "vellum-browser-use"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "api-mapping",
+      "name": "api-mapping",
+      "description": "Record and analyze API surfaces of web services",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🗺️",
+        "vellum": {
+          "category": "development",
+          "display-name": "API Mapping"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-03T18:19:51.000Z"
+    },
+    {
+      "id": "assistant-migration",
+      "name": "assistant-migration",
+      "description": "Migrate from ChatGPT, Claude, OpenClaw, Hermes, Manus, and other AI assistants into Vellum by inspecting their data exports, conversation archives, files, prompts, custom instructions, memory, saved memories, tools, GPTs, workflows, integrations, and relationships, then mapping as much as safely possible into Vellum primitives. Handles single-source and multi-source migrations with a unified, deduplicated inventory.",
+      "metadata": {
+        "emoji": "🧳",
+        "vellum": {
+          "category": "system",
+          "display-name": "Assistant Migration",
+          "includes": [
+            "chatgpt-import"
+          ],
+          "activation-hints": [
+            "User wants to migrate from ChatGPT, Claude, OpenClaw, Hermes, Manus, or another AI assistant into Vellum",
+            "User wants to migrate from ChatGPT or Claude into Vellum",
+            "User has a ChatGPT data export ZIP or Claude conversation/summary export",
+            "User has an assistant export, workspace, prompt bundle, memory dump, tool config, or migration request from another assistant system",
+            "User asks what can be preserved when switching from another assistant"
+          ],
+          "avoid-when": [
+            "User is moving an existing Vellum assistant between Vellum homes; use backup/restore or teleport workflows instead"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-18T17:13:09.000Z"
+    },
+    {
+      "id": "chat-complex-documents",
+      "name": "chat-complex-documents",
+      "description": "Chat with and search your complex documents — ask questions, extract tables and fields, and get answers grounded in the source. Connects the hosted Unstructured Transform MCP server to parse, structure, and enrich PDFs, Word/Excel/PowerPoint, images, scanned files, emails, and 60+ other formats into clean, AI-ready text for search, Q&A, and summarization without building a custom parsing pipeline.",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "📄",
+        "vellum": {
+          "category": "integrations",
+          "display-name": "Chat with Complex Documents",
+          "user-invocable": "true",
+          "activation-hints": [
+            "User wants to pull content out of documents — PDFs, Word/Excel/PowerPoint, images, emails, scanned files",
+            "User wants to make a set of documents searchable, or answer questions / ground summaries against them (RAG, Q&A, knowledge base)",
+            "User mentions Unstructured, Unstructured Transform, document parsing, partitioning, table extraction, or OCR"
+          ],
+          "avoid-when": [
+            "User just needs the plain text of one small local file (use built-in file reading instead)"
+          ]
+        }
+      },
+      "compatibility": "Works on both the Vellum desktop app (local daemon) and the Vellum web app (platform-hosted). Requires an Unstructured account to authorize during the OAuth step.",
+      "updatedAt": "2026-07-13T20:48:26.000Z"
+    },
+    {
+      "id": "chatgpt-import",
+      "name": "chatgpt-import",
+      "description": "Import conversation history from ChatGPT into Vellum",
+      "metadata": {
+        "emoji": "📥",
+        "vellum": {
+          "category": "system",
+          "display-name": "ChatGPT Import"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "cli-discover",
+      "name": "cli-discover",
+      "description": "Discover which CLI tools are installed, their versions, and authentication status",
+      "metadata": {
+        "emoji": "🔍",
+        "vellum": {
+          "category": "development",
+          "display-name": "CLI Discovery"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "conversation-launcher",
+      "name": "conversation-launcher",
+      "description": "Offer the user several spin-off conversations as clickable buttons on a single persistent card. Each click spawns a fresh seeded conversation in the sidebar; the user keeps their place in the current conversation. Use when you want to branch into N focused threads (research directions, draft choices, pending replies, triage of N items) without losing the current context. Not for single-destination pivots — just reply inline.",
+      "metadata": {
+        "emoji": "🧭",
+        "vellum": {
+          "category": "productivity",
+          "display-name": "Conversation Launcher"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "daily-briefing",
+      "name": "daily-briefing",
+      "description": "Proactive daily briefing that fires on a recurring schedule, pulls recent memory and workspace context, composes a structured summary (action items, progress, radar, next steps), and delivers it to all active channels. Enable with a time like \"set up my daily briefing at 9am\". Disable, reschedule, or check status at any time.",
+      "metadata": {
+        "emoji": "📋",
+        "vellum": {
+          "category": "productivity",
+          "display-name": "Daily Briefing"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-28T21:17:09.000Z"
+    },
+    {
+      "id": "deepgram-voice",
+      "name": "deepgram-voice",
+      "description": "Select and tune a Deepgram TTS voice - curated voice list, full Aura voice catalog via API key, and tuning parameters",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🎤",
+        "vellum": {
+          "category": "voice",
+          "display-name": "Deepgram Voice"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-07-23T16:24:31.000Z"
+    },
+    {
+      "id": "deploy-fullstack-vercel",
+      "name": "deploy-fullstack-vercel",
+      "description": "Build and deploy a full-stack app (React frontend + Python/FastAPI backend) or a Vellum app to Vercel as a serverless demo with seeded data",
+      "metadata": {
+        "emoji": "🚀",
+        "vellum": {
+          "category": "development",
+          "display-name": "Deploy Fullstack to Vercel"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "discord-app-setup",
+      "name": "discord-app-setup",
+      "description": "Connect a Discord bot to the assistant via the Discord Gateway with guided application creation and intent configuration",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🎮",
+        "vellum": {
+          "category": "messaging",
+          "display-name": "Discord App Setup"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-01T17:54:05.000Z"
+    },
+    {
+      "id": "doordash",
+      "name": "doordash",
+      "description": "Order food, groceries, and convenience items from DoorDash using the built-in CLI integration",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🍕",
+        "vellum": {
+          "category": "commerce",
+          "display-name": "DoorDash"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-28T21:17:09.000Z"
+    },
+    {
+      "id": "elevenlabs-voice",
+      "name": "elevenlabs-voice",
+      "description": "Select and tune an ElevenLabs TTS voice - curated voice list, custom/cloned voices via API key, and tuning parameters",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🗣️",
+        "vellum": {
+          "category": "voice",
+          "display-name": "ElevenLabs Voice"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-07-23T16:33:06.000Z"
+    },
+    {
+      "id": "email-setup",
+      "name": "email-setup",
+      "description": "Set up this assistant's own `[name].vellum.me` domain and email address (one-time setup)",
+      "metadata": {
+        "emoji": "📧",
+        "vellum": {
+          "category": "email",
+          "display-name": "Email Setup"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "fish-audio",
+      "name": "fish-audio",
+      "description": "Generate expressive audio clips using Fish Audio S2 TTS with bracket emotion tags. Record voice memos, narration, audio messages, or any spoken content.",
+      "metadata": {
+        "emoji": "🎙️",
+        "vellum": {
+          "category": "voice",
+          "display-name": "Fish Audio TTS"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-15T21:08:24.000Z"
+    },
+    {
+      "id": "frontend-design",
+      "name": "frontend-design",
+      "description": "Design-quality layer for frontend code — typography, color, motion, spatial composition, and avoiding generic \"AI slop\" aesthetics. Use this as a companion when you are already writing or styling frontend code and want it to look distinctive and production-grade. For building an app, dashboard, tracker, calculator, visualization, landing page, or slide deck the user wants inside the assistant, load `app-builder` instead — it loads this skill itself for the design pass.",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🎨",
+        "vellum": {
+          "category": "development",
+          "display-name": "Frontend Design",
+          "activation-hints": [
+            "You are already building or styling frontend code in a project folder and want the visual result to be distinctive, not generic",
+            "Another skill (e.g. app-builder) loads this for its aesthetic/design pass"
+          ],
+          "avoid-when": [
+            "The user asks to build or visualize something for their own use inside the assistant (an app, dashboard, tracker, calculator, data visualization, landing page, or slide deck) — that is app-builder's job; it loads this skill itself",
+            "The user asks for an artifact or visualization without an existing project folder — route to app-builder first"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-03T18:19:51.000Z"
+    },
+    {
+      "id": "geo-audit",
+      "name": "geo-audit",
+      "description": "Runs a one-command technical GEO audit on any domain. Checks AI crawler access, llms.txt presence, server-side rendering, sitemap, and schema markup. Streams results live and ends with a 0–100 score plus the top 3 prioritized fixes. Built to be both genuinely useful and great to demo on camera.",
+      "metadata": {
+        "emoji": "🔎",
+        "vellum": {
+          "display-name": "GEO Audit",
+          "category": "development",
+          "activation-hints": [
+            "Run a GEO audit on <url>",
+            "Do a GEO audit check on my domain: <url>",
+            "GEO audit <url> / Audit <url> for GEO",
+            "Check how AI-ready / crawlable my site is",
+            "Why isn't my site getting picked up by ChatGPT / Perplexity / Gemini?"
+          ],
+          "avoid-when": [
+            "User wants to write an article, comparison page, or topical hub — route to geo-article-writer",
+            "User wants GEO measurement, strategy, or cadence advice rather than a technical site scan — route to geo-operator"
+          ]
+        }
+      },
+      "updatedAt": "2026-09-03T18:19:51.000Z"
+    },
+    {
+      "id": "geo-writing",
+      "name": "geo-writing",
+      "description": "Generates GEO/AEO-optimized articles designed to get AI engines (ChatGPT, Perplexity, Claude, Gemini) to cite your brand. Handles research, writing, and file output. Suggests listicle or head-to-head as starting formats if the user is unsure.",
+      "metadata": {
+        "emoji": "✍️",
+        "vellum": {
+          "category": "content",
+          "display-name": "GEO Article Writer",
+          "activation-hints": [
+            "GEO content writing, SEO article optimization",
+            "AI search engine optimization, blog posts for AI citations"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "gmail",
+      "name": "gmail",
+      "description": "Manage Gmail email — drafting, sending, organizing, filters, vacation replies, and inbox analysis",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "📨",
+        "vellum": {
+          "category": "email",
+          "display-name": "Gmail",
+          "user-invocable": "true"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-12T13:56:38.000Z"
+    },
+    {
+      "id": "gmail-trigger",
+      "name": "gmail-trigger",
+      "description": "Beta. Act on new Gmail as it arrives: get pinged only for urgent mail, digest newsletters, forward invoices — any standing instruction, across one or several accounts.",
+      "metadata": {
+        "emoji": "📬",
+        "vellum": {
+          "category": "email",
+          "display-name": "Gmail Triggers (Beta)",
+          "includes": [
+            "schedule"
+          ],
+          "activation-hints": [
+            "User wants hands-off monitoring of their Gmail inbox",
+            "Ping me / tell me when a new email arrives",
+            "Watch my inbox for new messages"
+          ],
+          "avoid-when": [
+            "Recurring inbox cleanup, archiving, triage, or reply drafting — use inbox-management",
+            "A one-time inbox summary or search, or reading a specific email"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-28T21:17:09.000Z"
+    },
+    {
+      "id": "google-calendar",
+      "name": "google-calendar",
+      "description": "View Google Calendar events for any day, create and manage events, and check availability",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "📅",
+        "vellum": {
+          "category": "calendar",
+          "display-name": "Google Calendar",
+          "user-invocable": "true",
+          "activation-hints": [
+            "plan my day or my week",
+            "what does my day look like",
+            "check my availability, find open time slots, when am I free"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-03T18:19:51.000Z"
+    },
+    {
+      "id": "guardian-verify-setup",
+      "name": "guardian-verify-setup",
+      "description": "Set up channel verification for phone, Telegram, Slack, Discord, or email channels via outbound verification flow",
+      "metadata": {
+        "emoji": "🔐",
+        "vellum": {
+          "category": "integrations",
+          "display-name": "Guardian Verify Setup",
+          "activation-hints": [
+            "Any guardian verification intent -> load this skill exclusively",
+            "\"help me verify my identity\" = verification request"
+          ],
+          "avoid-when": [
+            "Don't load phone-calls for verification intents",
+            "If the user already specified a channel, do not re-ask"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-21T21:24:24.000Z"
+    },
+    {
+      "id": "headless-claude-code",
+      "name": "headless-claude-code",
+      "description": "Reference guide for running Claude Code in third-party headless, container, and CI environments. Covers auth strategies, interactive mode pitfalls, tmux orchestration, root user workarounds, and git auth without SSH agents or keychains",
+      "metadata": {
+        "emoji": "🖥️",
+        "vellum": {
+          "category": "development",
+          "display-name": "Headless Claude Code",
+          "avoid-when": [
+            "Setting up or authenticating Claude Code inside a Vellum assistant: the ACP skill owns that path"
+          ]
+        }
+      },
+      "compatibility": "Any environment running Claude Code headlessly",
+      "updatedAt": "2026-08-07T13:48:02.000Z"
+    },
+    {
+      "id": "inbox-cleanup",
+      "name": "inbox-cleanup",
+      "description": "Run a high-recall, multi-pass email inbox cleanup. Pattern-based subject queries catch 25x more archivable email than sender scans alone. Includes urgency triage, classification signals, and post-cleanup filter setup.",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "📭",
+        "vellum": {
+          "category": "email",
+          "display-name": "Inbox Cleanup",
+          "includes": [
+            "gmail"
+          ],
+          "activation-hints": [
+            "When the user asks to clean up, organize, or triage their email inbox",
+            "When the user wants to archive old or unwanted emails in bulk",
+            "When the user asks to set up email filters to prevent inbox clutter"
+          ],
+          "avoid-when": [
+            "When the user wants to read, send, or draft a specific email",
+            "When the user is setting up email OAuth or connecting a new provider"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-05T23:44:29.000Z"
+    },
+    {
+      "id": "inbox-management",
+      "name": "inbox-management",
+      "description": "Ongoing Gmail inbox management via scheduled runs. Archives known noise, flags urgent items, drafts replies in-thread (never auto-sends), and catches stale follow-ups. Empty polls spend no model tokens. Starts in flag-only mode.",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "📬",
+        "vellum": {
+          "category": "email",
+          "display-name": "Inbox Management",
+          "includes": [
+            "gmail",
+            "schedule"
+          ],
+          "activation-hints": [
+            "When the user explicitly asks for ongoing or automatic inbox management",
+            "When the user wants periodic email triage, archiving, or follow-up tracking on a schedule",
+            "When the user says 'manage my inbox automatically' or 'set up inbox management'"
+          ],
+          "avoid-when": [
+            "When the user wants a one-time inbox cleanup (use inbox-cleanup instead)",
+            "When the user wants a quick inbox check, summary, or unread count",
+            "When the user wants to read, send, or draft a specific email",
+            "When the user is setting up email OAuth or connecting a new provider"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-03T18:19:51.000Z"
+    },
+    {
+      "id": "influencer",
+      "name": "influencer",
+      "description": "Research influencers on Instagram, TikTok, and X/Twitter through your browser",
+      "metadata": {
+        "emoji": "🔍",
+        "vellum": {
+          "category": "browsing",
+          "display-name": "Influencer Research",
+          "includes": [
+            "vellum-browser-use"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-03T18:19:51.000Z"
+    },
+    {
+      "id": "linear-app-setup",
+      "name": "linear-app-setup",
+      "description": "Create and configure a Linear agent app so the assistant can manage issues, projects, and workflows under its own identity",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🔷",
+        "vellum": {
+          "category": "development",
+          "display-name": "Linear App Setup",
+          "user-invocable": "true"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-15T21:08:24.000Z"
+    },
+    {
+      "id": "llm-cost-optimizer",
+      "name": "llm-cost-optimizer",
+      "description": "Analyze and reduce LLM spend: read usage breakdowns by call site, model, and inference profile, understand single-winner profile resolution, and pin call sites to managed profiles (Balanced / Quality / Budget / Fast) only where they should deviate from shipped defaults.",
+      "metadata": {
+        "emoji": "💸",
+        "vellum": {
+          "category": "development",
+          "display-name": "LLM Cost Optimizer"
+        }
+      },
+      "updatedAt": "2026-09-01T18:32:50.000Z"
+    },
+    {
+      "id": "llm-provider-setup",
+      "name": "llm-provider-setup",
+      "description": "Set up a new LLM provider connection, discover valid model ids, create and validate a model profile — securely and end-to-end via CLI. Covers managed vs BYO keys, secure credential collection, model discovery, profile creation, and live verification.",
+      "metadata": {
+        "emoji": "🔌",
+        "vellum": {
+          "category": "development",
+          "display-name": "LLM Provider Setup"
+        }
+      },
+      "updatedAt": "2026-08-04T23:11:27.000Z"
+    },
+    {
+      "id": "macos-automation",
+      "name": "macos-automation",
+      "description": "Automate native macOS apps and system interactions via osascript (AppleScript)",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🍎",
+        "vellum": {
+          "category": "system",
+          "display-name": "macOS Automation",
+          "platforms": [
+            "macos"
+          ],
+          "activation-hints": [
+            "Interacting with native macOS apps (Messages, Contacts, Calendar, Mail, Reminders, Music, Finder, etc.) via osascript"
+          ],
+          "avoid-when": [
+            "Tasks that can be done entirely in the sandbox or via CLI tools"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-25T23:32:13.000Z"
+    },
+    {
+      "id": "mailgun-setup",
+      "name": "mailgun-setup",
+      "description": "Set up and send emails via a user-provided Mailgun account (BYO email provider)",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "📬",
+        "vellum": {
+          "category": "email",
+          "display-name": "Mailgun Email Setup",
+          "user-invocable": "true"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-28T21:17:09.000Z"
+    },
+    {
+      "id": "mcp-setup",
+      "name": "mcp-setup",
+      "description": "Add, authenticate, list, and remove MCP (Model Context Protocol) servers — connect any external tool or service that publishes an MCP endpoint to the assistant",
+      "metadata": {
+        "emoji": "🔌",
+        "vellum": {
+          "category": "integrations",
+          "display-name": "MCP Setup"
+        }
+      },
+      "compatibility": "Works on both the Vellum desktop app (local daemon) and the Vellum web app (platform-hosted). Auth flow differs by environment.",
+      "updatedAt": "2026-09-14T10:34:19.000Z"
+    },
+    {
+      "id": "meme-generator",
+      "name": "meme-generator",
+      "description": "Generate memes from 170+ classic templates using the free Memegen.link API. Search templates, generate captioned images, and download them for posting. No API key required.",
+      "metadata": {
+        "emoji": "🐸",
+        "author": "vellum-ai",
+        "version": "0.1",
+        "vellum": {
+          "category": "content",
+          "display-name": "Meme Generator",
+          "activation-hints": [
+            "User asks to create or generate a meme",
+            "User wants a meme image for a tweet or social media post",
+            "User mentions a specific meme template (Drake, Distracted Boyfriend, etc.)",
+            "User wants to add humor or images to content"
+          ],
+          "avoid-when": [
+            "User wants original AI-generated artwork (use image-generation instead)",
+            "User wants photo editing or non-meme image manipulation"
+          ]
+        }
+      },
+      "compatibility": "Requires curl and python3. Works on macOS and Linux.",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "memory-corpus-ingest",
+      "name": "memory-corpus-ingest",
+      "description": "Ingest a large dataset into memory as a skimmed map. Cold-store the raw files under a workspace imports directory, census them into a slice plan, skim each slice into compact map pages that point back at the raw files, ingest the map with the memory ingest CLI, and author a drill-in retrieval skill so the corpus stays searchable on demand. For recording archives, transcript collections, document dumps, and any corpus too large to hold in memory directly.",
+      "metadata": {
+        "emoji": "🗺️",
+        "vellum": {
+          "category": "system",
+          "display-name": "Corpus Ingest",
+          "user-invocable": "true",
+          "activation-hints": [
+            "User wants to import a large dataset, recordings archive, or document dump into memory",
+            "User asks the assistant to learn a big folder of files or a document collection",
+            "User mentions a Fathom recordings export or an archive of meeting transcripts",
+            "User wants the assistant to know what is in a corpus without pasting it all into chat"
+          ],
+          "avoid-when": [
+            "The input is a small set of distilled memories or an export from another assistant (use assistant-migration)",
+            "The input is ChatGPT conversation history (use chatgpt-import)"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-18T17:13:09.000Z"
+    },
+    {
+      "id": "notifications",
+      "name": "notifications",
+      "description": "Send notifications through the unified notification router",
+      "metadata": {
+        "emoji": "🔔",
+        "vellum": {
+          "category": "messaging",
+          "display-name": "Notifications"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-10-12T22:15:34.000Z"
+    },
+    {
+      "id": "notion",
+      "name": "notion",
+      "description": "Read and write Notion pages and databases using the Notion API",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "📝",
+        "vellum": {
+          "category": "productivity",
+          "display-name": "Notion",
+          "activation-hints": [
+            "User asks to read, find, search, or open a page, doc, database, or directory in their Notion (e.g. 'find it in notion', 'look in my Notion', 'this is a notion directory')",
+            "User references Notion content by name or path and wants its contents pulled",
+            "User wants to create, update, append to, or query Notion pages or databases",
+            "User asks anything that requires reading or writing Notion data, including checking a task list or workspace held in Notion"
+          ],
+          "avoid-when": [
+            "User wants to set up, connect, or reconnect the Notion OAuth integration for the first time; load vellum-oauth-integrations instead"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-15T22:50:32.000Z"
+    },
+    {
+      "id": "oura",
+      "name": "oura",
+      "description": "Pull sleep, activity, readiness, heart rate, and other health data from a connected Oura Ring via the Oura Cloud API V2",
+      "metadata": {
+        "emoji": "💍",
+        "vellum": {
+          "category": "health",
+          "display-name": "Oura Ring",
+          "includes": [
+            "oura-setup"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-15T21:08:24.000Z"
+    },
+    {
+      "id": "oura-setup",
+      "name": "oura-setup",
+      "description": "Connect an Oura Ring via OAuth2 — app registration, token exchange, and credential storage",
+      "metadata": {
+        "emoji": "💍",
+        "vellum": {
+          "category": "health",
+          "display-name": "Oura Ring Setup"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-15T21:08:24.000Z"
+    },
+    {
+      "id": "outlook",
+      "name": "outlook",
+      "description": "Manage Outlook email — drafting, sending, organizing, rules, vacation replies, and inbox analysis",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "📧",
+        "vellum": {
+          "category": "email",
+          "display-name": "Outlook",
+          "user-invocable": "true"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-08T18:39:32.000Z"
+    },
+    {
+      "id": "outlook-calendar",
+      "name": "outlook-calendar",
+      "description": "View Outlook Calendar events for any day, create and manage events, and check availability",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "📅",
+        "vellum": {
+          "category": "calendar",
+          "display-name": "Outlook Calendar",
+          "user-invocable": "true",
+          "activation-hints": [
+            "plan my day or my week",
+            "what does my day look like",
+            "check my availability, find open time slots, when am I free"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-03T18:19:51.000Z"
+    },
+    {
+      "id": "plugin-builder",
+      "name": "plugin-builder",
+      "description": "Use when the user wants to build, scaffold, ship, or edit a Vellum plugin that bundles multiple surfaces (hooks, tools, skills, and more) into one installable package.",
+      "metadata": {
+        "emoji": "🧩",
+        "vellum": {
+          "category": "development",
+          "display-name": "Plugin Builder",
+          "activation-hints": [
+            "User wants to build, scaffold, or author a Vellum plugin",
+            "User wants to edit, update, or push changes to an existing plugin's GitHub repo",
+            "User wants to package skills, hooks, or tools into an installable plugin",
+            "User wants to ship MCP servers as part of a plugin (mcp.json)",
+            "User wants a plugin to receive public webhooks or become a channel (channels/ingress.json)",
+            "User wants to extend their assistant with a new capability shipped as a plugin",
+            "User wants to publish a plugin to the Vellum marketplace catalog",
+            "User asks how to ship or distribute extensions for Vellum"
+          ],
+          "avoid-when": [
+            "User only wants to install or upgrade an existing plugin (use the `assistant plugins` CLI directly)",
+            "User only wants to author a single SKILL.md (use the skill-management skill)",
+            "User wants to add a one-off user_route or webhook (use the `assistant routes` skill)"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-17T13:40:51.000Z"
+    },
+    {
+      "id": "public-ingress",
+      "name": "public-ingress",
+      "description": "Set up and manage ngrok-based public ingress for local assistants; do not use this in managed mode when platform callback routing is available",
+      "metadata": {
+        "emoji": "🌍",
+        "vellum": {
+          "category": "system",
+          "display-name": "Public Ingress",
+          "activation-hints": [
+            "Local assistant needs a public webhook or OAuth callback URL",
+            "ngrok tunnel setup for a non-managed assistant"
+          ],
+          "avoid-when": [
+            "Running in a platform-managed assistant with platform callback routing available"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-25T23:32:13.000Z"
+    },
+    {
+      "id": "resend-setup",
+      "name": "resend-setup",
+      "description": "Set up and send emails via a user-provided Resend account (BYO email provider)",
+      "metadata": {
+        "emoji": "📤",
+        "vellum": {
+          "category": "email",
+          "display-name": "Resend Email Setup",
+          "user-invocable": "true"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-28T21:17:09.000Z"
+    },
+    {
+      "id": "restaurant-reservation",
+      "name": "restaurant-reservation",
+      "description": "Book reservations on OpenTable or Resy with explicit confirmations",
+      "metadata": {
+        "emoji": "🍽️",
+        "vellum": {
+          "category": "commerce",
+          "display-name": "Restaurant Reservation Booking",
+          "includes": [
+            "vellum-browser-use"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "screen-recording",
+      "name": "screen-recording",
+      "description": "Record the user's screen as a video file",
+      "metadata": {
+        "emoji": "🎬",
+        "vellum": {
+          "platforms": [
+            "macos"
+          ],
+          "category": "content",
+          "display-name": "Screen Recording"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-03T18:19:51.000Z"
+    },
+    {
+      "id": "self-upgrade",
+      "name": "self-upgrade",
+      "description": "Upgrade vellum to the latest version, restart the assistant, and restart the gateway",
+      "metadata": {
+        "emoji": "⬆️",
+        "vellum": {
+          "category": "system",
+          "display-name": "Self Upgrade"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "sentry-app-setup",
+      "name": "sentry-app-setup",
+      "description": "Create and configure a Sentry internal integration so the assistant can manage issues, alerts, and releases under its own identity",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🔺",
+        "vellum": {
+          "category": "development",
+          "display-name": "Sentry App Setup",
+          "user-invocable": "true"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-28T21:17:09.000Z"
+    },
+    {
+      "id": "slack",
+      "name": "slack",
+      "description": "Send, read, and manage Slack messages",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "💬",
+        "vellum": {
+          "category": "messaging",
+          "display-name": "Slack"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-16T20:26:12.000Z"
+    },
+    {
+      "id": "slack-app-setup",
+      "name": "slack-app-setup",
+      "description": "Connect a Slack app to the Vellum Assistant via Socket Mode. Use whenever the user wants to set up Slack for their assistant, connect a workspace, or get the assistant talking in Slack — opens a guided setup wizard in the side panel so the user can create the app, generate tokens, and connect in one flow.",
+      "metadata": {
+        "emoji": "💬",
+        "vellum": {
+          "category": "messaging",
+          "display-name": "Slack App Setup",
+          "includes": [
+            "guardian-verify-setup",
+            "slack"
+          ],
+          "activation-hints": [
+            "set up Slack",
+            "connect Slack",
+            "add a Slack workspace",
+            "get you on Slack",
+            "install you in Slack",
+            "create a Slack bot"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-03T18:19:51.000Z"
+    },
+    {
+      "id": "spreadsheet-authoring",
+      "name": "spreadsheet-authoring",
+      "description": "Create and edit Excel spreadsheets (.xlsx) whose formulas carry their computed values, so sums and totals show in every viewer, plus date and time formats, recalculating and verifying an existing workbook.",
+      "metadata": {
+        "emoji": "📊",
+        "vellum": {
+          "category": "productivity",
+          "display-name": "Spreadsheet Authoring",
+          "activation-hints": [
+            "User asks for an Excel file, an xlsx export, or a spreadsheet",
+            "User wants a table with totals, sums, or formulas"
+          ],
+          "avoid-when": [
+            "User wants to read or search an existing document",
+            "User wants a plain CSV"
+          ]
+        }
+      },
+      "compatibility": "Needs Python in the assistant's environment with the XlsxWriter package for writing and openpyxl for verifying. Works on desktop and web.",
+      "updatedAt": "2026-09-24T20:11:20.000Z"
+    },
+    {
+      "id": "start-the-day",
+      "name": "start-the-day",
+      "description": "An on-demand personal daily briefing — weather, headlines, the shape of your day, and one thing worth your attention — in a sharp executive-assistant voice. The general-purpose morning brief; richer work or admin digests compose it as their general layer.",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🌅",
+        "vellum": {
+          "category": "productivity",
+          "display-name": "Start the Day",
+          "user-invocable": "true",
+          "activation-hints": [
+            "User asks to start their day, for a morning briefing, or a daily briefing/recap",
+            "User asks what's going on today or what they should know this morning",
+            "User wants weather, headlines, and a quick personal rundown"
+          ],
+          "avoid-when": [
+            "User wants a detailed work/admin digest — deep inbox triage, follow-up tracking, or meeting-by-meeting prep — rather than a general briefing",
+            "User wants to set up recurring or automated briefings rather than one right now"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-22T21:42:47.000Z"
+    },
+    {
+      "id": "stripe-app-setup",
+      "name": "stripe-app-setup",
+      "description": "Create and configure a Stripe restricted API key so the assistant can manage payments, subscriptions, and customers under its own scoped identity",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "💳",
+        "vellum": {
+          "category": "commerce",
+          "display-name": "Stripe App Setup",
+          "user-invocable": "true",
+          "activation-hints": [
+            "the user wants the assistant to read or manage their Stripe merchant account: customers, subscriptions, refunds, invoices, payouts"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-09T15:00:26.000Z"
+    },
+    {
+      "id": "stripe-link-wallet",
+      "name": "stripe-link-wallet",
+      "description": "Agent wallet on the Stripe Link CLI (link-cli). Connect the wallet, then buy, purchase and pay for things on the user's behalf via approved spend requests, one-time-use cards, and 402 / Machine Payment Protocol (MPP) payments",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "💳",
+        "vellum": {
+          "category": "commerce",
+          "display-name": "Stripe Link Wallet",
+          "activation-hints": [
+            "the user wants to set up, connect, or log in to Stripe Link",
+            "the user asks to buy, purchase, pay for, or spend up to an amount",
+            "a tool returns a checkout URL or payment session"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-10T12:03:09.000Z"
+    },
+    {
+      "id": "telegram-setup",
+      "name": "telegram-setup",
+      "description": "Connect a Telegram bot to the Vellum Assistant gateway with automated webhook registration and credential storage",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🤖",
+        "vellum": {
+          "category": "messaging",
+          "display-name": "Telegram Setup",
+          "activation-hints": [
+            "Telegram bot setup, webhook configuration, or BotFather token",
+            "User wants to connect Telegram to the assistant",
+            "Telegram group, supergroup, or channel messages not arriving"
+          ],
+          "avoid-when": [
+            "User wants to send/receive Telegram messages (use messaging skill instead)"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-16T19:51:15.000Z"
+    },
+    {
+      "id": "twilio-setup",
+      "name": "twilio-setup",
+      "description": "Configure Twilio credentials and phone numbers for voice calls",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "📱",
+        "vellum": {
+          "category": "integrations",
+          "display-name": "Twilio Setup",
+          "includes": [
+            "public-ingress"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-24T17:37:48.000Z"
+    },
+    {
+      "id": "typescript-eval",
+      "name": "typescript-eval",
+      "description": "Test TypeScript code snippets before persisting as skills",
+      "metadata": {
+        "emoji": "🧪",
+        "vellum": {
+          "category": "development",
+          "display-name": "TypeScript Evaluation"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-03T18:19:51.000Z"
+    },
+    {
+      "id": "vellum-avatar",
+      "name": "vellum-avatar",
+      "description": "Customize the assistant's avatar - build a native character, upload an image, or generate one with AI",
+      "metadata": {
+        "emoji": "🎨",
+        "vellum": {
+          "category": "content",
+          "display-name": "Avatar"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "vellum-browser-use",
+      "name": "vellum-browser-use",
+      "description": "Browse the web using `assistant browser` CLI commands",
+      "metadata": {
+        "emoji": "🌐",
+        "vellum": {
+          "category": "browsing",
+          "display-name": "Browser",
+          "activation-hints": [
+            "Load first if you need to browse the web (navigating, clicking, extracting web content) via `assistant browser` commands"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-21T19:48:23.000Z"
+    },
+    {
+      "id": "vellum-client-capabilities",
+      "name": "vellum-client-capabilities",
+      "description": "Truthful answers about what the Vellum client apps can and cannot do on the user's device. Device location and GPS are unavailable in every client and there is no location permission prompt to approve, so location requests are answered by asking for a typed city or address instead.",
+      "metadata": {
+        "emoji": "📍",
+        "vellum": {
+          "category": "system",
+          "display-name": "Vellum Client Capabilities",
+          "activation-hints": [
+            "asked to use the user's current location, GPS, or device position",
+            "whether the app can access a device sensor, permission, or hardware feature",
+            "browsing failed, timed out, or could not reach a page that needs a login",
+            "whether to install the desktop app or Chrome extension"
+          ],
+          "avoid-when": [
+            "the user already gave a location as text (just use it)"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-10T21:49:56.000Z"
+    },
+    {
+      "id": "vellum-conversation-management",
+      "name": "vellum-conversation-management",
+      "description": "Manage conversation threads (rename, list, search, export)",
+      "metadata": {
+        "emoji": "💬",
+        "vellum": {
+          "category": "productivity",
+          "display-name": "Conversations"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-20T21:25:08.000Z"
+    },
+    {
+      "id": "vellum-github-app-setup",
+      "name": "vellum-github-app-setup",
+      "description": "Create and configure a GitHub App so the assistant can push commits, open PRs, and comment under its own bot identity. Use when the user wants the assistant to have its own GitHub identity, or when setting up git push access for the first time.",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🤖",
+        "author": "vellum-ai",
+        "version": "1.0",
+        "vellum": {
+          "category": "development",
+          "display-name": "GitHub App Setup"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants. Requires Python 3, bun, and the assistant credentials CLI.",
+      "updatedAt": "2026-08-28T21:17:09.000Z"
+    },
+    {
+      "id": "vellum-heartbeat",
+      "name": "vellum-heartbeat",
+      "description": "Configure periodic background checklist runs",
+      "metadata": {
+        "emoji": "💓",
+        "vellum": {
+          "category": "system",
+          "display-name": "Heartbeat",
+          "activation-hints": [
+            "Set up a heartbeat, periodic checklist, background health check, or recurring background task"
+          ],
+          "avoid-when": [
+            "One-off or recurring schedules with specific payloads - use the schedule skill instead"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-08T20:16:38.000Z"
+    },
+    {
+      "id": "vellum-memory-v2-migration",
+      "name": "vellum-memory-v2-migration",
+      "description": "Perform a one-time migration from memory v1, to memory v2, which was introduced in 0.8.0.",
+      "metadata": {
+        "emoji": "🧠",
+        "vellum": {
+          "category": "system",
+          "display-name": "Memory v2 Migration",
+          "user-invocable": "true",
+          "activation-hints": [
+            "When the user asks to migrate to memory v2",
+            "When /workspace/memory/concepts/ is empty or near-empty and memory.v2.enabled is false"
+          ],
+          "avoid-when": [
+            "When concept pages are already populated and memory.v2.enabled is already true",
+            "When /workspace/pkb/ and /workspace/memory/buffer.md are both empty (nothing to migrate)"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-03T18:19:51.000Z"
+    },
+    {
+      "id": "vellum-memory-v3-migration",
+      "name": "vellum-memory-v3-migration",
+      "description": "One-time migration of an existing memory-v2 concept corpus into the memory-v3 section-grain \"wiki\" — topical articles with a stand-alone lead and queryable sections — with loss-proof staging, assistant-reviewed authoring, and a retrieval-eval gate before cutover.",
+      "metadata": {
+        "emoji": "🗂️",
+        "vellum": {
+          "category": "system",
+          "display-name": "Memory v3 Migration",
+          "user-invocable": "true",
+          "activation-hints": [
+            "When the user asks to migrate the memory wiki to v3 / the section-grain format",
+            "When memory-v3 retrieval is available but memory/concepts/ is still v2-shaped (flat bullet pages, class folders, summary: frontmatter)"
+          ],
+          "avoid-when": [
+            "When the corpus is already in v3 article shape (leads + ## sections, no summary:) and memory.v3.live is already true",
+            "When memory/concepts/ is empty or near-empty (run vellum-memory-v2-migration first — there is nothing to reform)"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-06T10:00:02.000Z"
+    },
+    {
+      "id": "vellum-oauth-integrations",
+      "name": "vellum-oauth-integrations",
+      "description": "Act on behalf of your user in any third-party software that supports OAuth 2.0",
+      "metadata": {
+        "emoji": "🔌",
+        "vellum": {
+          "category": "integrations",
+          "display-name": "Vellum OAuth Integrations"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-22T23:46:21.000Z"
+    },
+    {
+      "id": "vellum-self-knowledge",
+      "name": "vellum-self-knowledge",
+      "description": "Answer questions about Vellum, its config, billing, and hosting from live sources of truth",
+      "metadata": {
+        "emoji": "🪞",
+        "vellum": {
+          "category": "system",
+          "display-name": "Vellum Self-Knowledge",
+          "activation-hints": [
+            "what model it runs on",
+            "how Vellum works or its architecture",
+            "its current config or settings",
+            "what it can do or which skills/tools exist",
+            "whether a service is connected, and in which sense",
+            "its credits, plan allowance, spend, or daily limit",
+            "how to self-host or use your own model API key"
+          ],
+          "avoid-when": [
+            "changing configuration"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-12T11:45:18.000Z"
+    },
+    {
+      "id": "vellum-skills-catalog",
+      "name": "vellum-skills-catalog",
+      "description": "Discover bundled skills and search/install community skills from the skills.sh registry",
+      "metadata": {
+        "emoji": "🧩",
+        "vellum": {
+          "category": "system",
+          "display-name": "Skills Catalog",
+          "activation-hints": [
+            "what can you do",
+            "find a skill",
+            "install a skill",
+            "community skills",
+            "skills.sh",
+            "search for skills"
+          ],
+          "avoid-when": [
+            "User is asking about a specific bundled skill already visible in the catalog"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "vellum-sounds",
+      "name": "vellum-sounds",
+      "description": "Customize the desktop app's sound effects by adding sound files to the workspace, enabling sounds, setting volume, and assigning sounds to app events",
+      "metadata": {
+        "emoji": "🔊",
+        "vellum": {
+          "platforms": [
+            "macos",
+            "windows"
+          ],
+          "category": "content",
+          "display-name": "Sounds"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-26T00:15:53.000Z"
+    },
+    {
+      "id": "vellum-terminal-sessions",
+      "name": "vellum-terminal-sessions",
+      "description": "Manage persistent tmux terminal sessions: create, read, write to, list, and close named shell sessions. For Claude Code or Codex, use the ACP skill instead.",
+      "metadata": {
+        "emoji": "🖥️",
+        "author": "vellum-ai",
+        "version": "0.2",
+        "vellum": {
+          "category": "system",
+          "display-name": "Terminal Sessions",
+          "activation-hints": [
+            "User asks about their running terminal sessions or processes",
+            "User wants to monitor a long-running command or run something in a persistent shell",
+            "User mentions tmux or terminal management",
+            "User wants to orchestrate multiple CLI processes in parallel"
+          ],
+          "avoid-when": [
+            "Setting up, authenticating, or running Claude Code or Codex: the ACP skill owns those agents",
+            "A simple one-shot command that host_bash handles fine",
+            "The user is asking about shell scripting in general, not session management"
+          ]
+        }
+      },
+      "compatibility": "Sandbox mode works without any host dependencies. Host mode requires tmux installed on the user's machine. Works on macOS and Linux.",
+      "updatedAt": "2026-08-25T23:32:13.000Z"
+    },
+    {
+      "id": "vellum-workspace-theme",
+      "name": "vellum-workspace-theme",
+      "description": "Customize the app's visual theme — author design-token overrides (accent, background, surfaces, text, message-bubble colors) in the workspace ui/theme.json, validated by the assistant runtime and applied live to connected clients. Covers the token slots, the all-or-none override groups, the contrast floor, and reading back validation issues.",
+      "metadata": {
+        "emoji": "🖌️",
+        "vellum": {
+          "category": "content",
+          "display-name": "Workspace Theme"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-07-11T00:56:00.000Z"
+    },
+    {
+      "id": "vercel-token-setup",
+      "name": "vercel-token-setup",
+      "description": "Set up a Vercel API token for publishing apps using browser automation",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "▲",
+        "vellum": {
+          "category": "development",
+          "display-name": "Vercel Token Setup",
+          "includes": [
+            "vellum-browser-use"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-06-15T21:08:24.000Z"
+    },
+    {
+      "id": "voice-setup",
+      "name": "voice-setup",
+      "description": "Complete voice configuration in chat - desktop Talk and PTT shortcuts, microphone permissions, ElevenLabs/Deepgram TTS, and troubleshooting",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🎙️",
+        "vellum": {
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "category": "voice",
+          "display-name": "Voice Setup",
+          "includes": [
+            "elevenlabs-voice",
+            "deepgram-voice"
+          ],
+          "activation-hints": [
+            "Guided setup or troubleshooting (walkthrough, PTT not working, mic issues, ElevenLabs/Deepgram/TTS)",
+            "Simple voice setting changes (legacy macOS PTT key, wake word) -> use voice_config_update directly"
+          ],
+          "avoid-when": [
+            "If \"voice\" is in a Twilio/phone context, load phone-calls instead"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-08-26T00:50:29.000Z"
+    },
+    {
+      "id": "watch-together",
+      "name": "watch-together",
+      "description": "Watch local TV shows and movies with the user in real time. An editor model watches each playback window, transcribes dialogue, and picks story-critical frames. Source mode plays local media in mpv; screen mode captures supported desktops as a fallback.",
+      "metadata": {
+        "emoji": "📺",
+        "vellum": {
+          "category": "content",
+          "display-name": "Watch Together",
+          "emoji": "📺",
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ]
+        }
+      },
+      "updatedAt": "2026-08-30T00:44:56.000Z"
+    },
+    {
+      "id": "watcher",
+      "name": "watcher",
+      "description": "Create and manage polling watchers that monitor external services (Gmail, Google Calendar, GitHub, Linear, Outlook) for events and process them with custom action prompts",
+      "metadata": {
+        "emoji": "👀",
+        "vellum": {
+          "category": "productivity",
+          "display-name": "Watcher"
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants",
+      "updatedAt": "2026-09-09T14:11:35.000Z"
+    },
+    {
+      "id": "weather",
+      "name": "weather",
+      "description": "Get current weather conditions and forecasts for any location",
+      "metadata": {
+        "icon": "assets/icon.svg",
+        "emoji": "🌤️",
+        "vellum": {
+          "category": "productivity"
+        }
+      },
+      "updatedAt": "2026-06-03T03:10:07.000Z"
+    },
+    {
+      "id": "windows-automation",
+      "name": "windows-automation",
+      "description": "Automate native Windows apps and system interactions with PowerShell, documented COM APIs, and Microsoft UI Automation through the Windows host executor. Use for launching or inspecting desktop apps, opening Windows Settings, controlling scriptable Microsoft Office apps, and interacting with native UI when no direct CLI or API is available.",
+      "metadata": {
+        "emoji": "🪟",
+        "vellum": {
+          "category": "system",
+          "display-name": "Windows Automation",
+          "platforms": [
+            "windows"
+          ],
+          "activation-hints": [
+            "Interacting with native Windows apps or system settings",
+            "Automating Microsoft Office desktop apps via PowerShell or COM",
+            "Inspecting or controlling a desktop app through Microsoft UI Automation"
+          ],
+          "avoid-when": [
+            "The task can be completed in the sandbox or through a direct CLI or API"
+          ]
+        }
+      },
+      "compatibility": "Designed for Vellum personal assistants on Windows",
+      "updatedAt": "2026-08-27T23:10:01.000Z"
+    }
+  ]
+}

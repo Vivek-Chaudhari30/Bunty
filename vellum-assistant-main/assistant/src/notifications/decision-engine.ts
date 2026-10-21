@@ -1,0 +1,1422 @@
+/**
+ * Notification decision engine.
+ *
+ * Evaluates a NotificationSignal against available channels and user
+ * preferences, producing a NotificationDecision that tells the broadcaster
+ * whether and how to notify the user. Uses the provider abstraction to
+ * call the LLM with forced tool_choice output, falling back to a
+ * deterministic heuristic when the model is unavailable or returns
+ * invalid output.
+ */
+
+import { v4 as uuid } from "uuid";
+
+import { getDeliverableChannels } from "../channels/config.js";
+import { findContactInfoById } from "../contacts/contact-store.js";
+import {
+  anyGuardian,
+  getGuardianDelivery,
+} from "../contacts/guardian-delivery-reader.js";
+import { buildCoreIdentityContext } from "../prompts/system-prompt.js";
+import {
+  createTimeout,
+  extractToolUse,
+  getConfiguredProvider,
+  userMessage,
+} from "../providers/provider-send-message.js";
+import type { Provider } from "../providers/types.js";
+import { getLogger } from "../util/logger.js";
+import { truncate } from "../util/truncate.js";
+import {
+  ensureAccessRequestInviteDirectiveInCopy,
+  stripAccessRequestReplyMechanicsFromCopy,
+} from "./access-request-copy.js";
+import {
+  buildAccessRequestSeedContentBlocks,
+  buildToolApprovalSeedContentBlocks,
+} from "./approval-card-data.js";
+import {
+  intersectChannelAllowlist,
+  readChannelAllowlist,
+} from "./channel-allowlist.js";
+import { readCompletionContext } from "./completion-policy.js";
+import {
+  buildConversationCandidates,
+  type ConversationCandidateSet,
+  serializeCandidatesForPrompt,
+} from "./conversation-candidates.js";
+import { composeFallbackCopy, resolveTitle } from "./copy-composer.js";
+import { createDecision } from "./decisions-store.js";
+import {
+  buildQuestionDeliveryText,
+  parseGuardianQuestionPayload,
+  resolveGuardianInstructionModeFromPayload,
+  stripGuardianReplyMechanicsFromCopy,
+} from "./guardian-question-mode.js";
+import {
+  nonEmpty,
+  readPayloadObject,
+  readPayloadString,
+  readPayloadStringArray,
+} from "./notification-utils.js";
+import { getPreferenceSummary } from "./preference-summary.js";
+import type { NotificationSignal, RoutingIntent } from "./signal.js";
+import type {
+  ConversationAction,
+  NotificationChannel,
+  NotificationDecision,
+  RenderedChannelCopy,
+} from "./types.js";
+
+const log = getLogger("notification-decision-engine");
+
+const DECISION_TIMEOUT_MS = 15_000;
+const PROMPT_VERSION = "v4";
+
+/**
+ * Maximum character budget for identity context injected into the notification
+ * decision prompt. We truncate to prevent oversized prompts when SOUL.md /
+ * IDENTITY.md / users/<slug>.md are large — exceeding the provider context
+ * window would cause the LLM call to fail and silently degrade to
+ * deterministic fallback for all notifications.
+ */
+const MAX_IDENTITY_CONTEXT_CHARS = 2000;
+
+/** Completion alerts reach connected clients and registered mobile devices. */
+const COMPLETION_CHANNELS = [
+  "vellum",
+  "platform",
+] as const satisfies readonly NotificationChannel[];
+
+// ── System prompt ──────────────────────────────────────────────────────
+
+function buildSystemPrompt(
+  availableChannels: NotificationChannel[],
+  preferenceContext?: string,
+  candidateContext?: string,
+  identityContext?: string,
+  recipientNotes?: string,
+): string {
+  const sections: string[] = [
+    `You are a notification routing engine. Given a signal describing an event, decide whether the user should be notified, on which channel(s), and compose the notification copy.`,
+    ``,
+    `Available notification channels: ${availableChannels.join(", ")}`,
+  ];
+
+  if (preferenceContext) {
+    sections.push(
+      ``,
+      `<user-preferences>`,
+      preferenceContext,
+      `</user-preferences>`,
+    );
+  }
+
+  if (recipientNotes) {
+    sections.push(
+      ``,
+      `<recipient-context>`,
+      `The following are notes about the notification recipient. Use this context to tailor notification tone, formality, and content to the recipient's preferences.`,
+      recipientNotes,
+      `</recipient-context>`,
+    );
+  }
+
+  if (identityContext) {
+    sections.push(
+      ``,
+      `<assistant-identity>`,
+      `The following describes the assistant's identity, personality, and the user's profile. Use this context to match the assistant's tone and style when composing notification copy. Do not include information from this context that is not relevant to the notification.`,
+      identityContext,
+      `</assistant-identity>`,
+    );
+  }
+
+  sections.push(
+    ``,
+    `Guidelines:`,
+    `- Only notify when the signal genuinely warrants user attention.`,
+    `- Prefer fewer channels unless the signal is urgent.`,
+    `- For high-urgency signals that require action, notify on all available channels.`,
+    `- For low-urgency background events, suppress unless they match user preferences.`,
+    `- Generate a stable dedupeKey derived from the signal context so duplicate signals can be suppressed.`,
+    ``,
+    `Routing intent (when present in the signal):`,
+    `- \`all_channels\`: The source explicitly requests notification on ALL connected channels.`,
+    `- \`multi_channel\`: The source prefers 2+ channels when 2+ are connected.`,
+    `- \`single_channel\`: Default routing behavior — use your best judgment (no override).`,
+    `When a routing intent is present, respect it in your channel selection. A post-decision guard will enforce the intent.`,
+    ``,
+    `Copy guidelines (three distinct outputs):`,
+    `- \`title\` and \`body\` are for native notification popups (e.g. vellum desktop/mobile) — keep them short and glanceable (title ≤ 8 words, body ≤ 2 sentences).`,
+    `  - Write popup copy as final copy for the guardian or recipient. Do not write instructions for the assistant or another intermediary.`,
+    `- \`deliveryText\` is the channel-native message for chat channels (e.g. telegram). It must read naturally as a standalone message.`,
+    `  - Do not prepend mechanical labels like "Conversation:".`,
+    `  - Do not mention channel or transport names (e.g. Telegram, Slack, email) unless the event context explicitly requires it.`,
+    `  - Do not repeat title/body verbatim unless that repetition is truly necessary.`,
+    `  - Avoid meta-send phrasing (e.g. "I'd like to send a notification", "May I go ahead with that?"). Write the recipient-facing message directly.`,
+    `  - Avoid intermediary-instruction phrasing like "consider telling the guardian", "ask the recipient to", or "the assistant should remind them". Rewrite it as final copy the recipient can act on directly.`,
+    `  - For telegram: 1-2 concise sentences.`,
+    `  - For guardian requests (approvals, questions, access requests) on every channel: describe the request only. Never include reference or approval codes, code-reply instructions, or directions to respond elsewhere. The delivery layer adds buttons, or typed-reply instructions where a channel has none.`,
+    `- \`conversationSeedMessage\` is the opening message in the internal notification conversation and also the expanded detail shown in the home feed. It should be richer and more contextual than the popup body.`,
+    `  - For vellum (desktop): use structured markdown for readability. Break content into bullet points, numbered lists, or short sections with **bold** labels. Avoid long unbroken paragraphs — scan-friendly formatting is preferred.`,
+    `  - Never dump raw JSON. Include only human-readable context.`,
+    ``,
+    `Conversation reuse guidelines:`,
+    `- For each selected channel, decide whether to start a new conversation or reuse an existing one.`,
+    `- Set \`conversationActions\` keyed by channel name with \`action\` = "start_new" or "reuse_existing" (with \`conversationId\` from the candidates).`,
+    `- Prefer \`reuse_existing\` when the signal is clearly a continuation or update of an existing notification conversation (same event type, related context).`,
+    `- Prefer \`start_new\` when the signal is a distinct event that deserves its own conversation.`,
+    `- You may ONLY reuse a conversationId that appears in the provided candidate list. Any other ID will be rejected and downgraded to start_new.`,
+    `- When no candidates are available for a channel, always use start_new.`,
+  );
+
+  if (candidateContext) {
+    sections.push(
+      ``,
+      `<conversation-candidates>`,
+      candidateContext,
+      `</conversation-candidates>`,
+    );
+  }
+
+  sections.push(
+    ``,
+    `You MUST respond using the \`record_notification_decision\` tool. Do not respond with text.`,
+  );
+
+  return sections.join("\n");
+}
+
+// ── User prompt ────────────────────────────────────────────────────────
+
+function buildUserPrompt(signal: NotificationSignal): string {
+  const parts: string[] = [
+    `Signal ID: ${signal.signalId}`,
+    `Source event: ${signal.sourceEventName}`,
+    `Source channel: ${signal.sourceChannel}`,
+    `Urgency: ${signal.attentionHints.urgency}`,
+    `Requires action: ${signal.attentionHints.requiresAction}`,
+    `Is async background: ${signal.attentionHints.isAsyncBackground}`,
+    `User is viewing source now: ${signal.attentionHints.visibleInSourceNow}`,
+  ];
+
+  if (signal.attentionHints.deadlineAt) {
+    parts.push(
+      `Deadline: ${new Date(signal.attentionHints.deadlineAt).toISOString()}`,
+    );
+  }
+
+  if (signal.routingIntent && signal.routingIntent !== "single_channel") {
+    parts.push(`Routing intent: ${signal.routingIntent}`);
+  }
+
+  if (signal.routingHints && Object.keys(signal.routingHints).length > 0) {
+    parts.push(`Routing hints: ${JSON.stringify(signal.routingHints)}`);
+  }
+
+  const payloadStr = JSON.stringify(signal.contextPayload);
+  if (payloadStr.length > 2) {
+    parts.push(``, `Context payload:`, payloadStr);
+  }
+
+  return `Evaluate this notification signal:\n\n${parts.join("\n")}`;
+}
+
+// ── Tool definition ────────────────────────────────────────────────────
+
+/**
+ * Spec for the per-channel notification title. The title is the one line a
+ * reader sees in the notification bell, where a row that only reports shows
+ * nothing else, so it has to say what happened on its own rather than name a
+ * topic the body then explains. Same length discipline as the conversation
+ * title prompt (`persistence/conversation-title-service.ts`), which shares
+ * this model profile and the `normalizeTitle` clamp.
+ */
+const TITLE_FIELD_DESCRIPTION = [
+  "Scannable headline saying WHAT HAPPENED or WHAT IS NEEDED, so it stands on its own without the body.",
+  "Rules:",
+  "- 2 to 6 words. Longer titles are unacceptable, ruthlessly compress",
+  "- 40 characters absolute maximum, longer titles get truncated and look broken",
+  "- Lead with the outcome as a short clause: a past-tense verb for something done ('Prepared a wedding schedule', 'Nightly backup failed'), a need for something waiting on the reader ('Needs an answer on the venue')",
+  "- Sentence case, never Title Case",
+  "- Do NOT restate the body word for word. The body adds the detail the title leaves out: numbers, names, what to do next",
+  "- No quotes, no markdown, no trailing punctuation",
+  "- Never describe missing or thin context. Titles like 'Notification', 'Update', 'Activity complete', 'Missing context' are forbidden. Say what was done from the words that ARE present",
+  "Examples:",
+  "- Body 'Your 9am standup with the platform team starts in 5 minutes' -> 'Platform standup in 5 minutes', NOT 'Platform Standup'",
+  "- Body 'The nightly backup job failed on db-primary at 02:14' -> 'Nightly backup failed', NOT 'Nightly Backup Failure'",
+  "- Body 'Alice replied about the Q3 pricing deck and wants your notes' -> 'Alice wants notes on the Q3 deck', NOT 'Q3 Pricing Deck'",
+  "- Body 'Recapped the 12 emails that needed a reply and deleted 6 newsletters' -> 'Recapped 12 emails, deleted 6', NOT 'Inbox Recap'",
+].join("\n");
+
+function buildDecisionTool(availableChannels: NotificationChannel[]) {
+  return {
+    name: "record_notification_decision",
+    description: "Record the notification routing decision for this signal",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        shouldNotify: {
+          type: "boolean",
+          description: "Whether the user should be notified about this signal",
+        },
+        selectedChannels: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: availableChannels,
+          },
+          description: "Which channels to deliver the notification on",
+        },
+        reasoningSummary: {
+          type: "string",
+          description:
+            "Brief explanation of why this routing decision was made",
+        },
+        renderedCopy: {
+          type: "object",
+          description: "Notification copy keyed by channel name",
+          properties: Object.fromEntries(
+            availableChannels.map((ch) => [
+              ch,
+              {
+                type: "object",
+                properties: {
+                  title: {
+                    type: "string",
+                    description: TITLE_FIELD_DESCRIPTION,
+                  },
+                  body: {
+                    type: "string",
+                    description:
+                      "Concise notification popup body (≤ 2 sentences)",
+                  },
+                  deliveryText: {
+                    type: "string",
+                    description:
+                      "Channel-native chat message text (for example Telegram). Must stand alone naturally.",
+                  },
+                  conversationTitle: {
+                    type: "string",
+                    description:
+                      "Optional conversation title for grouped notifications",
+                  },
+                  conversationSeedMessage: {
+                    type: "string",
+                    description:
+                      "Richer opening message for the notification conversation. More contextual than title/body. For vellum: 2-4 sentences. For telegram: 1-2 sentences. Never raw JSON.",
+                  },
+                },
+                required: ["title", "body"],
+              },
+            ]),
+          ),
+        },
+        conversationActions: {
+          type: "object",
+          description:
+            "Per-channel conversation action: start a new conversation or reuse an existing candidate. Keyed by channel name.",
+          properties: Object.fromEntries(
+            availableChannels.map((ch) => [
+              ch,
+              {
+                type: "object",
+                properties: {
+                  action: {
+                    type: "string",
+                    enum: ["start_new", "reuse_existing"],
+                    description:
+                      "Whether to start a new conversation or reuse an existing one.",
+                  },
+                  conversationId: {
+                    type: "string",
+                    description:
+                      "Required when action is reuse_existing. Must be a conversationId from the provided conversation candidates.",
+                  },
+                },
+                required: ["action"],
+              },
+            ]),
+          ),
+        },
+        deepLinkTarget: {
+          type: "object",
+          description:
+            "Optional deep link metadata for navigating to the source context",
+        },
+        dedupeKey: {
+          type: "string",
+          description:
+            "A stable key derived from the signal to deduplicate repeated notifications for the same event",
+        },
+        confidence: {
+          type: "number",
+          description: "Confidence in the decision (0.0-1.0)",
+        },
+      },
+      required: [
+        "shouldNotify",
+        "selectedChannels",
+        "reasoningSummary",
+        "renderedCopy",
+        "dedupeKey",
+        "confidence",
+      ],
+    },
+  };
+}
+
+// ── Deterministic fallback ─────────────────────────────────────────────
+
+function buildFallbackDecision(
+  signal: NotificationSignal,
+  availableChannels: NotificationChannel[],
+): NotificationDecision {
+  const urgency = signal.attentionHints.urgency;
+  const isHighUrgencyAction =
+    (urgency === "high" || urgency === "critical") &&
+    signal.attentionHints.requiresAction;
+
+  // Always include the vellum channel in the fallback — it's a local
+  // broadcast with no cost, so desktop notifications should never be lost
+  // when the LLM is unavailable. External channels (e.g. Telegram) are
+  // only included for high-urgency actionable signals.
+  const selectedChannels: NotificationChannel[] = isHighUrgencyAction
+    ? [...availableChannels]
+    : availableChannels.filter((ch) => ch === "vellum");
+
+  if (selectedChannels.length === 0) {
+    return {
+      shouldNotify: false,
+      selectedChannels: [],
+      reasoningSummary: "Fallback: suppressed (vellum channel not available)",
+      renderedCopy: {},
+      dedupeKey: `fallback:${signal.sourceEventName}:${signal.sourceContextId}:${signal.createdAt}`,
+      confidence: 0.3,
+      fallbackUsed: true,
+    };
+  }
+
+  const copy = composeFallbackCopy(signal, selectedChannels);
+
+  return {
+    shouldNotify: true,
+    selectedChannels,
+    reasoningSummary: isHighUrgencyAction
+      ? "Fallback: high urgency + requires action — all channels"
+      : "Fallback: vellum-only (local, always delivered)",
+    renderedCopy: copy,
+    dedupeKey: `fallback:${signal.sourceEventName}:${signal.sourceContextId}:${signal.createdAt}`,
+    confidence: 0.3,
+    fallbackUsed: true,
+  };
+}
+
+// ── Validation ─────────────────────────────────────────────────────────
+
+const VALID_CHANNELS = new Set<string>(getDeliverableChannels());
+
+function validateDecisionOutput(
+  input: Record<string, unknown>,
+  availableChannels: NotificationChannel[],
+  candidateSet?: ConversationCandidateSet,
+): NotificationDecision | null {
+  if (typeof input.shouldNotify !== "boolean") {
+    return null;
+  }
+  if (typeof input.reasoningSummary !== "string") {
+    return null;
+  }
+  if (typeof input.dedupeKey !== "string") {
+    return null;
+  }
+
+  if (!Array.isArray(input.selectedChannels)) {
+    return null;
+  }
+  const validatedChannels = (input.selectedChannels as unknown[]).filter(
+    (ch): ch is NotificationChannel =>
+      typeof ch === "string" &&
+      VALID_CHANNELS.has(ch) &&
+      availableChannels.includes(ch as NotificationChannel),
+  );
+  const validChannels = [...new Set(validatedChannels)];
+
+  const confidence =
+    typeof input.confidence === "number"
+      ? Math.max(0, Math.min(1, input.confidence))
+      : 0.5;
+
+  // Validate renderedCopy
+  const renderedCopy: Partial<
+    Record<NotificationChannel, RenderedChannelCopy>
+  > = {};
+  if (input.renderedCopy && typeof input.renderedCopy === "object") {
+    const copyObj = input.renderedCopy as Record<string, unknown>;
+    for (const ch of validChannels) {
+      const chCopy = copyObj[ch];
+      if (chCopy && typeof chCopy === "object") {
+        const c = chCopy as Record<string, unknown>;
+        if (typeof c.title === "string" && typeof c.body === "string") {
+          if (!c.title.trim() && !c.body.trim()) {
+            log.warn(
+              { channel: ch },
+              "LLM returned empty title and body for channel copy — broadcaster will use fallback",
+            );
+          }
+          renderedCopy[ch] = {
+            title: resolveTitle(c.title, c.body),
+            body: c.body,
+            deliveryText:
+              typeof c.deliveryText === "string" ? c.deliveryText : undefined,
+            conversationTitle:
+              typeof c.conversationTitle === "string"
+                ? c.conversationTitle
+                : undefined,
+            conversationSeedMessage:
+              typeof c.conversationSeedMessage === "string"
+                ? c.conversationSeedMessage
+                : undefined,
+          };
+        }
+      }
+    }
+  }
+
+  // Validate conversationActions — strictly against the provided candidate set
+  const conversationActions = validateConversationActions(
+    input.conversationActions,
+    validChannels,
+    candidateSet,
+  );
+
+  const deepLinkTarget =
+    input.deepLinkTarget && typeof input.deepLinkTarget === "object"
+      ? (input.deepLinkTarget as Record<string, unknown>)
+      : undefined;
+
+  return {
+    shouldNotify: input.shouldNotify,
+    selectedChannels: validChannels,
+    reasoningSummary: input.reasoningSummary,
+    renderedCopy,
+    conversationActions:
+      Object.keys(conversationActions).length > 0
+        ? conversationActions
+        : undefined,
+    deepLinkTarget,
+    dedupeKey: input.dedupeKey,
+    confidence,
+    fallbackUsed: false,
+  };
+}
+
+// ── Conversation action validation ────────────────────────────────────
+
+/**
+ * Validate and sanitize conversation actions from LLM output.
+ *
+ * - reuse_existing targets are checked against the candidate set; invalid
+ *   targets are downgraded to start_new with a warning.
+ * - Channels not in the selected set are ignored.
+ * - Missing actions for selected channels default to start_new (handled
+ *   downstream, not materialized here to keep the output compact).
+ */
+export function validateConversationActions(
+  raw: unknown,
+  validChannels: NotificationChannel[],
+  candidateSet?: ConversationCandidateSet,
+): Partial<Record<NotificationChannel, ConversationAction>> {
+  const result: Partial<Record<NotificationChannel, ConversationAction>> = {};
+
+  if (!raw || typeof raw !== "object") {
+    return result;
+  }
+
+  const actionsObj = raw as Record<string, unknown>;
+  const channelSet = new Set(validChannels);
+
+  // Build a lookup of valid candidate conversationIds per channel
+  const validCandidateIds = new Map<NotificationChannel, Set<string>>();
+  if (candidateSet) {
+    for (const [ch, candidates] of Object.entries(candidateSet) as [
+      NotificationChannel,
+      { conversationId: string }[],
+    ][]) {
+      validCandidateIds.set(
+        ch,
+        new Set(candidates.map((c) => c.conversationId)),
+      );
+    }
+  }
+
+  for (const [ch, actionRaw] of Object.entries(actionsObj)) {
+    if (!channelSet.has(ch as NotificationChannel)) {
+      continue;
+    }
+    if (!actionRaw || typeof actionRaw !== "object") {
+      continue;
+    }
+
+    const channel = ch as NotificationChannel;
+    const action = actionRaw as Record<string, unknown>;
+
+    if (action.action === "start_new") {
+      result[channel] = { action: "start_new" };
+    } else if (action.action === "reuse_existing") {
+      const rawConversationId = action.conversationId;
+      if (typeof rawConversationId !== "string" || !rawConversationId.trim()) {
+        log.warn(
+          { channel },
+          "LLM returned reuse_existing without conversationId — downgrading to start_new",
+        );
+        result[channel] = { action: "start_new" };
+        continue;
+      }
+
+      // Normalize: the LLM may return a valid ID with leading/trailing whitespace
+      const conversationId = rawConversationId.trim();
+
+      // Strict validation: the conversationId must exist in the candidate set
+      const candidateIds = validCandidateIds.get(channel);
+      if (!candidateIds || !candidateIds.has(conversationId)) {
+        log.warn(
+          { channel, conversationId },
+          "LLM returned reuse_existing with conversationId not in candidate set — downgrading to start_new",
+        );
+        result[channel] = { action: "start_new" };
+        continue;
+      }
+
+      result[channel] = { action: "reuse_existing", conversationId };
+    }
+    // Unknown action values are silently ignored — the channel will default
+    // to start_new downstream.
+  }
+
+  return result;
+}
+
+/**
+ * Composed copy never carries reply mechanics. The broadcaster's
+ * `plainTextFallback` is their only home, and a transport appends it exactly
+ * when it sends text without buttons, so the model's own echo of them
+ * ("Reference code: X", "Reply "X approve"", "Reply "X trust"") is noise on
+ * every channel and comes out here on every decision path.
+ */
+function stripReplyMechanics(
+  decision: NotificationDecision,
+  signal: NotificationSignal,
+): NotificationDecision {
+  const isQuestion = signal.sourceEventName === "guardian.question";
+  const isAccessRequest = signal.sourceEventName === "ingress.access_request";
+  if (!isQuestion && !isAccessRequest) {
+    return decision;
+  }
+  const rawCode = signal.contextPayload.requestCode;
+  const requestCode =
+    typeof rawCode === "string" && rawCode.trim().length > 0
+      ? rawCode.trim().toUpperCase()
+      : undefined;
+  if (isQuestion && !requestCode) {
+    return decision;
+  }
+  const questionText = readPayloadString(signal.contextPayload, "questionText");
+
+  const nextCopy: Partial<Record<NotificationChannel, RenderedChannelCopy>> = {
+    ...decision.renderedCopy,
+  };
+  for (const channel of Object.keys(nextCopy) as NotificationChannel[]) {
+    const copy = nextCopy[channel];
+    if (!copy) {
+      continue;
+    }
+    nextCopy[channel] =
+      isQuestion && requestCode
+        ? stripGuardianReplyMechanicsFromCopy(copy, requestCode, questionText)
+        : // The invite directive is context the model may leave out, and the
+          // only affordance for that flow on most surfaces, so it is ensured
+          // after the code mechanics come out.
+          ensureAccessRequestInviteDirectiveInCopy(
+            stripAccessRequestReplyMechanicsFromCopy(
+              copy,
+              signal.contextPayload,
+            ),
+          );
+  }
+
+  return { ...decision, renderedCopy: nextCopy };
+}
+
+/**
+ * Inject seedContentBlocks into every channel's copy when not already present.
+ * Used by both tool-approval and access-request guards to ensure Surface cards
+ * render on all decision paths (LLM, assistant_tool, fallback).
+ */
+function ensureSeedContentBlocks(
+  decision: NotificationDecision,
+  blocks: unknown[] | null | undefined,
+): NotificationDecision {
+  if (!blocks) {
+    return decision;
+  }
+
+  const nextCopy: Partial<Record<NotificationChannel, RenderedChannelCopy>> = {
+    ...decision.renderedCopy,
+  };
+  for (const channel of Object.keys(nextCopy) as NotificationChannel[]) {
+    const copy = nextCopy[channel];
+    if (!copy) {
+      continue;
+    }
+    if (!copy.seedContentBlocks) {
+      nextCopy[channel] = { ...copy, seedContentBlocks: blocks };
+    }
+  }
+
+  return {
+    ...decision,
+    renderedCopy: nextCopy,
+  };
+}
+
+/**
+ * Pin a question's channel text to the question itself.
+ *
+ * Every other notification's copy is composed here, and for most of them a
+ * paraphrase is an improvement. A question is the exception: the guardian is
+ * being asked to choose between these words, and the composed copy replaces
+ * `title` / `body` / `deliveryText` wholesale, so a summary of the question
+ * arrives where the question should be and the options never appear at all.
+ * Runs on every decision path for the same reason the seed-block guard does.
+ *
+ * Scoped to answer mode. A `pending_question` carrying a tool name is a voice
+ * tool approval, where composed copy is the right thing.
+ */
+function pinQuestionDeliveryCopy(
+  decision: NotificationDecision,
+  signal: NotificationSignal,
+): NotificationDecision {
+  if (signal.sourceEventName !== "guardian.question") {
+    return decision;
+  }
+  const parsed = parseGuardianQuestionPayload(signal.contextPayload);
+  if (
+    !parsed ||
+    parsed.requestKind !== "pending_question" ||
+    resolveGuardianInstructionModeFromPayload(parsed).mode !== "answer"
+  ) {
+    return decision;
+  }
+
+  const text = buildQuestionDeliveryText(parsed);
+  const nextCopy: Partial<Record<NotificationChannel, RenderedChannelCopy>> = {
+    ...decision.renderedCopy,
+  };
+  for (const channel of Object.keys(nextCopy) as NotificationChannel[]) {
+    const copy = nextCopy[channel];
+    if (!copy) {
+      continue;
+    }
+    nextCopy[channel] = {
+      ...copy,
+      body: text,
+      deliveryText: text,
+      conversationSeedMessage: text,
+    };
+  }
+
+  return { ...decision, renderedCopy: nextCopy };
+}
+
+/**
+ * Tool-approval and tool-grant notifications need a Surface card with
+ * Approve/Reject buttons on all decision paths.
+ */
+function enforceToolApprovalSeedBlocks(
+  decision: NotificationDecision,
+  signal: NotificationSignal,
+): NotificationDecision {
+  if (signal.sourceEventName !== "guardian.question") {
+    return decision;
+  }
+  return ensureSeedContentBlocks(
+    decision,
+    buildToolApprovalSeedContentBlocks(signal.contextPayload),
+  );
+}
+
+/**
+ * Access-request notifications need their Surface card on every decision
+ * path, the same way tool approvals do.
+ */
+function enforceAccessRequestSeedBlocks(
+  decision: NotificationDecision,
+  signal: NotificationSignal,
+): NotificationDecision {
+  if (signal.sourceEventName !== "ingress.access_request") {
+    return decision;
+  }
+  return ensureSeedContentBlocks(
+    decision,
+    buildAccessRequestSeedContentBlocks(signal.contextPayload),
+  );
+}
+
+// ── Producer pass-through decisions ────────────────────────────────────
+
+/**
+ * Build, guard, and persist a decision whose copy came verbatim from the
+ * producer, bypassing the LLM classifier. The title falls back to one derived
+ * from the body when the producer supplies none or supplies one that fails
+ * normalization.
+ *
+ * `renderedCopy` and `conversationActions` are populated for every available
+ * channel, not just `selectedChannels`: downstream guards (routing-intent
+ * expansion in `enforceRoutingIntent`, urgency-forced vellum prepending in
+ * `emit-signal`) may widen `selectedChannels` afterwards, and pre-seeding
+ * keeps the verbatim message from degrading to an empty
+ * `composeFallbackCopy` body.
+ */
+function buildPassThroughDecision(params: {
+  signal: NotificationSignal;
+  availableChannels: NotificationChannel[];
+  selectedChannels: NotificationChannel[];
+  body: string;
+  reasoningSummary: string;
+}): NotificationDecision {
+  const { availableChannels, body, signal } = params;
+  const title = resolveTitle(
+    readPayloadString(signal.contextPayload, "requestedTitle"),
+    body,
+  );
+  const deepLinkTarget = readPayloadObject(
+    signal.contextPayload,
+    "deepLinkMetadata",
+  );
+  let decision: NotificationDecision = {
+    shouldNotify: params.selectedChannels.length > 0,
+    selectedChannels: params.selectedChannels,
+    reasoningSummary: params.reasoningSummary,
+    renderedCopy: Object.fromEntries(
+      availableChannels.map((ch) => [
+        ch,
+        { title, body, conversationSeedMessage: body },
+      ]),
+    ) as NotificationDecision["renderedCopy"],
+    conversationActions: Object.fromEntries(
+      availableChannels.map((ch) => [ch, { action: "start_new" as const }]),
+    ) as NotificationDecision["conversationActions"],
+    // A producer-supplied key names what it wants collapsed; the signal id is
+    // a per-emit fallback that collapses nothing.
+    dedupeKey: signal.dedupeKey ?? signal.signalId,
+    confidence: 1.0,
+    fallbackUsed: false,
+    verbatimCopy: true,
+    ...(deepLinkTarget ? { deepLinkTarget } : {}),
+  };
+  decision = applyDecisionGuards(decision, signal);
+  decision.persistedDecisionId = persistDecision(signal, decision);
+  return decision;
+}
+
+function selectDefaultChannelsByUrgency(
+  urgency: NotificationSignal["attentionHints"]["urgency"],
+  availableChannels: NotificationChannel[],
+): NotificationChannel[] {
+  const isUrgent = urgency === "critical" || urgency === "high";
+  if (isUrgent) {
+    return [...availableChannels];
+  }
+  return availableChannels.includes("vellum")
+    ? ["vellum" as NotificationChannel]
+    : [];
+}
+
+/**
+ * The deterministic guards every decision passes through once the model,
+ * the assistant-tool pass-through, or the fallback has rendered copy.
+ */
+function applyDecisionGuards(
+  decision: NotificationDecision,
+  signal: NotificationSignal,
+): NotificationDecision {
+  decision = pinQuestionDeliveryCopy(decision, signal);
+  decision = stripReplyMechanics(decision, signal);
+  decision = enforceToolApprovalSeedBlocks(decision, signal);
+  decision = enforceAccessRequestSeedBlocks(decision, signal);
+  decision = enforceGuardianRequestConversationAffinity(decision, signal);
+  return enforceConversationAffinity(decision, signal.conversationAffinityHint);
+}
+
+// ── Core evaluation function ───────────────────────────────────────────
+
+export async function evaluateSignal(
+  signal: NotificationSignal,
+  availableChannels: NotificationChannel[],
+  preferenceContext?: string,
+): Promise<NotificationDecision> {
+  // Pass-through branches run before the preference and candidate loads
+  // below: their copy and routing are producer-supplied, so neither DB
+  // lookup can influence the outcome.
+
+  // Assistant-tool pass-through: when a producer hands us a verbatim
+  // message body via contextPayload.requestedMessage, skip the LLM
+  // classifier entirely. The producer has already done the routing and
+  // copy decisions, we just enforce the standard post-decision guards
+  // and persist the result.
+  const requestedBody = nonEmpty(
+    readPayloadString(signal.contextPayload, "requestedMessage"),
+  );
+  if (readCompletionContext(signal) && requestedBody) {
+    return buildPassThroughDecision({
+      signal,
+      availableChannels,
+      selectedChannels: COMPLETION_CHANNELS.filter((channel) =>
+        availableChannels.includes(channel),
+      ),
+      body: requestedBody,
+      reasoningSummary: "background_result pass-through",
+    });
+  }
+  if (signal.sourceChannel === "assistant_tool" && requestedBody) {
+    const payload = signal.contextPayload as Record<string, unknown>;
+    const defaultChannels = selectDefaultChannelsByUrgency(
+      signal.attentionHints.urgency,
+      availableChannels,
+    );
+    // `channelAllowlist` is exclusive: only those available channels are
+    // selected. `preferredChannels` is additive on top of the default set
+    // (vellum stays the canonical inbox) and is ignored when an allowlist
+    // is present. Disconnected names are dropped so we never deliver on
+    // something unavailable.
+    const exclusiveAllowlist = readChannelAllowlist(payload);
+    const preferredChannelsRaw = readPayloadStringArray(
+      payload,
+      "preferredChannels",
+    );
+    let selectedChannels = defaultChannels;
+    if (exclusiveAllowlist) {
+      selectedChannels = intersectChannelAllowlist(
+        exclusiveAllowlist,
+        availableChannels,
+      );
+    } else if (preferredChannelsRaw && preferredChannelsRaw.length > 0) {
+      const availableSet = new Set<string>(availableChannels);
+      const preferredAvailable = preferredChannelsRaw.filter((c) => {
+        return availableSet.has(c);
+      }) as NotificationChannel[];
+      if (preferredAvailable.length > 0) {
+        selectedChannels = Array.from(
+          new Set<NotificationChannel>([
+            ...selectedChannels,
+            ...preferredAvailable,
+          ]),
+        );
+      }
+    }
+    return buildPassThroughDecision({
+      signal,
+      availableChannels,
+      selectedChannels,
+      body: requestedBody,
+      reasoningSummary: "assistant_tool pass-through",
+    });
+  }
+
+  // Assistant-reply pass-through: the delivery scope is fixed
+  // (COMPLETION_CHANNELS), so the LLM classifier has nothing to decide.
+  if (signal.sourceEventName === "chat.assistant_reply" && requestedBody) {
+    return buildPassThroughDecision({
+      signal,
+      availableChannels,
+      selectedChannels: COMPLETION_CHANNELS.filter((ch) =>
+        availableChannels.includes(ch),
+      ),
+      body: requestedBody,
+      reasoningSummary: "assistant_reply pass-through",
+    });
+  }
+
+  // Scheduler-owned requested copy: the scheduler already authored the
+  // complete message. Ownership requires both the signal source and the
+  // payload marker so schedule.result (requestedMessage, no
+  // requestedBySource) and notify-mode (message, no requestedBySource)
+  // stay on their existing paths. Urgency still chooses channels; every
+  // selected channel keeps the producer body.
+  const requestedBySource = nonEmpty(
+    readPayloadString(signal.contextPayload, "requestedBySource"),
+  );
+  if (
+    signal.sourceChannel === "scheduler" &&
+    requestedBySource === "scheduler" &&
+    requestedBody
+  ) {
+    return buildPassThroughDecision({
+      signal,
+      availableChannels,
+      selectedChannels: selectDefaultChannelsByUrgency(
+        signal.attentionHints.urgency,
+        availableChannels,
+      ),
+      body: requestedBody,
+      reasoningSummary: "scheduler requested-message pass-through",
+    });
+  }
+
+  // Schedule-result pass-through: the body is the run's own reply, which is
+  // the whole point of the notification: a briefing, a digest, a report. The
+  // classifier rewrites bodies into short alerts, which would throw away the
+  // content the user set the schedule up to receive. Routing has nothing to
+  // decide either: the user asked for this cadence, so it goes to the inbox
+  // and to push, and `enforceRoutingIntent` still narrows it afterwards.
+  if (signal.sourceEventName === "schedule.result" && requestedBody) {
+    return buildPassThroughDecision({
+      signal,
+      availableChannels,
+      selectedChannels: COMPLETION_CHANNELS.filter((ch) =>
+        availableChannels.includes(ch),
+      ),
+      body: requestedBody,
+      reasoningSummary: "schedule_result pass-through",
+    });
+  }
+
+  // When no explicit preference context is provided, load the user's
+  // stored notification preferences from the memory-backed store.
+  // Wrapped in try/catch so a DB failure doesn't break the decision path.
+  let resolvedPreferenceContext = preferenceContext;
+  if (resolvedPreferenceContext === undefined) {
+    try {
+      resolvedPreferenceContext = getPreferenceSummary() ?? undefined;
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.warn(
+        { err: errMsg },
+        "Failed to load preference summary, proceeding without preferences",
+      );
+      resolvedPreferenceContext = undefined;
+    }
+  }
+
+  // Build conversation candidate set for reuse decisions. Wrapped in try/catch
+  // so candidate lookup failures do not block the decision path.
+  let candidateSet: ConversationCandidateSet | undefined;
+  try {
+    candidateSet = await buildConversationCandidates(availableChannels);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    log.warn(
+      { err: errMsg },
+      "Failed to build conversation candidates, proceeding without candidates",
+    );
+  }
+
+  const provider = await getConfiguredProvider("notificationDecision");
+  if (!provider) {
+    log.warn(
+      "Configured provider unavailable for notification decision, using fallback",
+    );
+    const decision = applyDecisionGuards(
+      buildFallbackDecision(signal, availableChannels),
+      signal,
+    );
+    decision.persistedDecisionId = persistDecision(signal, decision);
+    return decision;
+  }
+
+  let decision: NotificationDecision;
+  try {
+    decision = await classifyWithLLM(
+      provider,
+      signal,
+      availableChannels,
+      resolvedPreferenceContext,
+      candidateSet,
+    );
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    log.warn(
+      { err: errMsg },
+      "Notification decision LLM call failed, using fallback",
+    );
+    decision = buildFallbackDecision(signal, availableChannels);
+  }
+
+  decision = applyDecisionGuards(decision, signal);
+  decision.persistedDecisionId = persistDecision(signal, decision);
+
+  return decision;
+}
+
+// ── LLM classification ────────────────────────────────────────────────
+
+async function classifyWithLLM(
+  provider: Provider,
+  signal: NotificationSignal,
+  availableChannels: NotificationChannel[],
+  preferenceContext: string | undefined,
+  candidateSet?: ConversationCandidateSet,
+): Promise<NotificationDecision> {
+  const { signal: abortSignal, cleanup } = createTimeout(DECISION_TIMEOUT_MS);
+
+  const candidateContext = candidateSet
+    ? (serializeCandidatesForPrompt(candidateSet) ?? undefined)
+    : undefined;
+  const rawIdentityContext = buildCoreIdentityContext();
+  const identityContext = rawIdentityContext
+    ? truncate(rawIdentityContext, MAX_IDENTITY_CONTEXT_CHARS, "\n…[truncated]")
+    : undefined;
+
+  // Resolve guardian contact notes for recipient context. The guardian's
+  // identity (ACL) comes from the gateway pull, channel-agnostic so notes are
+  // available even when the only deliverable channel is "vellum". Notes (INFO)
+  // stay local and are joined by contactId.
+  let recipientNotes: string | undefined;
+  try {
+    const guardian = anyGuardian((await getGuardianDelivery()) ?? []);
+    const notes = guardian
+      ? findContactInfoById(guardian.contactId)?.notes
+      : undefined;
+    if (notes) {
+      recipientNotes = truncate(
+        notes,
+        MAX_IDENTITY_CONTEXT_CHARS,
+        "\n…[truncated]",
+      );
+    }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    log.warn(
+      { err: errMsg },
+      "Failed to resolve guardian contact notes, proceeding without recipient context",
+    );
+  }
+
+  const systemPrompt = buildSystemPrompt(
+    availableChannels,
+    preferenceContext,
+    candidateContext,
+    identityContext,
+    recipientNotes,
+  );
+  const prompt = buildUserPrompt(signal);
+  const tool = buildDecisionTool(availableChannels);
+
+  try {
+    const response = await provider.sendMessage([userMessage(prompt)], {
+      tools: [tool],
+      systemPrompt,
+      config: {
+        callSite: "notificationDecision",
+        max_tokens: 2048,
+        tool_choice: {
+          type: "tool" as const,
+          name: "record_notification_decision",
+        },
+      },
+      signal: abortSignal,
+    });
+    cleanup();
+
+    const toolBlock = extractToolUse(response);
+    if (!toolBlock) {
+      log.warn(
+        "No tool_use block in notification decision response, using fallback",
+      );
+      return buildFallbackDecision(signal, availableChannels);
+    }
+
+    const validated = validateDecisionOutput(
+      toolBlock.input as Record<string, unknown>,
+      availableChannels,
+      candidateSet,
+    );
+    if (!validated) {
+      log.warn("Invalid notification decision output from LLM, using fallback");
+      return buildFallbackDecision(signal, availableChannels);
+    }
+
+    return validated;
+  } finally {
+    cleanup();
+  }
+}
+
+// ── Post-decision routing intent enforcement ───────────────────────────
+
+/**
+ * Enforce routing intent policy on a decision after the LLM has produced it.
+ * This is a fire-time guard: it overrides channel selection to match the
+ * routing intent specified by the signal source (e.g. a reminder).
+ *
+ * - `all_channels`: force selected channels to all connected channels.
+ * - `multi_channel`: ensure at least 2 channels when 2+ are connected.
+ * - `single_channel`: cap to a single channel. When explicitly set, reduces
+ *   selected channels to one — preferring the source channel if present.
+ */
+export function enforceRoutingIntent(
+  decision: NotificationDecision,
+  routingIntent: RoutingIntent | undefined,
+  connectedChannels: NotificationChannel[],
+  sourceChannel?: string,
+): NotificationDecision {
+  if (!routingIntent) {
+    return decision;
+  }
+
+  if (routingIntent === "single_channel") {
+    if (!decision.shouldNotify) {
+      return decision;
+    }
+
+    // Force delivery to the source channel only. If the source channel
+    // is among the connected channels, use it regardless of what the LLM
+    // picked (even if the LLM picked exactly one wrong channel).
+    // Otherwise fall back to capping at the first selected channel.
+    const sourceIsConnected =
+      sourceChannel &&
+      connectedChannels.includes(sourceChannel as NotificationChannel);
+    const preferred = sourceIsConnected
+      ? (sourceChannel as NotificationChannel)
+      : decision.selectedChannels[0];
+
+    // No change needed if the decision already matches.
+    if (
+      decision.selectedChannels.length === 1 &&
+      decision.selectedChannels[0] === preferred
+    ) {
+      return decision;
+    }
+
+    const enforced = { ...decision };
+    enforced.selectedChannels = [preferred];
+    enforced.reasoningSummary = `${decision.reasoningSummary} [routing_intent=single_channel enforced: capped to ${preferred}]`;
+    log.info(
+      {
+        routingIntent,
+        sourceChannel,
+        originalChannels: decision.selectedChannels,
+        enforcedChannel: preferred,
+      },
+      "Routing intent enforcement: single_channel → capped to one channel",
+    );
+    return enforced;
+  }
+
+  if (!decision.shouldNotify) {
+    return decision;
+  }
+
+  if (routingIntent === "all_channels") {
+    // Force all connected channels
+    if (connectedChannels.length > 0) {
+      const enforced = { ...decision };
+      enforced.selectedChannels = [...connectedChannels];
+      enforced.reasoningSummary = `${decision.reasoningSummary} [routing_intent=all_channels enforced: ${connectedChannels.join(", ")}]`;
+      log.info(
+        {
+          routingIntent,
+          connectedChannels,
+          originalChannels: decision.selectedChannels,
+        },
+        "Routing intent enforcement: all_channels → forced all connected channels",
+      );
+      return enforced;
+    }
+  }
+
+  if (routingIntent === "multi_channel") {
+    // Ensure at least 2 channels when 2+ are connected
+    if (connectedChannels.length >= 2 && decision.selectedChannels.length < 2) {
+      const connectedSet = new Set<NotificationChannel>(connectedChannels);
+      const selectedConnected = decision.selectedChannels.filter((ch) =>
+        connectedSet.has(ch),
+      );
+      const expanded: NotificationChannel[] = [];
+      const seen = new Set<NotificationChannel>();
+
+      // Preserve the decision's selected channels first, then add connected
+      // channels until we reach two channels total.
+      for (const ch of selectedConnected) {
+        if (seen.has(ch)) {
+          continue;
+        }
+        expanded.push(ch);
+        seen.add(ch);
+      }
+      for (const ch of connectedChannels) {
+        if (seen.has(ch)) {
+          continue;
+        }
+        expanded.push(ch);
+        seen.add(ch);
+        if (expanded.length >= 2) {
+          break;
+        }
+      }
+
+      const enforced = { ...decision };
+      enforced.selectedChannels = expanded;
+      enforced.reasoningSummary = `${decision.reasoningSummary} [routing_intent=multi_channel enforced: expanded to ${expanded.join(", ")}]`;
+      log.info(
+        {
+          routingIntent,
+          connectedChannels,
+          originalChannels: decision.selectedChannels,
+          enforcedChannels: expanded,
+        },
+        "Routing intent enforcement: multi_channel → expanded to at least two channels",
+      );
+      return enforced;
+    }
+  }
+
+  return decision;
+}
+
+// ── Guardian request conversation affinity ───────────────────────────────
+
+/**
+ * Force a new vellum conversation for guardian-request signals that carry no
+ * vellum affinity hint.
+ *
+ * Guardian cards (tool approvals, tool grants, access requests, voice and
+ * ask_question prompts) are pinned to their originating conversation by the
+ * producer via `conversationAffinityHint`. When no pin exists — e.g. an
+ * access request from a sender with no prior conversation, or the first
+ * question in a phone call — the card must open its own conversation:
+ * leaving the choice to the LLM lets unrelated requests accumulate in
+ * whichever guardian conversation is most recent. For hinted signals,
+ * enforceConversationAffinity applies the pin — this guard is a no-op.
+ */
+export function enforceGuardianRequestConversationAffinity(
+  decision: NotificationDecision,
+  signal: NotificationSignal,
+): NotificationDecision {
+  if (
+    signal.sourceEventName !== "guardian.question" &&
+    signal.sourceEventName !== "ingress.access_request"
+  ) {
+    return decision;
+  }
+
+  if (signal.conversationAffinityHint?.vellum) {
+    return decision;
+  }
+
+  const enforced = { ...decision };
+  const conversationActions: Partial<
+    Record<NotificationChannel, ConversationAction>
+  > = {
+    ...(decision.conversationActions ?? {}),
+  };
+  conversationActions.vellum = { action: "start_new" };
+  enforced.conversationActions = conversationActions;
+
+  log.info(
+    { sourceEventName: signal.sourceEventName },
+    "Guardian request conversation affinity: no vellum pin — forcing start_new",
+  );
+
+  return enforced;
+}
+
+// ── Conversation affinity enforcement ───────────────────────────────────
+
+/**
+ * Enforce conversation affinity on a decision.
+ *
+ * When the signal carries a conversationAffinityHint (per-channel map of
+ * conversationId), override the decision's conversationActions for those channels
+ * to `reuse_existing` with the hinted conversationId. This is a
+ * deterministic post-decision guard that prevents the LLM from routing
+ * guardian questions for the same call session to different conversations.
+ */
+function enforceConversationAffinity(
+  decision: NotificationDecision,
+  affinityHint: Partial<Record<string, string>> | undefined,
+): NotificationDecision {
+  if (!affinityHint) {
+    return decision;
+  }
+
+  const entries = Object.entries(affinityHint).filter(
+    ([, conversationId]) =>
+      typeof conversationId === "string" && conversationId.length > 0,
+  );
+  if (entries.length === 0) {
+    return decision;
+  }
+
+  const enforced = { ...decision };
+  const conversationActions: Partial<
+    Record<NotificationChannel, ConversationAction>
+  > = {
+    ...(decision.conversationActions ?? {}),
+  };
+
+  for (const [channel, conversationId] of entries) {
+    conversationActions[channel as NotificationChannel] = {
+      action: "reuse_existing",
+      conversationId: conversationId!,
+    };
+  }
+
+  enforced.conversationActions = conversationActions;
+
+  log.info(
+    { affinityHint },
+    "Conversation affinity enforcement: overrode conversationActions for hinted channels",
+  );
+
+  return enforced;
+}
+
+// ── Persistence ────────────────────────────────────────────────────────
+
+function persistDecision(
+  signal: NotificationSignal,
+  decision: NotificationDecision,
+): string | undefined {
+  try {
+    const decisionId = uuid();
+
+    // Summarize conversation actions for the audit trail
+    const conversationActionSummary: Record<string, string> = {};
+    if (decision.conversationActions) {
+      for (const [ch, ta] of Object.entries(decision.conversationActions)) {
+        if (ta.action === "reuse_existing") {
+          conversationActionSummary[ch] = `reuse:${ta.conversationId}`;
+        } else {
+          conversationActionSummary[ch] = "start_new";
+        }
+      }
+    }
+
+    createDecision({
+      id: decisionId,
+      notificationEventId: signal.signalId,
+      shouldNotify: decision.shouldNotify,
+      selectedChannels: decision.selectedChannels,
+      reasoningSummary: decision.reasoningSummary,
+      confidence: decision.confidence,
+      fallbackUsed: decision.fallbackUsed,
+      promptVersion: PROMPT_VERSION,
+      validationResults: {
+        dedupeKey: decision.dedupeKey,
+        channelCount: decision.selectedChannels.length,
+        hasCopy: Object.keys(decision.renderedCopy).length > 0,
+        ...(Object.keys(conversationActionSummary).length > 0
+          ? { conversationActions: conversationActionSummary }
+          : {}),
+      },
+    });
+    return decisionId;
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    log.warn({ err: errMsg }, "Failed to persist notification decision");
+    return undefined;
+  }
+}

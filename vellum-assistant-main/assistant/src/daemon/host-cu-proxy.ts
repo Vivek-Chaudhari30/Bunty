@@ -1,0 +1,950 @@
+/**
+ * Host computer-use proxy.
+ *
+ * Proxies computer-use actions to the desktop client when running as a
+ * managed assistant, following the same request/resolve pattern as
+ * HostBashProxy. Also owns CU-specific state tracking (step counting,
+ * loop detection, observation formatting) for the unified agent loop.
+ *
+ * Unlike HostBashProxy/HostFileProxy/HostTransferProxy, this is NOT a
+ * singleton — each conversation gets its own instance because CU state
+ * (step count, AX tree history, loop detection) is per-conversation.
+ *
+ * RPC lifecycle (resolve/reject/timer/detachAbort) is stored in
+ * pendingInteractions alongside routing metadata.
+ */
+import { v4 as uuid } from "uuid";
+
+import { loadConfig } from "../config/loader.js";
+import { escapeAxTreeContent } from "../context/outbound-sanitize.js";
+import type { ContentBlock } from "../providers/types.js";
+import {
+  assistantEventHub,
+  broadcastMessage,
+} from "../runtime/assistant-event-hub.js";
+import { snapshotHostProxyActorPrincipalId } from "../runtime/auth/same-actor.js";
+import * as pendingInteractions from "../runtime/pending-interactions.js";
+import { POINT_AT_PROXY_TOOL } from "../tools/computer-use/skill-proxy-bridge.js";
+import type { ToolExecutionResult } from "../tools/types.js";
+import { AssistantError, ErrorCode } from "../util/errors.js";
+import { getLogger } from "../util/logger.js";
+import { prepareComputerUseObservation } from "./computer-use-observation.js";
+import { resolveHostCuTarget } from "./host-cu-target.js";
+import { bestEffortModeSessionTracking } from "./mode-session-tracking.js";
+
+const log = getLogger("host-cu-proxy");
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const REQUEST_TIMEOUT_SEC = 60;
+const MAX_HISTORY_ENTRIES = 10;
+const LOOP_DETECTION_WINDOW = 3;
+const CONSECUTIVE_UNCHANGED_WARNING_THRESHOLD = 2;
+
+const SEQUENCE_TOOL = "computer_use_sequence";
+
+const SCREENSHOT_OMITTED_MESSAGE =
+  "Screenshot omitted: the accessibility tree above is current. Pass include_screenshot: true on computer_use_observe to see the screen.";
+
+// computer_use_key combos that change only selection/cursor/clipboard state.
+// The AX tree models none of these, so they always produce an empty diff and
+// are exempt from the unchanged-tree signal.
+// Stored in canonical form (see canonicalizeKeyCombo): modifier aliases
+// normalized and ordered, so `cmd + a`, `command+a`, `alt+tab`, `tab+shift`
+// all match.
+const NO_AX_DIFF_KEY_COMBOS = new Set([
+  "cmd+a",
+  "cmd+c",
+  "up",
+  "down",
+  "left",
+  "right",
+  "shift+tab",
+  "option+tab",
+]);
+
+// Modifier aliases mirror the mac helper's ActionExecutor.pressKey so the
+// exemption check matches exactly what the helper will execute.
+const KEY_MODIFIER_ALIASES: Record<string, string> = {
+  cmd: "cmd",
+  command: "cmd",
+  option: "option",
+  alt: "option",
+  ctrl: "ctrl",
+  control: "ctrl",
+  shift: "shift",
+};
+const KEY_MODIFIER_ORDER = ["cmd", "ctrl", "option", "shift"];
+
+/**
+ * Normalize a key combo the way the mac helper does (lowercase, split on `+`,
+ * trim, alias modifiers) into a canonical `mods…+base` string with modifiers
+ * in a fixed order — so order/alias/whitespace variants compare equal.
+ */
+function canonicalizeKeyCombo(key: string): string {
+  const mods = new Set<string>();
+  let base = "";
+  for (const raw of key.toLowerCase().split("+")) {
+    const part = raw.trim();
+    if (part.length === 0) {
+      continue;
+    }
+    const mod = KEY_MODIFIER_ALIASES[part];
+    if (mod) {
+      mods.add(mod);
+    } else {
+      base = part;
+    } // last non-modifier wins, matching the executor
+  }
+  return [...KEY_MODIFIER_ORDER.filter((m) => mods.has(m)), base]
+    .filter((s) => s.length > 0)
+    .join("+");
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface CuObservationResult {
+  axTree?: string;
+  axDiff?: string;
+  secondaryWindows?: string;
+  screenshot?: string; // base64 JPEG
+  screenshotWidthPx?: number;
+  screenshotHeightPx?: number;
+  screenWidthPt?: number;
+  screenHeightPt?: number;
+  executionResult?: string;
+  executionError?: string;
+  userGuidance?: string;
+  /** Per-phase helper timings in milliseconds, absent on older helpers. */
+  timings?: Record<string, number>;
+}
+
+export interface ActionRecord {
+  step: number;
+  toolName: string;
+  input: Record<string, unknown>;
+  reasoning?: string;
+}
+
+// Steps whose empty diff says nothing about whether they worked: waiting and
+// observing change nothing by design, and an AppleScript reports its own
+// outcome in the execution result, often for an app whose content the tree
+// cannot see. They neither warn nor move the unchanged streak.
+const NO_AX_DIFF_TOOLS = new Set([
+  "computer_use_wait",
+  "computer_use_observe",
+  "computer_use_run_applescript",
+]);
+
+type ActionIdentity = Pick<ActionRecord, "toolName" | "input">;
+
+function isNoDiffTool(action: ActionIdentity | undefined): boolean {
+  return action !== undefined && NO_AX_DIFF_TOOLS.has(action.toolName);
+}
+
+/**
+ * True when `action` is a computer_use_key press whose key only mutates
+ * selection/cursor/clipboard state: changes the AX tree cannot represent, so
+ * an empty diff is expected rather than a sign the action did nothing.
+ */
+function isNoDiffKeyAction(action: ActionIdentity | undefined): boolean {
+  if (action?.toolName !== "computer_use_key") {
+    return false;
+  }
+  const key = action.input.key;
+  return (
+    typeof key === "string" &&
+    NO_AX_DIFF_KEY_COMBOS.has(canonicalizeKeyCombo(key))
+  );
+}
+
+/** Normalize key aliases and ignore observation tokens when detecting repeats. */
+function actionSignature(record: ActionRecord): string {
+  const input = { ...record.input };
+  delete input.observation_id;
+  if (record.toolName === "computer_use_key" && typeof input.key === "string") {
+    input.key = canonicalizeKeyCombo(input.key);
+  }
+  return `${record.toolName}:${JSON.stringify(input)}`;
+}
+
+/**
+ * The key a desktop's first look is tracked under. An untargeted request has
+ * no client id, so it gets a key no real id can take.
+ */
+function observedTargetKey(targetClientId: string | undefined): string {
+  return targetClientId === undefined
+    ? "\u0000untargeted"
+    : `client:${targetClientId}`;
+}
+
+/** Whether `input` scopes the observation to one window or display. */
+function hasCaptureTarget(input: Record<string, unknown>): boolean {
+  return (
+    Object.hasOwn(input, "capture_window_id") ||
+    Object.hasOwn(input, "captureWindowId") ||
+    Object.hasOwn(input, "captureDisplayId")
+  );
+}
+
+/**
+ * Whether the resolved client claimed `capability` on its connection. An
+ * untargeted request has no client to vouch for it, so it never qualifies.
+ */
+function clientAdvertises(
+  targetClientId: string | undefined,
+  capability: "host_cu_window_capture" | "host_cu_sequence",
+): boolean {
+  const client =
+    targetClientId == null
+      ? undefined
+      : assistantEventHub.getClientById(targetClientId);
+  return client?.capabilities.includes(capability) ?? false;
+}
+
+// ---------------------------------------------------------------------------
+// HostCuProxy
+// ---------------------------------------------------------------------------
+
+export class HostCuProxy {
+  /** Stable identity for this conversation-owned proxy instance. */
+  private readonly _sourceId = uuid();
+  // CU state tracking (per-conversation)
+  private _stepCount = 0;
+  private _maxSteps: number;
+  private _previousAXTree: string | undefined;
+  private _consecutiveUnchangedSteps = 0;
+  private _actionHistory: ActionRecord[] = [];
+  /**
+   * Desktops an unscoped observation has come back from since the last reset,
+   * keyed by `observedTargetKey`. A first look is per desktop: having seen one
+   * machine says nothing about another the conversation switches to.
+   */
+  private _observedTargets = new Set<string>();
+  /**
+   * Bumped on every reset. A request carries the value it was dispatched
+   * under, so an observation that lands after a reset cannot restore state
+   * that reset cleared.
+   */
+  private _resetGeneration = 0;
+  /**
+   * Desktops a request has been sent to since the last reset, keyed by
+   * `observedTargetKey`, so the end of a task can reach each one.
+   */
+  private _dispatchedTargets = new Map<string, string | undefined>();
+  /**
+   * Owned request IDs mapped to whether their observation is scoped, whether
+   * the helper was told to skip the screenshot, and when the request was
+   * dispatched. The dispatch time gives the round trip, which is the part of
+   * a step the helper's own timings cannot see.
+   */
+  private _ownedRequests = new Map<
+    string,
+    {
+      scoped: boolean;
+      screenshotSkipped: boolean;
+      targetKey: string;
+      resetGeneration: number;
+      dispatchedAt: number;
+      toolName: string;
+      input: Record<string, unknown>;
+      step: number;
+    }
+  >();
+
+  constructor(maxSteps = loadConfig().maxStepsPerSession) {
+    this._maxSteps = maxSteps;
+  }
+
+  // ---------------------------------------------------------------------------
+  // CU state accessors (for testing / external inspection)
+  // ---------------------------------------------------------------------------
+
+  get stepCount(): number {
+    return this._stepCount;
+  }
+
+  get maxSteps(): number {
+    return this._maxSteps;
+  }
+
+  get previousAXTree(): string | undefined {
+    return this._previousAXTree;
+  }
+
+  get consecutiveUnchangedSteps(): number {
+    return this._consecutiveUnchangedSteps;
+  }
+
+  get actionHistory(): readonly ActionRecord[] {
+    return this._actionHistory;
+  }
+
+  get sourceId(): string {
+    return this._sourceId;
+  }
+
+  get resetGeneration(): number {
+    return this._resetGeneration;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Availability
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Whether a client with `host_cu` capability is connected.
+   */
+  isAvailable(): boolean {
+    return assistantEventHub.getMostRecentClientByCapability("host_cu") != null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Request / resolve lifecycle
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Send a CU request to the connected desktop client.
+   *
+   * When `targetClientId` is supplied, the proxy validates that the target
+   * exists and advertises the `host_cu` capability, mirroring HostFileProxy's
+   * resolver-side checks so that the proxy is safe to call as a standalone
+   * API. It additionally enforces that the caller (`sourceActorPrincipalId`)
+   * and the target client share the same actor principal — cross-user
+   * targeted dispatch is rejected.
+   */
+  request(
+    toolName: string,
+    input: Record<string, unknown>,
+    conversationId: string,
+    stepNumber: number,
+    reasoning?: string,
+    signal?: AbortSignal,
+    targetClientId?: string,
+    sourceActorPrincipalId?: string,
+    onValidatedDispatch?: () => void,
+  ): Promise<ToolExecutionResult> {
+    if (signal?.aborted) {
+      return Promise.resolve({
+        content: "Aborted",
+        isError: true,
+      });
+    }
+
+    // Pointing at the screen is outside this budget in both directions: it
+    // does not advance the count, and it is not stopped by it. The budget
+    // bounds an agent driving the machine, and pointing drives nothing. The
+    // clearing case is the one that makes this necessary rather than tidy: a
+    // conversation that had spent its steps could otherwise be left unable to
+    // take down a mark it had already put on the user's screen.
+    if (toolName !== POINT_AT_PROXY_TOOL && this._stepCount > this._maxSteps) {
+      return Promise.resolve({
+        content: `Step limit (${this._maxSteps}) exceeded. Call computer_use_done to finish.`,
+        isError: true,
+      });
+    }
+
+    const target = resolveHostCuTarget({
+      toolName,
+      targetClientId,
+      sourceActorPrincipalId,
+    });
+    if (target.kind === "error") {
+      return Promise.resolve(target.result);
+    }
+    const resolvedTargetClientId = target.targetClientId;
+
+    const hasWindowTarget = Object.hasOwn(input, "capture_window_id");
+    if (hasWindowTarget) {
+      const id = input.capture_window_id;
+      if (
+        toolName !== "computer_use_observe" ||
+        typeof id !== "number" ||
+        !Number.isInteger(id) ||
+        id < 1 ||
+        id > 0xffffffff ||
+        Object.hasOwn(input, "captureWindowId") ||
+        Object.hasOwn(input, "captureDisplayId")
+      ) {
+        return Promise.resolve({
+          content:
+            "capture_window_id requires a valid CGWindowID on computer_use_observe with no conflicting capture target.",
+          isError: true,
+        });
+      }
+      // Never dispatch this option to a legacy executor: it would forward the
+      // unknown snake-case key and silently capture the entire desktop.
+      if (!clientAdvertises(resolvedTargetClientId, "host_cu_window_capture")) {
+        return Promise.resolve({
+          content:
+            "Window-only observation requires a connected client advertising host_cu_window_capture; update the desktop app before retrying. No capture was requested.",
+          isError: true,
+        });
+      }
+    }
+    // An older helper answers an unknown tool name as done, which would end
+    // the session with nothing run.
+    if (
+      toolName === SEQUENCE_TOOL &&
+      !clientAdvertises(resolvedTargetClientId, "host_cu_sequence")
+    ) {
+      return Promise.resolve({
+        content:
+          "Batched actions require a desktop app that supports computer_use_sequence; update the desktop app, or send the actions one at a time. Nothing was run.",
+        isError: true,
+      });
+    }
+    bestEffortModeSessionTracking("computer admission", () =>
+      onValidatedDispatch?.(),
+    );
+    const scopedObservation = hasCaptureTarget(input);
+    if (scopedObservation) {
+      this._previousAXTree = undefined;
+      this._consecutiveUnchangedSteps = 0;
+    }
+    const targetKey = observedTargetKey(resolvedTargetClientId);
+    // Pointing never reaches the helper's capture path, so its input goes out
+    // as given. Every other request carries the screenshot decision made now,
+    // at dispatch, and never the model-facing snake_case key.
+    let dispatchInput = input;
+    let screenshotSkipped = false;
+    if (toolName !== POINT_AT_PROXY_TOOL) {
+      const { include_screenshot: _includeScreenshot, ...rest } = input;
+      screenshotSkipped = !this.shouldAttachScreenshot(
+        toolName,
+        input,
+        targetKey,
+      );
+      dispatchInput = screenshotSkipped
+        ? { ...rest, includeScreenshot: false }
+        : rest;
+    }
+    const requestId = uuid();
+
+    return new Promise<ToolExecutionResult>((resolve, reject) => {
+      let detachAbort: () => void = () => {};
+
+      const timer = setTimeout(() => {
+        this._ownedRequests.delete(requestId);
+        pendingInteractions.resolve(requestId, "cancelled");
+        log.warn({ requestId, toolName }, "Host CU proxy request timed out");
+        resolve({
+          content: "Host CU proxy timed out waiting for client response",
+          isError: true,
+        });
+      }, REQUEST_TIMEOUT_SEC * 1000);
+
+      if (signal) {
+        const onAbort = () => {
+          if (pendingInteractions.get(requestId)) {
+            this._ownedRequests.delete(requestId);
+            pendingInteractions.resolve(requestId, "cancelled");
+            try {
+              broadcastMessage(
+                {
+                  type: "host_cu_cancel",
+                  requestId,
+                  conversationId,
+                  ...(resolvedTargetClientId != null
+                    ? { targetClientId: resolvedTargetClientId }
+                    : {}),
+                },
+                conversationId,
+                { targetClientId: resolvedTargetClientId },
+              );
+            } catch {
+              // Best-effort cancel notification
+            }
+            resolve({ content: "Aborted", isError: true });
+          }
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        detachAbort = () => signal.removeEventListener("abort", onAbort);
+      }
+
+      this._dispatchedTargets.set(targetKey, resolvedTargetClientId);
+      this._ownedRequests.set(requestId, {
+        scoped: scopedObservation,
+        screenshotSkipped,
+        targetKey,
+        resetGeneration: this._resetGeneration,
+        dispatchedAt: Date.now(),
+        toolName,
+        input,
+        step: stepNumber,
+      });
+
+      pendingInteractions.register(requestId, {
+        conversationId,
+        kind: "host_cu",
+        targetClientId: resolvedTargetClientId,
+        targetActorPrincipalId: snapshotHostProxyActorPrincipalId({
+          hub: assistantEventHub,
+          targetClientId: resolvedTargetClientId,
+          sourceActorPrincipalId,
+        }),
+        rpcResolve: resolve as (v: unknown) => void,
+        rpcReject: reject,
+        timer,
+        detachAbort,
+      });
+
+      try {
+        broadcastMessage(
+          {
+            type: "host_cu_request",
+            requestId,
+            conversationId,
+            toolName,
+            input: dispatchInput,
+            stepNumber,
+            reasoning,
+            ...(resolvedTargetClientId != null
+              ? { targetClientId: resolvedTargetClientId }
+              : {}),
+          },
+          conversationId,
+          { targetClientId: resolvedTargetClientId },
+        );
+      } catch (err) {
+        this._ownedRequests.delete(requestId);
+        pendingInteractions.resolve(requestId, "cancelled");
+        log.warn({ requestId, toolName, err }, "Host CU proxy send failed");
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  /**
+   * Process a CU observation from the client and resolve the RPC.
+   * Updates CU state (step tracking, AX tree history) and formats
+   * the observation into a ToolExecutionResult.
+   */
+  processObservation(
+    requestId: string,
+    observation: CuObservationResult,
+  ): ToolExecutionResult | undefined {
+    const owned = this._ownedRequests.get(requestId);
+    const scopedObservation = owned?.scoped ?? false;
+    this._ownedRequests.delete(requestId);
+    const interaction = pendingInteractions.resolve(requestId, "answered");
+    if (!interaction?.rpcResolve) {
+      log.warn({ requestId }, "No pending host CU request for response");
+      return undefined;
+    }
+
+    // Label the line from what this request was dispatched with, never from
+    // current proxy state. One model response can dispatch several CU tools,
+    // and the agent loop runs them concurrently, so a later call can advance
+    // the history and the step count before an earlier observation lands.
+    // Reading them here would file each measurement under whichever tool was
+    // dispatched last, and would mislabel computer_use_point_at, which never
+    // records an action at all.
+    if (owned) {
+      log.info(
+        {
+          requestId,
+          toolName: owned.toolName,
+          step: owned.step,
+          roundTripMs: Date.now() - owned.dispatchedAt,
+          ...(observation.timings ? { helper: observation.timings } : {}),
+        },
+        "Host CU step timings",
+      );
+    }
+
+    // A targeted snapshot has no comparable action/diff baseline; neither it
+    // nor the first desktop observation after it can imply an unchanged tree.
+    // A response dispatched before the last reset belongs to a finished run,
+    // so it must not change any state the new run has started building.
+    const fromCurrentRun =
+      owned === undefined || owned.resetGeneration === this._resetGeneration;
+    if (scopedObservation && fromCurrentRun) {
+      this._previousAXTree = undefined;
+      this._consecutiveUnchangedSteps = 0;
+    }
+    const prevAXTree = this._previousAXTree;
+    // Judge the empty diff against the action this request carried, for the
+    // same reason the timings line does.
+    const action: ActionIdentity | undefined = owned
+      ? { toolName: owned.toolName, input: owned.input }
+      : this.lastRecordedAction();
+    const comparableObservation = scopedObservation
+      ? { ...observation, axDiff: undefined, secondaryWindows: undefined }
+      : observation;
+    // Pointing observes nothing, so its response leaves the screen state alone.
+    if (
+      fromCurrentRun &&
+      !scopedObservation &&
+      owned?.toolName !== POINT_AT_PROXY_TOOL
+    ) {
+      this.updateStateFromObservation(comparableObservation, action);
+      // A desktop has had its first look only once pixels from it arrived,
+      // so a failed capture leaves the next request asking again.
+      if (owned && observation.screenshot) {
+        this._observedTargets.add(owned.targetKey);
+      }
+    }
+    const result = this.formatObservation(
+      comparableObservation,
+      prevAXTree,
+      owned?.screenshotSkipped ?? false,
+      action,
+    );
+    interaction.rpcResolve(result);
+    return result;
+  }
+
+  /** Run a screenshot-only backend through the shared CU budget and formatter. */
+  async executeLocal(
+    toolName: string,
+    input: Record<string, unknown>,
+    execute: () => Promise<CuObservationResult>,
+  ): Promise<ToolExecutionResult> {
+    if (this._stepCount >= this._maxSteps) {
+      return {
+        content: `Step limit (${this._maxSteps}) exceeded. Call computer_use_done to finish.`,
+        isError: true,
+      };
+    }
+    const reasoning =
+      typeof input.reasoning === "string" ? input.reasoning : undefined;
+    this.recordAction(toolName, input, reasoning);
+    this._previousAXTree = undefined;
+    this._consecutiveUnchangedSteps = 0;
+    const observation = await prepareComputerUseObservation(await execute());
+    return this.formatObservation(observation, undefined, false, {
+      toolName,
+      input,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // CU state management
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Increment step count and record an action. Call this before sending
+   * each non-terminal tool request.
+   */
+  recordAction(
+    toolName: string,
+    input: Record<string, unknown>,
+    reasoning?: string,
+  ): void {
+    this._stepCount++;
+    this._actionHistory.push({
+      step: this._stepCount,
+      toolName,
+      input,
+      reasoning,
+    });
+    if (this._actionHistory.length > MAX_HISTORY_ENTRIES) {
+      this._actionHistory = this._actionHistory.slice(-MAX_HISTORY_ENTRIES);
+    }
+  }
+
+  /**
+   * Finish the task: tell every desktop this task drove that it is over, then
+   * reset. The notice rides `host_cu_cancel` with a fresh request ID, which
+   * matches nothing in flight; the helper treats any cancel as the run
+   * stopping and puts the pointer back where the user left it, instead of
+   * waiting out its idle fallback.
+   */
+  endTask(conversationId: string): number {
+    const endedGeneration = this._resetGeneration;
+    for (const targetClientId of this._dispatchedTargets.values()) {
+      try {
+        broadcastMessage(
+          {
+            type: "host_cu_cancel",
+            requestId: uuid(),
+            conversationId,
+            ...(targetClientId != null ? { targetClientId } : {}),
+          },
+          conversationId,
+          { targetClientId },
+        );
+      } catch {
+        // Best-effort: the helper still returns the pointer after its idle delay.
+      }
+    }
+    this.reset();
+    return endedGeneration;
+  }
+
+  /** Reset all CU state. Called on terminal tools (computer_use_done, etc.). */
+  reset(): number {
+    const endedGeneration = this._resetGeneration;
+    this._dispatchedTargets.clear();
+    this._stepCount = 0;
+    this._previousAXTree = undefined;
+    this._consecutiveUnchangedSteps = 0;
+    this._actionHistory = [];
+    this._observedTargets.clear();
+    this._resetGeneration++;
+    return endedGeneration;
+  }
+
+  /**
+   * Whether the request about to be dispatched should carry a screenshot. The
+   * accessibility tree comes back every step. Pixels come back after every
+   * action, so the model sees what its action did, on the first look since
+   * the last reset, for a window- or display-scoped capture, and when the
+   * model asks for them. Only a plain observation leaves whether the tree is
+   * enough to the model.
+   */
+  private shouldAttachScreenshot(
+    toolName: string,
+    input: Record<string, unknown>,
+    targetKey: string,
+  ): boolean {
+    if (toolName !== "computer_use_observe") {
+      return true;
+    }
+    return (
+      !this._observedTargets.has(targetKey) ||
+      hasCaptureTarget(input) ||
+      input.include_screenshot === true
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Observation formatting
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Formats a CU observation into a ToolExecutionResult with text content
+   * (AX tree wrapped in markers, diff, warnings) and optional screenshot
+   * as an image content block.
+   */
+  formatObservation(
+    obs: CuObservationResult,
+    previousAXTree?: string,
+    screenshotSkipped = false,
+    action: ActionIdentity | undefined = this.lastRecordedAction(),
+  ): ToolExecutionResult {
+    const prevTree = previousAXTree;
+    const parts: string[] = [];
+
+    if (obs.userGuidance) {
+      parts.push(`USER GUIDANCE: ${obs.userGuidance}`);
+      parts.push("");
+    }
+
+    if (obs.executionResult) {
+      parts.push(obs.executionResult);
+      parts.push("");
+    }
+
+    if (obs.axDiff) {
+      parts.push(obs.axDiff);
+      parts.push("");
+    } else if (prevTree != null && obs.axTree != null) {
+      if (!isNoDiffTool(action) && !isNoDiffKeyAction(action)) {
+        if (
+          this._consecutiveUnchangedSteps >=
+          CONSECUTIVE_UNCHANGED_WARNING_THRESHOLD
+        ) {
+          parts.push(
+            `WARNING: the accessibility tree did not change across ${this._consecutiveUnchangedSteps} consecutive actions. If the screenshot does not show them working either, try a different approach.`,
+          );
+        } else {
+          parts.push(
+            "The accessibility tree did not change after your last action. Apps that draw their own content (timelines, canvases, spreadsheet grids) change without it, so check the screenshot before deciding the action did nothing.",
+          );
+        }
+        parts.push("");
+      }
+    }
+
+    if (this._actionHistory.length >= LOOP_DETECTION_WINDOW) {
+      const recent = this._actionHistory.slice(-LOOP_DETECTION_WINDOW);
+      const firstSignature = actionSignature(recent[0]);
+      const allIdentical = recent.every(
+        (r) => actionSignature(r) === firstSignature,
+      );
+      if (allIdentical) {
+        parts.push(
+          `WARNING: You've repeated the same action (${recent[0].toolName}) ${LOOP_DETECTION_WINDOW} times. Try something different.`,
+        );
+        parts.push("");
+      }
+    }
+
+    if (obs.axTree) {
+      parts.push("<ax-tree>");
+      parts.push("CURRENT SCREEN STATE:");
+      parts.push(escapeAxTreeContent(obs.axTree));
+      parts.push("</ax-tree>");
+    }
+
+    if (obs.secondaryWindows) {
+      parts.push("");
+      parts.push(obs.secondaryWindows);
+      parts.push("");
+      parts.push(
+        "Note: The element [ID]s above are from other windows — you can reference them for context but can only interact with the focused window's elements.",
+      );
+    }
+
+    const screenshotMeta = this.formatScreenshotMetadata(obs, action);
+    if (screenshotMeta.length > 0) {
+      parts.push("");
+      parts.push(...screenshotMeta);
+    }
+
+    // Only a deliberate omission is announced, and only beside a tree the line
+    // can point at. A step that asked for pixels and got none is a capture
+    // failure, which this line must not disguise. A refused or failed step
+    // still carries the line, since that is where asking for pixels helps most.
+    const isError = obs.executionError != null;
+    if (screenshotSkipped && !obs.screenshot && obs.axTree) {
+      parts.push("", SCREENSHOT_OMITTED_MESSAGE);
+    }
+
+    const content = parts.join("\n").trim() || "Action executed";
+
+    const contentBlocks: ContentBlock[] = [];
+    if (obs.screenshot) {
+      contentBlocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: "image/jpeg",
+          data: obs.screenshot,
+        },
+      });
+    }
+
+    return {
+      content: isError
+        ? `Action failed: ${obs.executionError}\n\n${content}`
+        : content,
+      isError,
+      ...(contentBlocks.length > 0 ? { contentBlocks } : {}),
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Dispose
+  // ---------------------------------------------------------------------------
+
+  dispose(): void {
+    for (const requestId of this._ownedRequests.keys()) {
+      const entry = pendingInteractions.resolve(requestId, "cancelled");
+      if (!entry) {
+        continue;
+      }
+      const { conversationId } = entry;
+      try {
+        if (conversationId !== undefined) {
+          broadcastMessage(
+            {
+              type: "host_cu_cancel",
+              requestId,
+              conversationId,
+              ...(entry.targetClientId != null
+                ? { targetClientId: entry.targetClientId }
+                : {}),
+            },
+            conversationId,
+            { targetClientId: entry.targetClientId as string | undefined },
+          );
+        }
+      } catch {
+        // Best-effort cancel notification
+      }
+      entry.rpcReject?.(
+        new AssistantError("Host CU proxy disposed", ErrorCode.INTERNAL_ERROR),
+      );
+    }
+    this._ownedRequests.clear();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private helpers
+  // ---------------------------------------------------------------------------
+
+  private lastRecordedAction(): ActionRecord | undefined {
+    return this._actionHistory.at(-1);
+  }
+
+  private updateStateFromObservation(
+    obs: CuObservationResult,
+    action: ActionIdentity | undefined,
+  ): void {
+    if (this._stepCount > 0) {
+      if (obs.axDiff != null || isNoDiffKeyAction(action)) {
+        // A real diff, or an exempt key whose effect is invisible by design,
+        // breaks the no-effect streak. Clearing it rather than preserving a
+        // stale count keeps an intervening cmd+a from bridging two no-op
+        // actions into a false "consecutive" escalation.
+        this._consecutiveUnchangedSteps = 0;
+      } else if (
+        !isNoDiffTool(action) &&
+        this._previousAXTree != null &&
+        obs.axTree != null
+      ) {
+        this._consecutiveUnchangedSteps++;
+      }
+    }
+
+    if (obs.axTree != null) {
+      this._previousAXTree = obs.axTree;
+    }
+  }
+
+  private formatScreenshotMetadata(
+    obs: CuObservationResult,
+    action: ActionIdentity | undefined,
+  ): string[] {
+    if (!obs.screenshot) {
+      return [];
+    }
+
+    const lines: string[] = [];
+    if (obs.screenshotWidthPx != null && obs.screenshotHeightPx != null) {
+      lines.push(
+        `Screenshot metadata: ${obs.screenshotWidthPx}x${obs.screenshotHeightPx} px`,
+      );
+    }
+    if (obs.screenWidthPt != null && obs.screenHeightPt != null) {
+      lines.push(
+        `Screen metadata: ${obs.screenWidthPt}x${obs.screenHeightPt} pt`,
+      );
+    }
+    if (action && hasCaptureTarget(action.input)) {
+      lines.push(
+        "This screenshot is capture-relative. Full-screen dimensions do not map its pixels to action coordinates. Use accessibility element IDs, or request an unscoped desktop observation before using coordinates.",
+      );
+    } else if (
+      [
+        obs.screenshotWidthPx,
+        obs.screenshotHeightPx,
+        obs.screenWidthPt,
+        obs.screenHeightPt,
+      ].every(
+        (dimension) =>
+          typeof dimension === "number" &&
+          Number.isFinite(dimension) &&
+          dimension > 0,
+      )
+    ) {
+      const scaleX = obs.screenWidthPt! / obs.screenshotWidthPx!;
+      const scaleY = obs.screenHeightPt! / obs.screenshotHeightPx!;
+      lines.push(
+        `Action coordinates are screen points, not screenshot pixels. Convert this image's pixels: x = round(image_x * ${scaleX.toFixed(6)}), y = round(image_y * ${scaleY.toFixed(6)}). Prefer accessibility element IDs when available.`,
+      );
+    } else {
+      lines.push(
+        "Screenshot-to-screen coordinate mapping is unavailable. Use accessibility element IDs or obtain an observation with both screenshot and screen dimensions before using coordinates.",
+      );
+    }
+    return lines;
+  }
+}

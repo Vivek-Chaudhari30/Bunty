@@ -1,0 +1,646 @@
+/**
+ * Outbound-request history sanitization shared by every provider call that
+ * sends conversation history: the agent loop's model calls and the
+ * compactor's summary calls. Each transform derives a sanitized projection of
+ * the outbound copy only (durable history keeps the rich originals), and every
+ * transform is idempotent so each send re-derives the same projection.
+ */
+
+import { getConfig } from "../config/loader.js";
+import { stripHistoricalWebSearchResults } from "../daemon/web-search-history.js";
+import { fileSourceMayBeInlined } from "../providers/inline-file-eligibility.js";
+import {
+  type MediaPayloadLimits,
+  mediaPayloadLimitsFromConfig,
+} from "../providers/media-payload-limits.js";
+import {
+  mediaSourceByteLength,
+  mediaSourceDescriptor,
+} from "../providers/media-resolve.js";
+import {
+  type ContentBlock,
+  type FileContent,
+  type ImageContent,
+  mediaBlockAttachmentId,
+  type MediaRetention,
+  type Message,
+  type TextContent,
+} from "../providers/types.js";
+import {
+  isProviderReadableImageData,
+  isProviderReadableImageMimeType,
+} from "../util/image-conversion.js";
+import { hasUserAuthoredContent } from "./user-authored-content.js";
+
+/** Number of most-recent AX tree snapshots to keep in conversation history. */
+const MAX_AX_TREES_IN_HISTORY = 2;
+
+/** Regex that matches the `<ax-tree>...</ax-tree>` markers. */
+const AX_TREE_PATTERN = /<ax-tree>[\s\S]*?<\/ax-tree>/g;
+const AX_TREE_PLACEHOLDER = "<ax_tree_omitted />";
+
+/**
+ * Escapes any literal `</ax-tree>` occurrences inside AX tree content so
+ * that the non-greedy compaction regex (`AX_TREE_PATTERN`) does not stop
+ * prematurely when the user happens to be viewing XML/HTML source that
+ * contains the closing tag.  The escaped content does not need to be
+ * unescaped because compaction replaces the entire block with a placeholder.
+ *
+ * Deliberately narrower than `escapeTagBoundaries` in
+ * `security/untrusted-content.ts`, which is the general defense for fencing
+ * untrusted text: this one leaves the opening tag intact because
+ * {@link AX_TREE_PATTERN} needs it to find whole blocks. Do not fold the two
+ * together.
+ */
+export function escapeAxTreeContent(content: string): string {
+  return content.replace(/<\/ax-tree>/gi, "&lt;/ax-tree&gt;");
+}
+
+/**
+ * Returns a shallow copy of `messages` where all but the most recent
+ * `MAX_AX_TREES_IN_HISTORY` `<ax-tree>` blocks have been replaced with a
+ * short placeholder.  This keeps the conversation context small so that
+ * TTFT does not grow linearly with step count in computer-use sessions.
+ *
+ * Counting is per-block, not per-message — a single user message can
+ * contain multiple tool_result blocks each with their own AX tree snapshot.
+ */
+export function compactAxTreeHistory(messages: Message[]): Message[] {
+  // Collect (messageIndex, blockIndex) for every tool_result block with <ax-tree>
+  const axBlocks: Array<{ msgIdx: number; blockIdx: number }> = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role !== "user") {
+      continue;
+    }
+    for (let j = 0; j < msg.content.length; j++) {
+      const block = msg.content[j];
+      if (
+        block.type === "tool_result" &&
+        typeof block.content === "string" &&
+        block.content.includes("<ax-tree>")
+      ) {
+        axBlocks.push({ msgIdx: i, blockIdx: j });
+      }
+    }
+  }
+
+  if (axBlocks.length <= MAX_AX_TREES_IN_HISTORY) {
+    return messages;
+  }
+
+  // Build a set of "msgIdx:blockIdx" keys for blocks that should be stripped
+  const toStrip = new Set(
+    axBlocks
+      .slice(0, -MAX_AX_TREES_IN_HISTORY)
+      .map((b) => `${b.msgIdx}:${b.blockIdx}`),
+  );
+
+  return messages.map((msg, idx) => {
+    // Quick check: does this message have any blocks to strip?
+    const hasStripTarget = msg.content.some((_, j) =>
+      toStrip.has(`${idx}:${j}`),
+    );
+    if (!hasStripTarget) {
+      return msg;
+    }
+
+    return {
+      ...msg,
+      content: msg.content.map((block, j) => {
+        if (
+          toStrip.has(`${idx}:${j}`) &&
+          block.type === "tool_result" &&
+          typeof block.content === "string"
+        ) {
+          return {
+            ...block,
+            content: block.content.replace(
+              AX_TREE_PATTERN,
+              AX_TREE_PLACEHOLDER,
+            ),
+          };
+        }
+        return block;
+      }),
+    };
+  });
+}
+
+/**
+ * Full-wrapper matcher for the `<channel_capabilities>` block. Both ends are
+ * required so a user message that merely opens with the tag (someone pasting
+ * prompt markup into chat) is never mistaken for an injected block, the same
+ * discipline `stripUserTextBlocksByPrefix` uses in `strip-injections.ts`.
+ */
+const CHANNEL_CAPABILITIES_OPEN = "<channel_capabilities>\n";
+const CHANNEL_CAPABILITIES_CLOSE = "\n</channel_capabilities>";
+
+/** Whether a text block is a complete `<channel_capabilities>…` block. */
+function isChannelCapabilitiesBlock(text: string): boolean {
+  return (
+    text.startsWith(CHANNEL_CAPABILITIES_OPEN) &&
+    text.endsWith(CHANNEL_CAPABILITIES_CLOSE)
+  );
+}
+
+/**
+ * Drop `<channel_capabilities>` blocks that repeat the last one still standing,
+ * so a conversation carries one copy per distinct set of capabilities instead
+ * of one per turn.
+ *
+ * Runtime injection prepends this block to the turn-starting user message and
+ * then freezes it into history: live, because injection splices into the
+ * conversation's own message array, and across restarts, because `loadFromDb`
+ * rehydrates it from message metadata. Nothing ever removes it, so an N-turn
+ * channel conversation ships N copies. Unlike `<turn_context>`, which at least
+ * carries a fresh timestamp, this block is a pure function of the channel
+ * (`buildChannelCapabilityBlock`): every copy after the first is byte-identical
+ * to the one above it and tells the model nothing it has not already read.
+ *
+ * ## Why "same as the last retained copy" and not "not the current turn"
+ *
+ * Prompt caching only pays off when the bytes a provider marked in turn N are
+ * still at the same position in turn N+1, an invariant this repo enforces end
+ * to end in `prompt-cache-cross-turn-stability.test.ts`. Any rule of the form
+ * "keep it on the current turn, collapse it above" necessarily re-renders one
+ * message every turn (the turn that just ended), which is a full cache miss on
+ * the whole message prefix, every turn, for every conversation.
+ *
+ * Comparing against the last RETAINED copy avoids that entirely: whether a
+ * given occurrence survives depends only on the messages above it, never on
+ * how many turns come later. A message's rendering is therefore fixed the
+ * moment it is written, and the prefix stays byte-stable as the conversation
+ * grows. Capabilities that genuinely change mid-conversation (the same
+ * conversation resumed from a different client) still differ from the retained
+ * copy, so the new block is kept and the model sees the change.
+ *
+ * The cost is placement: the surviving copy sits at the top of the conversation
+ * rather than next to the newest message. It is the same bytes either way.
+ *
+ * Idempotent, like every other transform in this module: re-running it over an
+ * already-deduplicated history retains exactly the same occurrences.
+ */
+export function dedupeChannelCapabilityBlocks(history: Message[]): Message[] {
+  let lastRetained: string | null = null;
+  let changed = false;
+
+  const next = history.map((message) => {
+    if (message.role !== "user") {
+      return message;
+    }
+
+    let messageChanged = false;
+    const content = message.content.filter((block) => {
+      if (block.type !== "text" || !isChannelCapabilitiesBlock(block.text)) {
+        return true;
+      }
+      if (block.text === lastRetained) {
+        messageChanged = true;
+        return false;
+      }
+      lastRetained = block.text;
+      return true;
+    });
+
+    // A user row is never only injections in practice, but guard anyway: an
+    // empty content array is not a message any provider will accept, and
+    // dropping the row would break tool_use/tool_result pairing and the
+    // row-to-history index mapping `summarizeUpToMessage` relies on.
+    if (!messageChanged || content.length === 0) {
+      return message;
+    }
+    changed = true;
+    return { ...message, content };
+  });
+
+  return changed ? next : history;
+}
+
+/**
+ * Index of the last user message carrying `tool_result` blocks: the current
+ * tool step, the only place frame media survives. Returns -1 when no user
+ * message has tool results.
+ *
+ * Targets the last user message with tool_results (not just the last user
+ * message) because a plain-text user message may follow the tool-result turn;
+ * using the last user message unconditionally would leave the most recent tool
+ * screenshots unprotected from stripping.
+ */
+export function lastToolResultUserMessageIndex(history: Message[]): number {
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (
+      history[i].role === "user" &&
+      history[i].content.some((b) => b.type === "tool_result")
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+type MediaBlock = ImageContent | FileContent;
+
+function isMediaBlock(block: ContentBlock): block is MediaBlock {
+  return block.type === "image" || block.type === "file";
+}
+
+/**
+ * What a media block costs the request, which carries media as base64: wire
+ * bytes and whether it counts as an image.
+ * - An inline image whose bytes no provider reads is replaced by a text note
+ *   at send ({@link isProviderReadableImageData}) and costs nothing; otherwise
+ *   it is already transport-optimized and is sent as is.
+ * - An image reference is costed by `transportSizeBytes`, which the persist
+ *   path derived from the stored bytes: the size the send path produces, or 0
+ *   when the resolver will substitute a text note, in which case the image
+ *   contributes neither bytes nor a slot. Rows written before that hint
+ *   existed are judged by their declared type
+ *   ({@link isProviderReadableImageMimeType}, which storage normalizes to the
+ *   sniffed format when it recognizes the bytes) and costed at stored size.
+ * - A file costs nothing unless some adapter would inline it
+ *   ({@link fileSourceMayBeInlined}: video, over-cap text, and audio outside
+ *   every adapter's inline set put no payload on the wire).
+ */
+function mediaWireCost(block: MediaBlock): { bytes: number; images: number } {
+  const storedBytes = usableByteLength(mediaSourceByteLength(block.source));
+  if (block.type === "image") {
+    if (block.source.type !== "workspace_ref") {
+      if (!isProviderReadableImageData(block.source.data)) {
+        return NO_WIRE_COST;
+      }
+      return { bytes: base64Bytes(storedBytes), images: 1 };
+    }
+    const transportBytes = block.source.transportSizeBytes;
+    if (transportBytes !== undefined) {
+      const sentBytes = usableByteLength(transportBytes);
+      return sentBytes === 0
+        ? NO_WIRE_COST
+        : { bytes: base64Bytes(sentBytes), images: 1 };
+    }
+    if (!isProviderReadableImageMimeType(block.source.media_type)) {
+      return NO_WIRE_COST;
+    }
+    return { bytes: base64Bytes(storedBytes), images: 1 };
+  }
+  if (!fileSourceMayBeInlined(block.source, storedBytes)) {
+    return NO_WIRE_COST;
+  }
+  return { bytes: base64Bytes(storedBytes), images: 0 };
+}
+
+const NO_WIRE_COST = { bytes: 0, images: 0 };
+
+/**
+ * A persisted byte count the accounting can use. The content schema validates
+ * these as nonnegative integers, but a block that fails validation is passed
+ * through to history by the legacy repair path, so a malformed hint can still
+ * arrive here. It must never reduce the running total: it counts as nothing
+ * rather than as a negative or non-finite amount. Understating one corrupt
+ * block is caught by the reactive overflow path on rejection; overstating it
+ * would evict every retained document for as long as the row exists.
+ */
+function usableByteLength(value: number): number {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function base64Bytes(decodedBytes: number): number {
+  return Math.ceil((decodedBytes * 4) / 3);
+}
+
+const FRAME_MEDIA_PLACEHOLDER =
+  "\n[Media (image/audio) was captured and shown previously; binary data removed to save context.]";
+
+/** What every payload-cap marker says happened to the media it stands in for. */
+const PAYLOAD_CAP_REMOVAL =
+  "shown in an earlier turn was removed from this request to stay within the provider's payload limit.";
+
+function documentMediaPlaceholder(media: MediaBlock[]): string {
+  const described = media
+    .map((block) => mediaSourceDescriptor(block.source))
+    .join("; ");
+  return `\n[Media (${described}) ${PAYLOAD_CAP_REMOVAL} Call the tool again to view it.]`;
+}
+
+/**
+ * Marker for an evicted attachment. It names the file the attachment is
+ * stored in, so the model can bring it back with `file_read`, whose result
+ * the cap then keeps like any other document.
+ */
+function attachmentPlaceholder(
+  block: MediaBlock,
+  storedPath: string | undefined,
+): TextContent {
+  const recovery =
+    storedPath === undefined
+      ? "Ask the user to attach it again if you need it."
+      : `Read ${storedPath} with file_read to view it again.`;
+  return {
+    type: "text",
+    text: `[Attachment (${mediaSourceDescriptor(block.source)}) ${PAYLOAD_CAP_REMOVAL} ${recovery}]`,
+  };
+}
+
+/** How an evicted block is replaced: each class names its own way back. */
+type EvictionClass = MediaRetention | "attachment";
+
+/** One user message's media the payload cap may evict, and what it adds to the totals. */
+interface EvictableMedia {
+  msgIdx: number;
+  blocks: Map<string, EvictionClass>;
+  bytes: number;
+  images: number;
+}
+
+/**
+ * Decide which media the outbound copy keeps and which it drops. Blocks are
+ * keyed `${messageIndex}:${blockIndex}`; an evicted block carries the class
+ * that picks its replacement marker.
+ *
+ * Two retention classes, declared per tool (`mediaRetention` on the tool
+ * definition) and stamped on the `tool_result` block by the agent loop:
+ * - `frame` (the default): views of one evolving surface, such as
+ *   screenshots. A newer frame supersedes older ones, so frames survive only
+ *   in the current tool step ({@link lastToolResultUserMessageIndex}).
+ * - `document`: distinct files the model may want side by side, such as file
+ *   reads. Retained across steps and turns until the payload cap retires the
+ *   oldest.
+ *
+ * The user's own attachments (media blocks directly in a user message) are
+ * retained the same way as documents.
+ *
+ * The cap (`MEDIA_PAYLOAD_LIMITS`, byte marks overridable through the
+ * workspace's `media.payloadCap`) is a hysteresis band over the media the
+ * request carries: retained documents plus attachments. Walking the history
+ * in order, once the running total crosses the high mark, each message's
+ * documents and attachments are evicted together, oldest message first,
+ * until the total is under the low mark. A trip spares two messages: the one
+ * it happens at, and the one that started its turn, whose attachments the
+ * model is still answering. An attachment that puts nothing on the wire is
+ * never evicted: dropping it frees nothing, and for a file it would take the
+ * extracted text out of view.
+ *
+ * A trip at message k evicts only messages before k, and the turn k belongs
+ * to is fixed by the messages up to k, so whether message j keeps its media
+ * depends only on the messages up to the trip that evicted it, never on how
+ * the conversation continues: the projection of a prefix is fixed once
+ * written, the prompt cache holds between trips, and the agent loop and the
+ * compactor derive the same projection from the same history with no shared
+ * state. Frames stay out of the running total for the same reason: which
+ * frames go out depends on which step is current, which changes every send,
+ * so counting them would make evictions flip from one send to the next. The
+ * band's byte marks reserve room for the current step's frames instead (see
+ * `MEDIA_PAYLOAD_LIMITS`).
+ *
+ * That stability assumes history only grows between sends. A pass that
+ * rewrites old messages in place (captioning images for a text-only model)
+ * changes the totals, and a recomputation over the rewritten history can keep
+ * media this pass evicted. Such a pass must cover every block the policy can
+ * keep, not just the ones one request carried: every attachment, plus the
+ * tool results in {@link retainedToolResultMediaKeysBeforeCap}.
+ */
+function planMediaRetention(
+  history: Message[],
+  limits: MediaPayloadLimits = mediaPayloadLimitsFromConfig(getConfig().media),
+): {
+  evicted: Map<string, EvictionClass>;
+  retained: Set<string>;
+} {
+  const evicted = new Map<string, EvictionClass>();
+  const retained = new Set<string>();
+  const currentStepIdx = lastToolResultUserMessageIndex(history);
+  let evictable: EvictableMedia[] = [];
+  let turnStartIdx = -1;
+  let totalBytes = 0;
+  let totalImages = 0;
+
+  for (let msgIdx = 0; msgIdx < history.length; msgIdx++) {
+    const msg = history[msgIdx];
+    if (msg.role !== "user") {
+      continue;
+    }
+    if (hasUserAuthoredContent(msg)) {
+      turnStartIdx = msgIdx;
+    }
+    const entry: EvictableMedia = {
+      msgIdx,
+      blocks: new Map(),
+      bytes: 0,
+      images: 0,
+    };
+    for (let blockIdx = 0; blockIdx < msg.content.length; blockIdx++) {
+      const block = msg.content[blockIdx];
+      const key = `${msgIdx}:${blockIdx}`;
+      if (isMediaBlock(block)) {
+        const cost = mediaWireCost(block);
+        if (cost.bytes > 0 || cost.images > 0) {
+          entry.blocks.set(key, "attachment");
+          entry.bytes += cost.bytes;
+          entry.images += cost.images;
+        }
+        continue;
+      }
+      if (block.type !== "tool_result") {
+        continue;
+      }
+      const media = block.contentBlocks?.filter(isMediaBlock) ?? [];
+      if (media.length === 0) {
+        continue;
+      }
+      // Anything but an explicit `document` is a frame: the default for
+      // untagged results, and the safe reading of a value the persisted
+      // content schema did not recognize.
+      if (block.mediaRetention !== "document") {
+        if (msgIdx === currentStepIdx) {
+          retained.add(key);
+        } else {
+          evicted.set(key, "frame");
+        }
+        continue;
+      }
+      retained.add(key);
+      entry.blocks.set(key, "document");
+      for (const cost of media.map(mediaWireCost)) {
+        entry.bytes += cost.bytes;
+        entry.images += cost.images;
+      }
+    }
+    totalBytes += entry.bytes;
+    totalImages += entry.images;
+
+    if (totalBytes > limits.highBytes || totalImages > limits.highImages) {
+      const spared: EvictableMedia[] = [];
+      for (const candidate of evictable) {
+        const overLow =
+          totalBytes > limits.lowBytes || totalImages > limits.lowImages;
+        if (!overLow || candidate.msgIdx === turnStartIdx) {
+          spared.push(candidate);
+          continue;
+        }
+        totalBytes -= candidate.bytes;
+        totalImages -= candidate.images;
+        for (const [key, eviction] of candidate.blocks) {
+          retained.delete(key);
+          evicted.set(key, eviction);
+        }
+      }
+      evictable = spared;
+    }
+    if (entry.blocks.size > 0) {
+      evictable.push(entry);
+    }
+  }
+  return { evicted, retained };
+}
+
+/**
+ * Stored file of each attachment among `blocks`, by attachment id. The
+ * attachment store is loaded on first use rather than imported: the plugin
+ * API re-exports this module, and a new static import from the store would
+ * fail to link in every suite that partial-mocks it (see
+ * `plugin-api/__tests__/import-graph-partial-mock.test.ts`).
+ */
+function storedAttachmentPaths(blocks: MediaBlock[]): Map<string, string> {
+  const attachmentIds = new Set<string>();
+  for (const block of blocks) {
+    const attachmentId = mediaBlockAttachmentId(block);
+    if (attachmentId !== undefined) {
+      attachmentIds.add(attachmentId);
+    }
+  }
+  if (attachmentIds.size === 0) {
+    return new Map();
+  }
+  const { getFilePathsForAttachments } =
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require("../persistence/attachments-store.js") as typeof import("../persistence/attachments-store.js");
+  return getFilePathsForAttachments([...attachmentIds]);
+}
+
+/**
+ * Apply {@link planMediaRetention}: each evicted tool_result loses its media
+ * blocks and gains a text marker saying what was dropped and, for a document,
+ * how to get it back; each evicted attachment is replaced by a marker naming
+ * the file it is stored in. The model saw each one when it arrived.
+ */
+function applyMediaRetention(history: Message[]): Message[] {
+  const { evicted: evictions } = planMediaRetention(history);
+  if (evictions.size === 0) {
+    return history;
+  }
+  const evictionOf = (msgIdx: number, blockIdx: number) =>
+    evictions.get(`${msgIdx}:${blockIdx}`);
+  const storedPaths = storedAttachmentPaths(
+    history.flatMap((msg, msgIdx) =>
+      msg.content.filter(
+        (block, blockIdx): block is MediaBlock =>
+          isMediaBlock(block) && evictionOf(msgIdx, blockIdx) === "attachment",
+      ),
+    ),
+  );
+  return history.map((msg, msgIdx) => {
+    if (msg.role !== "user") {
+      return msg;
+    }
+    let changed = false;
+    const content = msg.content.map((block, blockIdx): ContentBlock => {
+      const eviction = evictionOf(msgIdx, blockIdx);
+      if (eviction === undefined) {
+        return block;
+      }
+      if (isMediaBlock(block)) {
+        changed = true;
+        const attachmentId = mediaBlockAttachmentId(block);
+        return attachmentPlaceholder(
+          block,
+          attachmentId === undefined
+            ? undefined
+            : storedPaths.get(attachmentId),
+        );
+      }
+      if (block.type !== "tool_result") {
+        return block;
+      }
+      changed = true;
+      const media = (block.contentBlocks ?? []).filter(isMediaBlock);
+      return {
+        ...block,
+        contentBlocks: undefined,
+        content:
+          (block.content || "") +
+          (eviction === "frame"
+            ? FRAME_MEDIA_PLACEHOLDER
+            : documentMediaPlaceholder(media)),
+      };
+    });
+    return changed ? { ...msg, content } : msg;
+  });
+}
+
+/**
+ * Keys (`${messageIndex}:${blockIndex}`) of the `tool_result` blocks whose
+ * media {@link preModelCallSanitize} sends on this history rather than
+ * replacing with a marker: the current step's frames plus the documents the
+ * payload cap keeps.
+ */
+export function retainedToolResultMediaKeys(history: Message[]): Set<string> {
+  return planMediaRetention(history).retained;
+}
+
+const UNCAPPED_MEDIA_PAYLOAD_LIMITS: MediaPayloadLimits = {
+  highBytes: Infinity,
+  lowBytes: Infinity,
+  highImages: Infinity,
+  lowImages: Infinity,
+};
+
+/**
+ * Keys of the `tool_result` blocks the retention policy can keep before the
+ * payload cap is applied: the current step's frames plus every document. A
+ * superset of {@link retainedToolResultMediaKeys} for a pass that rewrites
+ * media in place (the image-fallback plugin captioning for a text-only
+ * model): rewriting changes the totals the cap is computed from, so the cap's
+ * own picks are not stable across the rewrite, while this set is.
+ */
+export function retainedToolResultMediaKeysBeforeCap(
+  history: Message[],
+): Set<string> {
+  return planMediaRetention(history, UNCAPPED_MEDIA_PAYLOAD_LIMITS).retained;
+}
+
+/**
+ * Sanitize the outbound history immediately before a provider call, bundling
+ * the pre-send transforms applied to every request that carries conversation
+ * history:
+ * - {@link applyMediaRetention} drops stale frame media (screenshots outside
+ *   the current step) and, once the request's media crosses the payload
+ *   marks, the oldest document media (file reads) and attachments from
+ *   earlier turns, replacing each with a text marker. Beyond context bloat,
+ *   an unbounded history can carry
+ *   enough images to cross a provider's per-request limits, where a single
+ *   request is rejected outright.
+ * - {@link compactAxTreeHistory} collapses all but the most recent few
+ *   `<ax-tree>` snapshots so TTFT does not grow linearly with step count.
+ * - {@link stripHistoricalWebSearchResults} converts historical
+ *   `web_search_tool_result` blocks to text summaries; Anthropic's opaque
+ *   `encrypted_content` tokens expire / are route-scoped, and replaying a stale
+ *   one is rejected with `Invalid encrypted_content in search_result block`.
+ * - {@link dedupeChannelCapabilityBlocks} keeps one `<channel_capabilities>`
+ *   block per distinct set of capabilities instead of the one-per-turn history
+ *   accumulates; every repeat is byte-identical to the copy above it.
+ *
+ * Transforms the outbound copy only: the durable history keeps the rich
+ * originals and each send re-derives the sanitized projection (every transform
+ * is idempotent). Both the agent loop's model calls and the compactor's
+ * summary calls funnel through this bundle, so their request prefixes stay
+ * byte-aligned (the summary call reuses the agent's warm prompt cache) and
+ * over-cap media and expired web-search tokens are guaranteed to be removed
+ * from every request.
+ */
+export function preModelCallSanitize(history: Message[]): Message[] {
+  const mediaRetained = applyMediaRetention(history);
+  const axCompacted = compactAxTreeHistory(mediaRetained);
+  const webSearchStripped =
+    stripHistoricalWebSearchResults(axCompacted).messages;
+  return dedupeChannelCapabilityBlocks(webSearchStripped);
+}

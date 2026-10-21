@@ -1,0 +1,146 @@
+import {
+  slackReactionEventSchema,
+  type SlackReactionEvent,
+  type NormalizedSlackEvent,
+} from "./message-schemas.js";
+import { slackEmojiCharacter } from "@vellumai/slack-text";
+import type { GatewayConfig } from "../config.js";
+import { resolveAssistant, isRejection } from "../routing/resolve-assistant.js";
+
+/**
+ * Shared normalizer for Slack reaction events. Both `reaction_added` and
+ * `reaction_removed` carry the same payload shape and differ only in the
+ * downstream callback prefix and externalMessageId suffix.
+ */
+function normalizeSlackReaction(
+  event: SlackReactionEvent,
+  rawEvent: Record<string, unknown>,
+  eventId: string,
+  config: GatewayConfig,
+  op: "added" | "removed",
+): NormalizedSlackEvent | null {
+  // `reaction` is load-bearing: it forms the `callbackData` and part of the
+  // dedup `externalMessageId`. Without this guard a collapsed (missing /
+  // non-string) reaction would emit `reaction:undefined`, which the
+  // assistant-side parser treats as a real emoji named "undefined" rather
+  // than dropping it.
+  if (
+    !event.user ||
+    !event.reaction ||
+    !event.item?.channel ||
+    !event.item?.ts
+  ) {
+    return null;
+  }
+
+  const channel = event.item.channel;
+
+  const routing = resolveAssistant(config, channel, event.user);
+  if (isRejection(routing)) return null;
+
+  const character = slackEmojiCharacter(event.reaction);
+
+  // The addressing parts (channel, message ts, emoji, reactor, op) name a
+  // reaction, not one occurrence of one: they repeat byte for byte each time
+  // the same person re-adds the same emoji. `event_id` is the component that
+  // separates the occurrences and still repeats on a redelivery, which is why
+  // `socket-mode.ts` keys its own dedup on it too.
+  const externalMessageId =
+    op === "added"
+      ? `${channel}:${event.item.ts}:${event.reaction}:${event.user}:${eventId}`
+      : `${channel}:${event.item.ts}:${event.reaction}:${event.user}:removed:${eventId}`;
+
+  return {
+    event: {
+      version: "v1",
+      sourceChannel: "slack",
+      receivedAt: new Date().toISOString(),
+      message: {
+        eventKind: "reaction",
+        // A reaction has no user-authored text; its payload is structured.
+        content: "",
+        conversationExternalId: channel,
+        externalMessageId,
+        reaction: {
+          op,
+          emoji: event.reaction,
+          // Slack names its reactions rather than sending the character, and
+          // sends one namespace for standard and workspace emoji alike. The
+          // adapter resolves the standard ones from Slack's own list here, so
+          // nothing past the normalizer needs Slack's naming; a name outside
+          // that list is a workspace upload only the workspace can render,
+          // and stays a `shortcode` in Slack's namespace.
+          ...(character !== undefined
+            ? { emojiKind: "unicode" as const, emojiName: character }
+            : { emojiKind: "shortcode" as const, emojiName: event.reaction }),
+          targetMessageId: event.item.ts,
+        },
+        // A daemon that does not yet understand the structured payload
+        // dispatches reactions on the kind and reads this string
+        // unconditionally, so the sentinel form stays required beside the
+        // payload for mixed-version readers.
+        callbackData: `${op === "added" ? "reaction" : "reaction_removed"}:${event.reaction}`,
+      },
+      actor: {
+        actorExternalId: event.user,
+      },
+      source: {
+        updateId: eventId,
+        messageId: event.item.ts,
+        threadId: event.item.ts,
+      },
+      raw: rawEvent,
+    },
+    routing,
+    threadTs: event.item.ts,
+    channel,
+  };
+}
+
+/**
+ * Normalize a Slack `reaction_added` event into the gateway's canonical
+ * inbound event shape. The reaction emoji name is placed in `callbackData`
+ * (prefixed with `reaction:`) so downstream handlers can process it like a
+ * callback action.
+ *
+ * Returns null if the event is missing required fields or cannot be routed.
+ */
+export function normalizeSlackReactionAdded(
+  event: unknown,
+  eventId: string,
+  config: GatewayConfig,
+): NormalizedSlackEvent | null {
+  const parsed = slackReactionEventSchema.safeParse(event);
+  if (!parsed.success) return null;
+  return normalizeSlackReaction(
+    parsed.data,
+    event as Record<string, unknown>,
+    eventId,
+    config,
+    "added",
+  );
+}
+
+/**
+ * Normalize a Slack `reaction_removed` event into the gateway's canonical
+ * inbound event shape. The emoji name is placed in `callbackData` with a
+ * `reaction_removed:` prefix so downstream handlers can distinguish removals
+ * from additions.
+ *
+ * Returns null if the event is missing required fields or cannot be routed.
+ */
+export function normalizeSlackReactionRemoved(
+  event: unknown,
+  eventId: string,
+  config: GatewayConfig,
+): NormalizedSlackEvent | null {
+  const parsed = slackReactionEventSchema.safeParse(event);
+  if (!parsed.success) return null;
+  return normalizeSlackReaction(
+    parsed.data,
+    event as Record<string, unknown>,
+    eventId,
+    config,
+    "removed",
+  );
+}

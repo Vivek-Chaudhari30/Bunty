@@ -1,0 +1,227 @@
+# Guardian requests: the interactive-request pipeline
+
+This is the end-to-end map of how an interactive request — anything the
+assistant needs a person to decide or answer — reaches a user on any channel
+and how their response resolves it. **It is the canonical rail for interactive
+channel features.** If you are adding a feature that shows buttons/options on
+a channel and waits for a reply, extend the seams below; do **not** build a
+per-feature watcher, callback scheme, or parallel delivery stack (that
+anti-pattern was retired in #35642 and again in the ask_question redesign).
+
+## The lifecycle
+
+```
+  tool / flow parks a pending interaction        (runtime/pending-interactions.ts)
+        │
+        ▼ promotion (fire-and-forget, at the emitter)
+  guardian_requests row, gateway-owned           (permissions/confirmation-guardian-request.ts,
+  create → decide(CAS) → expire/sweep             permissions/question-guardian-request.ts,
+        │                                         gateway/src/db/guardian-request-store.ts)
+        ▼ bridge emits guardian.question signal
+  notification pipeline                          (notifications/emit-signal.ts →
+  decision engine → destination resolver →        decision-engine.ts → destination-resolver.ts →
+  broadcaster builds the card context ONCE        broadcaster.ts: resolveApprovalContext /
+  (generic actions[] + plainTextFallback)         resolveQuestionContext)
+        │
+        ▼ per-channel rendering ONLY
+  channel adapters                               (notifications/adapters/{telegram,slack,discord,macos,platform},
+  telegram: inline keyboard; slack: blocks;       vellum: conversation card via approval-card-builder)
+  card deliveries recorded per channel            (guardian-delivery-recorder.ts → guardian_request_deliveries)
+        │
+        ▼ user responds: button tap / "CODE <reply>" / bare text
+  guardian reply router                          (runtime/guardian-reply-router.ts, invoked from
+  callbacks → request codes → bare answer →       routes/inbound-stages/guardian-reply-intercept.ts,
+  explicit approve/reject → NL                    BEFORE background dispatch: replies to parked
+        │                                         prompts resolve inline, never deferred)
+        ▼ one decision primitive
+  applyGuardianDecision                          (approvals/guardian-decision-primitive.ts:
+  status CAS + ACL outcome, atomic;               first-writer-wins; card withdrawal on decide)
+        │
+        ▼ per-kind follow-through
+  resolver registry                              (approvals/guardian-request-resolvers.ts)
+  tool_approval → confirmation resume             pending_question → voice answerCall OR
+  access_request → ACL outcome                    ask_question interaction resolve
+```
+
+## Who owns what
+
+| Concern                                 | Owner                                             | Never                               |
+| --------------------------------------- | ------------------------------------------------- | ----------------------------------- |
+| The "what": card text, actions, options | broadcaster context build (once per broadcast)    | built per-adapter                   |
+| The "how": channel-native rendering     | `notifications/adapters/<channel>`                | domain logic, payload parsing       |
+| Request state                           | gateway `guardian_requests` (+ deliveries)        | daemon-side request tables          |
+| Decisions                               | `applyGuardianDecision` (CAS, atomic ACL outcome) | inline decision logic at call sites |
+| Kind-specific follow-through            | resolver registry (`kind` → resolver)             | switch statements in the router     |
+| Reply understanding                     | guardian reply router (codes, buttons, modes)     | per-feature inbound intercepts      |
+
+## The canonical home-feed projection
+
+Every pending request is also exactly one home-feed item, the bell's
+"Needs attention" row. `notifications/guardian-feed-projection.ts` owns
+it end to end:
+
+- The pipeline's feed side effect writes it keyed
+  `guardian:<requestId>`, so the feed's replace-in-place merge keeps one
+  item per request. Its typed `guardianRequest` field
+  (`FeedItemGuardianRequestSchema` in `api/responses/home.ts`) is a read
+  projection of the gateway row: intent, status, requester, tool, and
+  source reference. It is never a delivery row of its own; clients
+  derive every affordance from `status`.
+- `withdrawGuardianRequestCards` rewrites it into a terminal receipt as
+  one of the surfaces it settles, and its failure gates `complete` the
+  same way a failed card edit does. The write-vs-resolve race converges
+  from the other side too: the feed writer re-checks canonical status
+  after its append.
+- The receipt is the whole retire mechanism, so everything that must
+  stop happening lives in `writeGuardianFeedReceipt`: the terminal
+  `guardianRequest.status` withdraws every client affordance, urgency
+  drops to `medium` to leave the "Needs attention" treatment, and a
+  still-`new` item is marked `seen` (unread means the user has
+  something to review, which a resolved request is not). That clear
+  runs only on the edge into terminal, so re-running the fan-out
+  neither pulls a cleared receipt back into the bell nor undoes a user
+  who marked the receipt unread again.
+- Terminal receipts that never passed the edge are cleared once for
+  each assistant by `healLegacyGuardianReceiptUnread`, which the sweep calls
+  ahead of its gateway read. One-shot rather than recurring: such a row
+  and a `new` the user set deliberately are indistinguishable, so a
+  completion sentinel in the daemon checkpoint ledger records the
+  boundary instead. The transition is re-evaluated inside the writer
+  queue and moves only `new`, exactly as the edge does.
+- The feed writer's bulk-dismiss pass skips pending guardian items
+  (`isPendingGuardianFeedItem`), so "Clear all" can never retire an
+  unresolved request; only its receipt is clearable.
+- The guardian expiry sweep runs `reconcileGuardianFeedProjections()`
+  each round: pending requests missing an item are backfilled from the
+  request row (no conversation is generated), and an item still
+  actionable for a terminal request is receipted with a loud log line.
+
+Routing policy for channel-delivered cards: a guardian card sent to a
+channel chat (Slack, Telegram, Discord, WhatsApp) is a delivery
+projection, not conversation content. Channel deliveries are not
+paired with any conversation (`conversation-pairing.ts` skips every
+non-vellum guardian delivery), and the Slack DM cold backfill skips
+messages whose ts matches a recorded guardian delivery for the chat
+(`guardian_requests_list_deliveries_by_chat`), so a card never enters
+a Vellum transcript. The in-app homes of a request are the feed item
+and the source conversation's pinned vellum card.
+
+## Cards are not conversation history
+
+`pairDeliveryWithConversation` persists one message row for the vellum
+delivery so the card renders and deep-links. That row is addressed to a
+conversation the request is _about_, not one the assistant is speaking in:
+`buildVellumCardAffinity` pins the vellum card to the originating
+conversation. Channel guardian deliveries pair no conversation (see the
+routing policy above), so the vellum row is the only card row written; it
+goes straight to the DB by the notification pipeline, so the live turn's
+in-memory history never sees it. Rows that channel deliveries paired
+before the projection-only policy still exist and are covered by the same
+filter below.
+
+That row must never be replayed to the model. The conversation it lands in is
+typically parked mid-approval, with its last assistant message carrying the
+`tool_use` still waiting on this very decision. Replayed, the card sits
+between that `tool_use` and its `tool_result`; history repair reads the pair
+as broken, synthesizes a stub result, and downgrades the real one to text. A
+card left as the tail row instead ends the history on an assistant message,
+which extended-thinking models reject outright ("does not support assistant
+message prefill").
+
+`isGuardianCardRow` (`notifications/approval-card-data.ts`) is the one
+definition of which rows those are, read off the card's own `ui_surface` id
+using the same prefixes `approvalCardSurfaceId` recomputes for withdrawal. It
+is derived rather than stored so a row written before the rule existed is
+recognized on the same terms as a new one, with no marker to backfill.
+
+**Both history assemblers must consult it.** `Conversation.loadFromDb` builds
+`this.messages`, but Slack conversations do not use that list:
+`loadSlackChronologicalContext` re-reads the rows. A rule applied to only one
+exempts the other channel. Each applies it _after_ its own compaction boundary,
+since both boundaries are computed against unfiltered row lists.
+
+Surface state is deliberately NOT filtered this way. `restoreSurfaceStateFromHistory`
+takes the pre-filter window, because a card's Approve/Reject buttons must keep
+routing after a restart even though the card is absent from the model's history.
+
+Two instruction modes exist per request kind (`notifications/guardian-question-mode.ts`):
+**approval** ("CODE approve" / approve–reject buttons) and **answer**
+("CODE <your answer>" / option buttons). `pending_question` is answer-mode.
+The "CODE <reply>" instruction lives in exactly one place: the
+`plainTextFallback` the broadcaster builds beside the card's actions. Composed
+copy never carries it (the decision engine strips a model's echo of it on
+every channel), and a transport appends it only when it sends text without
+buttons: a rich delivery that failed, or a request with no actions to draw,
+which is how an option-less voice question stays answerable. Every surface
+with buttons, and the bell, banner, and push, show the ask alone.
+
+## Worked example: `ask_question` on a channel
+
+1. The tool parks on `QuestionPrompter` when the turn can deliver a card
+   (`ToolContext.supportsGuardianQuestionCards` — single-question batch,
+   guardian turn, channel in `GUARDIAN_QUESTION_CARD_CHANNELS`); otherwise it
+   returns the plain-text fallback.
+2. The prompter promotes the interaction to a `pending_question` row
+   (`permissions/question-guardian-request.ts` — request id = interaction
+   requestId, mirroring `tool_approval`) and bridges it
+   (`runtime/question-request-guardian-bridge.ts`).
+3. The broadcaster renders the options as card actions with answer-token ids
+   (`answer_<idx>` / `answer_skip` — `buildQuestionOptionActionId`); adapters
+   need no changes, ever.
+4. A tap arrives as `apr:<requestId>:answer_<idx>`; the router recognizes the
+   token for answer-mode requests. A bare text reply while exactly one
+   answer-mode request is pending IS the answer. "CODE <text>" works like any
+   request.
+5. The `pending_question` resolver (no `callSessionId` → ask_question branch)
+   maps the token/text to a submission and settles the interaction via
+   `resolvePendingQuestion` — the same core `/v1/question-response` uses — so
+   the parked tool returns and the turn continues.
+6. Lifecycle: answered elsewhere / timed out → the orphan sweep in
+   `conversation-routes.ts` expires the row (voice rows, which carry
+   `callSessionId`, are exempt); daemon restart → boot's
+   `expire_interaction_bound`.
+
+## Adding a new interactive request kind
+
+1. Add the kind to `GuardianRequestKindSchema`
+   (`packages/gateway-client/src/guardian-request-contract.ts`).
+2. Promote at the emitter (mirror `confirmation-guardian-request.ts`) and
+   bridge to `emitNotificationSignal` with a typed payload
+   (`guardian-question-mode.ts` schemas).
+3. If the card needs non-default actions, add a context branch in the
+   broadcaster — actions are generic `{id,label}`; adapters are untouched.
+4. Add reply-mode config (`REQUEST_KIND_MODE_CONFIG`) if the kind answers
+   rather than approves.
+5. Register a resolver (`guardian-request-resolvers.ts`) for the kind's
+   follow-through.
+
+That is the whole checklist. If a design requires touching the inbound
+message handler, a channel transport, or a new callback prefix, the design is
+at the wrong level.
+
+## Legacy rail (in-turn approval interception)
+
+`routes/guardian-approval-interception.ts` + the approval prompt watcher in
+`background-dispatch.ts` predate this pipeline: they deliver a guardian's own
+tool-approval prompt mid-turn and resolve `apr:` taps against the in-memory
+confirmation directly. That prompt is addressed to the guardian, not to the
+chat the turn is running in. On Slack that chat can be a shared room, and the
+card carries the tool, a command preview and live buttons.
+`resolveGuardianPromptDelivery` addresses it to the guardian's bound DM
+instead, by chat id rather than user id because that address is written to the
+delivery row and read back to scope plain-text replies and edit the decided
+card. It returns the address and its route together, since
+the turn's own callback carries a `threadTs` naming a thread that does not
+exist in the DM. When no private address resolves it returns nothing and the
+prompt is left to the in-app confirmation, because the room is the disclosure
+this exists to prevent. Telegram group chats carry the same exposure and are
+not covered: only Slack has a chat whose privacy can be read off its id. They remain load-bearing for that flow, and
+the reply router runs first for everything the pipeline owns. Converge new
+work on the pipeline; do not extend the legacy interception.
+
+Any flow that resolves a confirmation in-memory first (this rail, the in-app
+`/v1/confirm` route, the auto-deny sweeps) brings the gateway row to the
+matching terminal status through `approvals/guardian-request-status-sync.ts`,
+which also runs the same cross-surface card withdrawal the decision primitive
+runs whenever its CAS is the one that landed: no projection of a resolved
+request may stay actionable, whichever rail resolved it.

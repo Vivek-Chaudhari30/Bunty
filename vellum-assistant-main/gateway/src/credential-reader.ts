@@ -1,0 +1,417 @@
+/**
+ * Read-only reader for the assistant's credential stores.
+ *
+ * Resolution order:
+ * 1. CES HTTP API (when CES_CREDENTIAL_URL is set)
+ * 2. Encrypted-at-rest file (~/.vellum/protected/keys.enc)
+ */
+
+import { createDecipheriv, pbkdf2Sync } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { hostname, userInfo } from "node:os";
+import { join } from "node:path";
+import { createCesHttpCredentialClient } from "@vellumai/ces-client/http-credentials";
+import { credentialKey } from "./credential-key.js";
+import { getLogger } from "./logger.js";
+import { getGatewaySecurityDir } from "./paths.js";
+
+export { getGatewaySecurityDir, getWorkspaceDir } from "./paths.js";
+
+const log = getLogger("credential-reader");
+
+const ALGORITHM = "aes-256-gcm";
+const AUTH_TAG_LENGTH = 16;
+const KEY_LENGTH = 32;
+const PBKDF2_ITERATIONS = 100_000;
+
+interface EncryptedEntry {
+  iv: string;
+  tag: string;
+  data: string;
+}
+
+interface StoreFileV1 {
+  version: 1;
+  salt: string;
+  entries: Record<string, EncryptedEntry>;
+}
+
+interface StoreFileV2 {
+  version: 2;
+  entries: Record<string, EncryptedEntry>;
+}
+
+type StoreFile = StoreFileV1 | StoreFileV2;
+
+const STORE_KEY_FILENAME = "store.key";
+
+function getPlatformName(): string {
+  // Must match assistant/src/util/platform.ts#getPlatformName exactly.
+  // Using user-friendly labels like "macOS" here changes PBKDF2 entropy and
+  // makes gateway unable to decrypt credentials written by the daemon.
+  return process.platform;
+}
+
+function getMachineEntropy(): string {
+  const parts: string[] = [];
+  try {
+    parts.push(hostname());
+  } catch {
+    parts.push("unknown-host");
+  }
+  try {
+    parts.push(userInfo().username);
+  } catch {
+    parts.push("unknown-user");
+  }
+  parts.push(getPlatformName());
+  parts.push(process.arch);
+  try {
+    parts.push(userInfo().homedir);
+  } catch {
+    parts.push("/tmp");
+  }
+  return parts.join(":");
+}
+
+function deriveKey(salt: Buffer): Buffer {
+  const entropy = getMachineEntropy();
+  return pbkdf2Sync(entropy, salt, PBKDF2_ITERATIONS, KEY_LENGTH, "sha512");
+}
+
+/**
+ * Read the v2 store key file (~/.vellum/protected/store.key).
+ * Returns null if the file doesn't exist or isn't exactly 32 bytes.
+ */
+function readStoreKey(): Buffer | null {
+  const keyPath = join(getGatewaySecurityDir(), STORE_KEY_FILENAME);
+  if (!existsSync(keyPath)) return null;
+  try {
+    const buf = readFileSync(keyPath);
+    if (buf.length !== KEY_LENGTH) return null;
+    return buf;
+  } catch {
+    return null;
+  }
+}
+
+function decrypt(entry: EncryptedEntry, key: Buffer): string {
+  const iv = Buffer.from(entry.iv, "hex");
+  const tag = Buffer.from(entry.tag, "hex");
+  const data = Buffer.from(entry.data, "hex");
+  const decipher = createDecipheriv(ALGORITHM, key, iv, {
+    authTagLength: AUTH_TAG_LENGTH,
+  });
+  decipher.setAuthTag(tag);
+  const decrypted = Buffer.concat([decipher.update(data), decipher.final()]);
+  return decrypted.toString("utf-8");
+}
+
+function readStore(storePath: string): StoreFile | null {
+  if (!existsSync(storePath)) return null;
+
+  const raw = readFileSync(storePath, "utf-8");
+  const parsed = JSON.parse(raw);
+
+  if (parsed.version === 2 && typeof parsed.entries === "object") {
+    const safeEntries: Record<string, EncryptedEntry> = Object.create(null);
+    Object.assign(safeEntries, parsed.entries);
+    parsed.entries = safeEntries;
+    return parsed as StoreFileV2;
+  }
+
+  if (
+    parsed.version === 1 &&
+    typeof parsed.salt === "string" &&
+    typeof parsed.entries === "object"
+  ) {
+    const safeEntries: Record<string, EncryptedEntry> = Object.create(null);
+    Object.assign(safeEntries, parsed.entries);
+    parsed.entries = safeEntries;
+    return parsed as StoreFileV1;
+  }
+
+  throw new Error("Encrypted store has invalid format");
+}
+
+export function getEncryptedStorePath(): string {
+  return join(getGatewaySecurityDir(), "keys.enc");
+}
+
+// ---------------------------------------------------------------------------
+// Encrypted store reader
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a single credential from the encrypted store.
+ * Returns `undefined` if the store doesn't exist, the key is missing,
+ * or decryption fails.
+ *
+ * For v2 stores, uses the store.key file directly as the AES key.
+ * For v1 stores, derives the key from machine entropy via PBKDF2.
+ */
+function readEncryptedCredential(account: string): string | undefined {
+  try {
+    const store = readStore(getEncryptedStorePath());
+    if (!store) return undefined;
+
+    const entry = store.entries[account];
+    if (!entry) return undefined;
+
+    let key: Buffer;
+    if (store.version === 2) {
+      const storeKey = readStoreKey();
+      if (!storeKey) return undefined;
+      key = storeKey;
+    } else {
+      const salt = Buffer.from(store.salt, "hex");
+      key = deriveKey(salt);
+    }
+    return decrypt(entry, key);
+  } catch (err) {
+    log.debug({ err, account }, "Failed to read from encrypted store");
+    return undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CES HTTP credential reader (containerized mode)
+// ---------------------------------------------------------------------------
+
+export function getCesHttpConfig():
+  | { baseUrl: string; serviceToken: string }
+  | undefined {
+  const baseUrl = process.env.CES_CREDENTIAL_URL?.trim();
+  if (!baseUrl) {
+    return undefined;
+  }
+
+  const serviceToken = process.env.CES_SERVICE_TOKEN?.trim();
+  if (!serviceToken) {
+    log.warn("CES_CREDENTIAL_URL is set but CES_SERVICE_TOKEN is missing");
+    return undefined;
+  }
+
+  return { baseUrl, serviceToken };
+}
+
+/**
+ * Try to read a credential from the CES managed service over HTTP.
+ *
+ * Delegates to `@vellumai/ces-client/http-credentials` for the transport.
+ * Activated when `CES_CREDENTIAL_URL` is set (e.g. `http://ces-host:8090`).
+ * Requires `CES_SERVICE_TOKEN` for bearer auth.
+ *
+ * Returns `undefined` when CES HTTP is not configured. When it is configured,
+ * `unreachable` is true on transport/5xx failures so callers can distinguish
+ * an outage from a missing credential.
+ */
+async function readCesCredential(
+  account: string,
+): Promise<{ value: string | undefined; unreachable: boolean } | undefined> {
+  const config = getCesHttpConfig();
+  if (!config) {
+    return undefined;
+  }
+
+  const client = createCesHttpCredentialClient(config, log);
+  return client.get(account);
+}
+
+export type ServiceCredentialSpec = {
+  /** Service name as it appears in CES metadata (e.g., "telegram", "slack_channel") */
+  service: string;
+  /** Field names required for this service (e.g., ["bot_token", "webhook_secret"]) */
+  requiredFields: readonly string[];
+};
+
+export type ServiceCredentialsRead =
+  | { status: "ok"; credentials: Record<string, string> }
+  | { status: "missing" }
+  | { status: "unreachable" };
+
+/**
+ * When CES HTTP is configured, every required field must have a CES
+ * metadata record. Leftover workspace `metadata.json` is not consulted.
+ * Local keys.enc mode (no CES HTTP) skips this gate.
+ */
+async function requiredCesMetadataResult(
+  spec: ServiceCredentialSpec,
+): Promise<"ok" | "missing" | "unreachable"> {
+  const config = getCesHttpConfig();
+  if (!config) {
+    return "ok";
+  }
+
+  const client = createCesHttpCredentialClient(config, log);
+  for (const field of spec.requiredFields) {
+    const result = await client.getRecord(credentialKey(spec.service, field));
+    if (result.unreachable) {
+      return "unreachable";
+    }
+    if (!result.record) {
+      return "missing";
+    }
+  }
+  return "ok";
+}
+
+// ---------------------------------------------------------------------------
+// Public credential reader — tries CES, then encrypted store
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a single credential by account key, distinguishing a vault outage
+ * from a missing value.
+ *
+ * Resolution order:
+ * 1. CES HTTP API (when CES_CREDENTIAL_URL is set)
+ * 2. Encrypted-at-rest store (keys.enc), only when CES is not configured
+ *    or CES answered that the account is absent
+ *
+ * A configured CES that is unreachable does not fall through to keys.enc.
+ * On a containerized pod that store is empty, and falling through would
+ * report every credential as missing.
+ */
+export async function readCredentialResult(
+  account: string,
+): Promise<{ value: string | undefined; unreachable: boolean }> {
+  const ces = await readCesCredential(account);
+  if (ces) {
+    if (ces.unreachable) {
+      return { value: undefined, unreachable: true };
+    }
+    if (ces.value !== undefined) {
+      return { value: ces.value, unreachable: false };
+    }
+  }
+
+  return {
+    value: await readEncryptedCredential(account),
+    unreachable: false,
+  };
+}
+
+/**
+ * Read a single credential by account key.
+ *
+ * Convenience wrapper over `readCredentialResult` that returns only the
+ * value. Callers that must distinguish "not stored" from "vault down"
+ * should use `readCredentialResult`.
+ */
+export async function readCredential(
+  account: string,
+): Promise<string | undefined> {
+  const result = await readCredentialResult(account);
+  return result.value;
+}
+
+/**
+ * Read every required field for a service, distinguishing a vault outage
+ * from a missing catalog entry.
+ *
+ * Returns `unreachable` when CES HTTP is configured and any metadata or
+ * secret lookup fails with a transport/5xx error. Callers that hot-reload
+ * channel state should keep last-known credentials in that case rather
+ * than treating the service as cleared.
+ */
+export async function readServiceCredentialsResult(
+  spec: ServiceCredentialSpec,
+): Promise<ServiceCredentialsRead> {
+  try {
+    const metadata = await requiredCesMetadataResult(spec);
+    if (metadata === "unreachable") {
+      return { status: "unreachable" };
+    }
+    if (metadata === "missing") {
+      return { status: "missing" };
+    }
+
+    const credentials: Record<string, string> = {};
+    for (const field of spec.requiredFields) {
+      const value = await readCredentialResult(
+        credentialKey(spec.service, field),
+      );
+      if (value.unreachable) {
+        return { status: "unreachable" };
+      }
+      if (!value.value) {
+        return { status: "missing" };
+      }
+      credentials[field] = value.value;
+    }
+
+    return { status: "ok", credentials };
+  } catch (err) {
+    log.debug({ err }, `Failed to read ${spec.service} credentials`);
+    return { status: "unreachable" };
+  }
+}
+
+/**
+ * Generic credential reader that checks CES metadata (when CES HTTP is
+ * configured) and then loads every required secret from CES or the
+ * encrypted store.
+ *
+ * Returns a `Record<string, string>` mapping field names to their values if
+ * all required secrets are readable. Returns `null` if CES metadata is
+ * missing or unreachable, or if any secret value can't be read. Prefer
+ * `readServiceCredentialsResult` when an outage must not look like a clear.
+ */
+export async function readServiceCredentials(
+  spec: ServiceCredentialSpec,
+): Promise<Record<string, string> | null> {
+  const result = await readServiceCredentialsResult(spec);
+  if (result.status !== "ok") {
+    return null;
+  }
+  return result.credentials;
+}
+
+// ---------------------------------------------------------------------------
+// Per-service credential specs
+// ---------------------------------------------------------------------------
+
+export const TELEGRAM_CREDENTIAL_SPEC: ServiceCredentialSpec = {
+  service: "telegram",
+  requiredFields: ["bot_token", "webhook_secret"],
+} as const;
+
+export const TWILIO_CREDENTIAL_SPEC: ServiceCredentialSpec = {
+  service: "twilio",
+  requiredFields: ["account_sid", "auth_token"],
+} as const;
+
+export const WHATSAPP_CREDENTIAL_SPEC: ServiceCredentialSpec = {
+  service: "whatsapp",
+  requiredFields: [
+    "phone_number_id",
+    "access_token",
+    "app_secret",
+    "webhook_verify_token",
+  ],
+} as const;
+
+export const SLACK_CHANNEL_CREDENTIAL_SPEC: ServiceCredentialSpec = {
+  service: "slack_channel",
+  requiredFields: ["bot_token", "app_token"],
+} as const;
+
+export const DISCORD_CHANNEL_CREDENTIAL_SPEC: ServiceCredentialSpec = {
+  service: "discord_channel",
+  requiredFields: ["bot_token"],
+} as const;
+
+export const VELLUM_CREDENTIAL_SPEC: ServiceCredentialSpec = {
+  service: "vellum",
+  requiredFields: ["platform_base_url", "assistant_api_key", "webhook_secret"],
+} as const;
+
+export const ALL_CREDENTIAL_SPECS: readonly ServiceCredentialSpec[] = [
+  TELEGRAM_CREDENTIAL_SPEC,
+  TWILIO_CREDENTIAL_SPEC,
+  WHATSAPP_CREDENTIAL_SPEC,
+  SLACK_CHANNEL_CREDENTIAL_SPEC,
+  DISCORD_CHANNEL_CREDENTIAL_SPEC,
+  VELLUM_CREDENTIAL_SPEC,
+];

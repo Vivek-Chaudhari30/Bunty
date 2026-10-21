@@ -1,0 +1,226 @@
+"use client";
+
+import { DocsContent } from "@/app/docs/_components/docs-content";
+import { SectionHeading } from "@/app/docs/_components/section-heading";
+import { TableOfContents } from "@/app/docs/_components/table-of-contents";
+
+const TOC_ITEMS = [
+  { id: "what-it-does", label: "What it does", level: 2 },
+  { id: "setup-required", label: "Setup required", level: 2 },
+  { id: "permissions", label: "Permissions", level: 2 },
+  { id: "common-prompts", label: "Common prompts", level: 2 },
+  { id: "configuration", label: "Configuration", level: 2 },
+  { id: "tips-gotchas", label: "Tips & gotchas", level: 2 },
+];
+
+export function SkillsReferenceComputerUseContent() {
+  return (
+    <>
+      <DocsContent title="Computer Use" breadcrumb="Docs / Skills Reference / Computer Use">
+        <section id="what-it-does">
+          <SectionHeading id="what-it-does" level={2}>
+            What it does
+          </SectionHeading>
+          <p className="mb-0 text-zinc-600">
+            Controls a connected desktop directly. It observes the screen through accessibility
+            APIs and screenshots, then clicks, types, and scrolls. Some actions depend on the
+            desktop operating system. Platform-hosted web conversations default to the
+            streamed Virtual desktop using accessibility elements and screenshots. Native desktop
+            apps, including the Mac app connected to a platform-hosted assistant, use
+            the connected computer unless explicitly directed to the virtual desktop.
+            Explicit connected-computer targets override the web default.
+            Each virtual desktop action uses the observation ID from its latest screenshot;
+            browser actions or user handoff require a fresh observation.
+            Virtual desktop control shares browser automation setup and user handoff.
+            Use element IDs from the latest observation, or screenshot coordinates for
+            controls not listed. AppleScript and window-only capture are unavailable.
+          </p>
+        </section>
+
+        <section id="setup-required" className="mt-12">
+          <SectionHeading id="setup-required" level={2}>
+            Setup required
+          </SectionHeading>
+          <p className="mb-0 text-zinc-600">
+            None (built into the desktop app). The app will request the operating-system permissions
+            it needs.
+          </p>
+        </section>
+
+        <section id="permissions" className="mt-12">
+          <SectionHeading id="permissions" level={2}>
+            Permissions
+          </SectionHeading>
+          <ul className="mb-0 list-disc space-y-2 pl-6 text-zinc-600">
+            <li>Accessibility (mouse/keyboard control)</li>
+            <li>Screen capture (seeing screen content)</li>
+            <li>Each action is prompted individually for approval</li>
+          </ul>
+        </section>
+
+        <section id="common-prompts" className="mt-12">
+          <SectionHeading id="common-prompts" level={2}>
+            Common prompts
+          </SectionHeading>
+          <div className="mb-0 overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="bg-zinc-50">
+                  <th className="px-4 py-2 text-left text-sm font-medium text-zinc-500">
+                    You say...
+                  </th>
+                  <th className="px-4 py-2 text-left text-sm font-medium text-zinc-500">
+                    What happens
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="[&>tr:nth-child(even)]:bg-zinc-50">
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Open my browser and go to my bank&apos;s website&rdquo;
+                  </td>
+                  <td className="px-3 py-2">
+                    Opens app and navigates
+                  </td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Click the Submit button&rdquo;
+                  </td>
+                  <td className="px-3 py-2">
+                    Clicks a specific UI element
+                  </td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Fill out this form with my info&rdquo;
+                  </td>
+                  <td className="px-3 py-2">
+                    Types into form fields
+                  </td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Take a screenshot of what&apos;s on screen&rdquo;
+                  </td>
+                  <td className="px-3 py-2">
+                    Captures current screen state
+                  </td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Switch to Slack and check my DMs&rdquo;
+                  </td>
+                  <td className="px-3 py-2">
+                    Navigates between apps
+                  </td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-2">
+                    &ldquo;Scroll down to the pricing section&rdquo;
+                  </td>
+                  <td className="px-3 py-2">
+                    Scrolls within an app
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="configuration" className="mt-12">
+          <SectionHeading id="configuration" level={2}>
+            Configuration
+          </SectionHeading>
+          <ul className="mb-0 list-disc space-y-2 pl-6 text-zinc-600">
+            <li>No configuration needed</li>
+            <li>Step limit of 50 actions per session</li>
+            <li>
+              Each action requires approval unless you create trust rules via the Allow button
+            </li>
+          </ul>
+        </section>
+
+        <section id="tips-gotchas" className="mt-12">
+          <SectionHeading id="tips-gotchas" level={2}>
+            Tips &amp; gotchas
+          </SectionHeading>
+          <ul className="mb-0 list-disc space-y-2 pl-6 text-zinc-600">
+            <li>
+              <strong>Accessibility tree + screenshots.</strong> The assistant reads the
+              accessibility tree (same API screen readers use) on every step and takes a screenshot
+              after each action, so it can see what the action did.
+            </li>
+            <li>
+              <strong>Element-based clicking.</strong> It prefers clicking by element name rather
+              than coordinates for reliability.
+            </li>
+            <li>
+              <strong>Coordinate scaling.</strong> Click, scroll, and drag coordinates use screen
+              points. Desktop screenshots include a conversion from image pixels when both
+              dimensions are available. Window captures need element IDs or a fresh desktop
+              observation, not scaling by the full display size.
+            </li>
+            <li>
+              <strong>Live editing.</strong> The assistant uses app zoom controls and fresh
+              screenshots to inspect small targets. If a cut depends on audio or an edit boundary
+              it cannot observe, it asks for a timestamp, a positioned playhead, or source media.
+            </li>
+            <li>
+              <strong>Session caps.</strong> Sessions are capped at 50 steps with loop detection.
+            </li>
+            <li>
+              <strong>Platform differences.</strong> Dragging, opening apps by name, and AppleScript
+              are available on macOS. Windows exposes only actions its desktop helper supports, so
+              unsupported tools are not offered to the assistant.
+            </li>
+            <li>
+              <strong>Scripting first on macOS.</strong> When an app can be driven by AppleScript,
+              the assistant runs a script instead of moving your pointer. It asks the app&apos;s
+              own scripting commands for what it wants where the app has them, falls back to
+              clicking menus by script where it does not, and clicks and types only for what a
+              script cannot reach.
+            </li>
+            <li>
+              <strong>Typing is not sending.</strong> Asked to type or draft a message, the
+              assistant types it and stops before pressing Enter. It sends only when asked to.
+            </li>
+            <li>
+              <strong>Your pointer comes back on macOS.</strong> The pointer stays where the
+              assistant last clicked while it works, so controls that only show on hover keep
+              working. It returns to where you left it when the task ends, unless you have
+              already moved it.
+            </li>
+            <li>
+              <strong>Batched actions on macOS.</strong> When the assistant already knows several
+              steps, such as opening a window, typing a URL, and pressing Enter, it can run them
+              in one step and look at the screen once afterward. It stops at the first action
+              that fails. This needs a desktop app that supports batched actions.
+            </li>
+            <li>
+              <strong>Single-window observations on macOS.</strong> The observe tool accepts
+              <code> capture_window_id</code>, a current native CGWindowID, not a browser tab
+              or accessibility element ID. It captures only that window and its accessibility
+              tree, even behind another app, without secondary windows or a desktop fallback.
+              A compatible desktop app must explicitly advertise window-capture support;
+              older or unsupported clients are rejected before capture.
+            </li>
+            <li>
+              <strong>Observation-only scope.</strong> Window selection applies to one observe
+              call, not the whole session: later click, type, and scroll actions still return
+              normal desktop observations. Selection does not focus the window or restrict
+              later input to it. Cropped screenshot coordinates are window-relative, not
+              full-display coordinates; prefer accessibility element IDs and focus the
+              intended window before acting.
+            </li>
+            <li>
+              <strong>Screen visibility.</strong> Be mindful of what&apos;s visible on screen.
+              Screenshots are sent to the AI model.
+            </li>
+          </ul>
+        </section>
+      </DocsContent>
+      <TableOfContents items={TOC_ITEMS} />
+    </>
+  );
+}

@@ -1,0 +1,113 @@
+import { getConfig } from "../config/loader.js";
+
+// Emergency/high-risk numbers that should never be called
+const DENIED_NUMBERS = new Set(["911", "112", "999", "000", "110", "119"]);
+
+/**
+ * Check whether a phone number is a denied emergency number.
+ *
+ * Normalizes E.164 variants by stripping the leading '+' and then checking
+ * whether the resulting digit string exactly matches a denied number or could
+ * be a country-code-prefixed emergency number (e.g. +1911, +44999, +61000).
+ * Country codes are 1–3 digits, so we try every valid split.
+ */
+export function isDeniedNumber(phoneNumber: string): boolean {
+  // Strip leading '+' to get a digits-only string
+  const digits = phoneNumber.startsWith("+")
+    ? phoneNumber.slice(1)
+    : phoneNumber;
+
+  // Exact match (covers bare short codes like "911", "112")
+  if (DENIED_NUMBERS.has(digits)) {
+    return true;
+  }
+
+  // Try splitting off 1-, 2-, or 3-digit country codes and check if the
+  // remainder is a denied number. This catches patterns like +1911, +44999.
+  for (let ccLen = 1; ccLen <= 3; ccLen++) {
+    if (digits.length > ccLen) {
+      const remainder = digits.slice(ccLen);
+      if (DENIED_NUMBERS.has(remainder)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+// Call limits — backed by config with hardcoded fallbacks
+export function getMaxCallDurationMs(): number {
+  return getConfig().calls.maxDurationSeconds * 1000;
+}
+
+export function getUserConsultationTimeoutMs(): number {
+  return getConfig().calls.userConsultTimeoutSeconds * 1000;
+}
+
+export function getTtsPlaybackDelayMs(): number {
+  return getConfig().calls.ttsPlaybackDelayMs;
+}
+
+export function getAccessRequestPollIntervalMs(): number {
+  return getConfig().calls.accessRequestPollIntervalMs;
+}
+
+export function getGuardianWaitUpdateInitialIntervalMs(): number {
+  return getConfig().calls.guardianWaitUpdateInitialIntervalMs;
+}
+
+export function getGuardianWaitUpdateInitialWindowMs(): number {
+  return getConfig().calls.guardianWaitUpdateInitialWindowMs;
+}
+
+export function getGuardianWaitUpdateSteadyMinIntervalMs(): number {
+  return getConfig().calls.guardianWaitUpdateSteadyMinIntervalMs;
+}
+
+export function getGuardianWaitUpdateSteadyMaxIntervalMs(): number {
+  return getConfig().calls.guardianWaitUpdateSteadyMaxIntervalMs;
+}
+
+// Fixed conversational timings. Named here, beside the config-backed limits
+// above, so the phone path's cadence is readable in one place.
+
+/** Caller silence after the assistant's turn before it nudges them. */
+export const CALLER_SILENCE_NUDGE_MS = 30_000;
+
+/** Listen window after the goodbye drains, in case the caller re-engages. */
+export const END_CALL_LISTEN_WINDOW_MS = 2_000;
+
+/** Max time to wait for goodbye audio to drain before forcing hangup. */
+export const END_CALL_DRAIN_MAX_WAIT_MS = 15_000;
+
+/** Lead before the max call duration at which the low-on-time warning is spoken. */
+export const DURATION_WARNING_LEAD_MS = 2 * 60 * 1000;
+
+/** Delay after the max-duration goodbye is spoken before the call is ended. */
+export const POST_GOODBYE_HANGUP_DELAY_MS = 3_000;
+
+/** Cap on waiting for a superseded turn's teardown before the next caller turn starts. */
+export const BARGE_IN_TEARDOWN_WAIT_MS = 2_000;
+
+/**
+ * Slack added to the provider's own `calls.voice.utteranceEndMs` window
+ * before a held boundary stops waiting for a final that is not coming. The
+ * provider commits an utterance that long after the caller stops speaking,
+ * so anything past it plus a frame's network and parse hop means the stream
+ * is gone, not slow. Mirrors live voice's provider end-of-turn fallback
+ * margin, which bounds the same wait on the other driver.
+ */
+export const PROVIDER_FINAL_FALLBACK_MARGIN_MS = 1_000;
+
+export function getSilenceTimeoutMs(): number {
+  return CALLER_SILENCE_NUDGE_MS;
+}
+
+export function getEndCallListenWindowMs(): number {
+  return END_CALL_LISTEN_WINDOW_MS;
+}
+
+export function getEndCallDrainMaxWaitMs(): number {
+  return END_CALL_DRAIN_MAX_WAIT_MS;
+}

@@ -1,0 +1,633 @@
+/**
+ * Triage-and-escalate voice routing (weak -> strong model).
+ *
+ * A fast "front-door" model fronts every voice turn under a verdict-first
+ * protocol: its output must BEGIN with its verdict on the turn.
+ *
+ *   - `[0]` ({@link HOLD_VERDICT_TOKEN}, unified front-door only): the
+ *     caller is mid-thought — the leg is discarded and listening continues.
+ *   - `[ESCALATE]` ({@link ESCALATE_VERDICT_TOKEN}) followed by ONE short natural
+ *     holding phrase: the turn is too tricky. The phrase is spoken (capped
+ *     at a single sentence) while the turn re-runs on the conversation's
+ *     own profile, the model the caller's typed turns already run on.
+ *     Because the holding phrase is spoken, the caller never hears the
+ *     stronger model's think-time as silence.
+ *   - Anything else: the output IS the answer, streamed straight to TTS
+ *     (low first-token latency -> the caller hears audio fast).
+ *
+ * Leading with the verdict keeps the wire protocol aligned with the
+ * decision the prompt demands the model make in its first words, and bounds
+ * the escalation hand-off: the bridge is capped session-side instead of
+ * trusting the model to stop. Every infra failure fails open to a normal
+ * committed answer turn.
+ * A standalone terminal `[ESCALATE]` is recovered at normal completion without
+ * delaying answer streaming or repeating the already released speech.
+ * The numeric `[1]` verdict is accepted only at the start of a reply.
+ *
+ * This module owns the routing policy in one place: the profile key, the
+ * leg-specific prompt rules, the leading-token classifier, and the bridge
+ * cap/fallback policy. LiveVoiceSession drives the routing.
+ */
+
+import { NON_LATIN_SENTENCE_ENDING_PUNCTUATION } from "../tts/speakable-segments.js";
+import {
+  fixedPhraseLanguage,
+  localizedOrDefault,
+} from "../util/language-subtag.js";
+import {
+  createControlMarkerHoldback,
+  ESCALATE_VERDICT_TOKEN,
+  ESCALATE_VERDICT_TOKENS,
+  HOLD_VERDICT_TOKEN,
+  SCREEN_ACTION_VERDICT_TOKEN,
+  stripInternalSpeechMarkers,
+} from "./voice-control-protocol.js";
+
+export { ESCALATE_VERDICT_TOKEN, HOLD_VERDICT_TOKEN };
+
+export function leadingEscalationToken(text: string): string | undefined {
+  const leading = text.trimStart();
+  return ESCALATE_VERDICT_TOKENS.find((token) => leading.startsWith(token));
+}
+
+// The fast model fronting every turn is pinned by the `voiceFrontDoor` call
+// site (see config/call-site-defaults.ts) — no per-turn profile override.
+// The escalated leg is pinned by the bridge to the conversation's own
+// profile: the conversation's pinned profile if it has one, else the
+// workspace chat-model selection — the model the caller's typed turns in the
+// same conversation already run on (see `conversationProfileForEscalation`
+// in voice-session-bridge.ts). A conversation with no such selection keeps
+// the ordinary call-agent resolution. That honors the user's model choice
+// instead of dropping every hand-off onto the call site's shipped default.
+
+/**
+ * Which leg of a triaged turn a `startVoiceTurn` call represents. Undefined
+ * means routing is off and the turn runs exactly as it does today.
+ */
+export type VoiceRoutingLeg = "front-door" | "escalated";
+
+/**
+ * Spoken when the front-door model escalates without a meaningful holding
+ * phrase of its own — guarantees the caller never hears dead air across the
+ * hand-off. When the model does speak its own bridge, that natural text is
+ * used instead and this is not injected.
+ */
+export const FALLBACK_ESCALATION_BRIDGE =
+  "Let me think about that for a second.";
+
+/**
+ * Per-language spellings of the fallback escalation bridge, keyed by
+ * lowercased BCP 47 base subtag, covering the Deepgram code-switching roster
+ * (DEEPGRAM_MULTI_LANGUAGE_CODES in providers/speech-to-text/deepgram.ts).
+ * These are spoken audio; the English constant above also serves as the
+ * prompt exemplar and stays the default.
+ */
+export const FALLBACK_ESCALATION_BRIDGE_BY_LANGUAGE: Readonly<
+  Record<string, string>
+> = {
+  en: FALLBACK_ESCALATION_BRIDGE,
+  es: "Déjame pensarlo un segundo.",
+  fr: "Laissez-moi y réfléchir un instant.",
+  de: "Lass mich kurz darüber nachdenken.",
+  hi: "मुझे एक पल सोचने दीजिए।",
+  ru: "Дайте мне секунду подумать.",
+  pt: "Deixe-me pensar nisso um segundo.",
+  ja: "少し考えさせてください。",
+  it: "Fammi pensare un attimo.",
+  nl: "Laat me daar even over nadenken.",
+};
+
+/**
+ * The fallback escalation bridge in the caller's language: selected by the
+ * lowercased base subtag of `language` (e.g. "pt-BR" -> "pt"), defaulting to
+ * {@link FALLBACK_ESCALATION_BRIDGE} for unknown or absent languages.
+ */
+export function fallbackEscalationBridgeFor(language?: string): string {
+  return localizedOrDefault(
+    FALLBACK_ESCALATION_BRIDGE_BY_LANGUAGE,
+    language,
+    FALLBACK_ESCALATION_BRIDGE,
+  );
+}
+
+/**
+ * Minimum length (after capping, trimmed) of the front-door leg's spoken
+ * bridge for it to count as a real bridge. Below this, the fallback bridge
+ * is spoken before the quality leg runs.
+ */
+export const MIN_SPOKEN_BRIDGE_CHARS = 3;
+
+/**
+ * The phrase spoken across an escalation hand-off, for both voice drivers:
+ * the front-door leg's own capped bridge when it is a real bridge, else the
+ * canned fallback in the caller's language. `usesFallback` marks the canned
+ * phrase as audio-only: the model never produced it, so no transcript row
+ * carries it (the bridge's hygiene pass deletes the leg's row), and the
+ * driver keeps it out of the turn's recorded text. `language` is the TTS
+ * hint the phrase must carry: "en" when the canned table has no entry for
+ * the caller's language (the phrase is English text then), undefined when
+ * the phrase rides the turn's own language.
+ */
+export function resolveSpokenEscalationBridge(
+  cappedBridge: string,
+  language?: string,
+): { spokenBridge: string; usesFallback: boolean; language?: string } {
+  const usesFallback = cappedBridge.length < MIN_SPOKEN_BRIDGE_CHARS;
+  if (!usesFallback) {
+    return { spokenBridge: cappedBridge, usesFallback };
+  }
+  const fixedLanguage = fixedPhraseLanguage(
+    FALLBACK_ESCALATION_BRIDGE_BY_LANGUAGE,
+    language,
+  );
+  return {
+    spokenBridge: fallbackEscalationBridgeFor(language),
+    usesFallback,
+    ...(fixedLanguage !== undefined ? { language: fixedLanguage } : {}),
+  };
+}
+
+/**
+ * Hard cap on the spoken escalation bridge. The bridge is supposed to be a
+ * single short sentence; the cap bounds the hand-off delay (and the audio)
+ * when a model rambles instead of stopping.
+ */
+export const MAX_ESCALATION_BRIDGE_CHARS = 140;
+
+/**
+ * Sentence terminators that end an escalation bridge: the segmenter's
+ * non-Latin ender roster (tts/speakable-segments.ts) plus the ASCII enders
+ * and the ellipsis. Built from the shared set so the rosters cannot
+ * diverge: without the non-Latin enders a Japanese or Hindi bridge never
+ * hits a terminator and buffers to the char cap before hand-off. Exported
+ * for tests that assert spoken phrases end in a recognized terminator.
+ */
+export const BRIDGE_SENTENCE_END_REGEX = new RegExp(
+  `[.!?…${[...NON_LATIN_SENTENCE_ENDING_PUNCTUATION].join("")}]`,
+);
+
+/**
+ * Normalize the post-verdict stream into the bridge that is actually
+ * spoken: internal markers stripped, cut just after the first sentence
+ * terminator, hard-capped at {@link MAX_ESCALATION_BRIDGE_CHARS}, trimmed.
+ * The session speaks exactly this, the persisted front-door row keeps
+ * exactly this, and the escalated leg is told exactly this — one function
+ * so the three can never drift.
+ */
+export function capEscalationBridge(rawBridge: string): string {
+  const cleaned = stripInternalSpeechMarkers(rawBridge).trimStart();
+  const terminatorMatch = BRIDGE_SENTENCE_END_REGEX.exec(cleaned);
+  const end =
+    terminatorMatch !== null
+      ? Math.min(terminatorMatch.index + 1, MAX_ESCALATION_BRIDGE_CHARS)
+      : MAX_ESCALATION_BRIDGE_CHARS;
+  return cleaned.slice(0, end).trim();
+}
+
+/**
+ * Whether enough of the post-verdict stream has arrived to finalize the
+ * bridge and hand off: a sentence terminator landed, or the hard cap is
+ * reached. Until then the session keeps buffering (the bridge is spoken in
+ * one piece at hand-off, so what is spoken is exactly the capped bridge).
+ */
+export function isEscalationBridgeComplete(rawBridge: string): boolean {
+  const cleaned = stripInternalSpeechMarkers(rawBridge);
+  return (
+    BRIDGE_SENTENCE_END_REGEX.test(cleaned) ||
+    cleaned.trimStart().length >= MAX_ESCALATION_BRIDGE_CHARS
+  );
+}
+
+/**
+ * The spoken bridge of a front-door leg's full raw output: the capped
+ * phrase following a leading verdict, or the already released speech
+ * before a terminal verdict. Other output has no bridge. Transcript hygiene
+ * replays the same verdict machine to reconstruct what the caller heard.
+ */
+export function spokenBridgeText(frontDoorText: string): string {
+  const machine = createFrontDoorVerdictMachine(false);
+  const step = machine.push(frontDoorText);
+  if (step.kind === "escalate" && step.bridge !== null) {
+    return step.bridge;
+  }
+  const finished = machine.finish();
+  return finished.kind === "bridge" || finished.kind === "terminal-escalate"
+    ? finished.bridge
+    : "";
+}
+
+/**
+ * Whether a canned fallback bridge must be spoken before the escalated leg,
+ * given the front-door leg's full raw output. True when the model escalated
+ * with (nearly) no holding phrase of its own — without the fallback the
+ * caller would sit in silence while the quality leg spins up.
+ */
+export function needsFallbackBridge(frontDoorText: string): boolean {
+  return spokenBridgeText(frontDoorText).length < MIN_SPOKEN_BRIDGE_CHARS;
+}
+
+/**
+ * Classification of a front-door leg's accumulated leading output (already
+ * `trimStart()`ed). `pending` means the stream could still become a verdict
+ * token: keep buffering. Other results select the leg's streaming path;
+ * a terminal escalation verdict is checked separately at completion.
+ */
+export type FrontDoorLeadingVerdict =
+  | "pending"
+  | "hold"
+  | "escalate"
+  | "answer";
+
+/**
+ * Classify the leading output of a front-door leg under the verdict-first
+ * protocol. `holdEnabled` is true only for speculative (unified
+ * front-door) legs — a leg whose prompt never taught the hold token must
+ * not have output swallowed by it.
+ *
+ * A leading partial that could still become an enabled verdict token
+ * (e.g. `[`, `[1`) stays `pending`; a `[`-prefix that disproves both
+ * tokens (e.g. `[A` for an ASK_GUARDIAN marker) classifies as `answer` —
+ * the answer path's own marker holdback handles it from there.
+ */
+export function classifyFrontDoorLeading(
+  leading: string,
+  holdEnabled: boolean,
+): FrontDoorLeadingVerdict {
+  if (leading.length === 0) {
+    return "pending";
+  }
+  if (holdEnabled && leading.startsWith(HOLD_VERDICT_TOKEN)) {
+    return "hold";
+  }
+  if (leadingEscalationToken(leading) !== undefined) {
+    return "escalate";
+  }
+  const candidates = holdEnabled
+    ? [HOLD_VERDICT_TOKEN, ...ESCALATE_VERDICT_TOKENS]
+    : ESCALATE_VERDICT_TOKENS;
+  if (candidates.some((token) => token.startsWith(leading))) {
+    return "pending";
+  }
+  return "answer";
+}
+
+/**
+ * One step of a front-door leg's stream under the verdict-first protocol,
+ * as returned by {@link FrontDoorVerdictMachine.push}.
+ */
+export type FrontDoorStep =
+  /** The leading tokens could still become a verdict token: keep buffering. */
+  | { readonly kind: "pending" }
+  /** Hold verdict: the leg is discarded and listening continues. */
+  | { readonly kind: "hold" }
+  /**
+   * The leg's output is the answer. `text` is the raw text this delta
+   * released; on the transition it includes the leading text held while the
+   * verdict was pending.
+   */
+  | { readonly kind: "answer"; readonly text: string }
+  /**
+   * Escalate verdict, decided by this delta. `bridge` is the capped holding
+   * phrase when this delta already completed it, else null while the phrase
+   * keeps streaming.
+   */
+  | { readonly kind: "escalate"; readonly bridge: string | null }
+  /** Post-verdict text still buffering toward the capped bridge. */
+  | { readonly kind: "bridging" }
+  /** The capped bridge is complete: hand off to the escalated leg. */
+  | { readonly kind: "bridge"; readonly bridge: string }
+  /** A terminal verdict hands off using the answer text already released. */
+  | { readonly kind: "terminal-escalate"; readonly bridge: string }
+  /** The leg already held, handed off, or finished; nothing more happens. */
+  | { readonly kind: "done" };
+
+/**
+ * The verdict-first state machine over a front-door leg's delta stream. One
+ * implementation drives every consumer of that stream: the live-voice
+ * session (which acts on the steps), the conversation-hub stream gate
+ * (which releases only the text the caller hears), and transcript hygiene
+ * (which replays a persisted row through it).
+ *
+ * `push` feeds one delta and reports what it decided. `finish` is called
+ * when the leg completes normally: a bridge that stopped short of a
+ * sentence terminator hands off with what arrived. A standalone terminal
+ * escalation token also hands off, using the already released answer as
+ * its bridge. A cancelled leg never calls `finish`.
+ */
+export interface FrontDoorVerdictMachine {
+  push(deltaText: string): FrontDoorStep;
+  finish(): FrontDoorStep;
+  /** The model classified this hand-off as a screen action using current context. */
+  readonly screenAction: boolean;
+}
+
+const PENDING_STEP: FrontDoorStep = { kind: "pending" };
+const HOLD_STEP: FrontDoorStep = { kind: "hold" };
+const BRIDGING_STEP: FrontDoorStep = { kind: "bridging" };
+const DONE_STEP: FrontDoorStep = { kind: "done" };
+
+/**
+ * Build a {@link FrontDoorVerdictMachine}. `holdEnabled` mirrors
+ * {@link classifyFrontDoorLeading}: true only for speculative (unified
+ * front-door) legs, whose decision rule is the only one that teaches the
+ * hold token.
+ *
+ * The bridge handed off is exactly what {@link capEscalationBridge} yields,
+ * so the audio, the released text, the persisted row, and the phrase quoted
+ * to the escalated leg all agree. The verdict token and anything streamed
+ * past the cap are never released.
+ */
+export function createFrontDoorVerdictMachine(
+  holdEnabled: boolean,
+): FrontDoorVerdictMachine {
+  let raw = "";
+  let stage: "deciding" | "answer" | "bridging" | "done" = "deciding";
+  let bridgeRaw = "";
+  let releasedChars = 0;
+  let screenAction = false;
+
+  const completeBridge = (): Extract<FrontDoorStep, { kind: "bridge" }> => {
+    stage = "done";
+    return { kind: "bridge", bridge: capEscalationBridge(bridgeRaw) };
+  };
+
+  return {
+    get screenAction() {
+      return screenAction;
+    },
+    push(deltaText: string): FrontDoorStep {
+      raw += deltaText;
+      if (stage === "done") {
+        return DONE_STEP;
+      }
+      if (stage === "bridging") {
+        bridgeRaw += deltaText;
+        return isEscalationBridgeComplete(bridgeRaw)
+          ? completeBridge()
+          : BRIDGING_STEP;
+      }
+      if (stage === "deciding") {
+        const verdict = classifyFrontDoorLeading(raw.trimStart(), holdEnabled);
+        if (verdict === "pending") {
+          return PENDING_STEP;
+        }
+        if (verdict === "hold") {
+          stage = "done";
+          return HOLD_STEP;
+        }
+        if (verdict === "escalate") {
+          stage = "bridging";
+          const token = leadingEscalationToken(raw)!;
+          screenAction = token === SCREEN_ACTION_VERDICT_TOKEN;
+          bridgeRaw = raw.trimStart().slice(token.length);
+          return {
+            kind: "escalate",
+            bridge: isEscalationBridgeComplete(bridgeRaw)
+              ? completeBridge().bridge
+              : null,
+          };
+        }
+        stage = "answer";
+      }
+      // Answer stage: release everything not yet released, which on the
+      // transition includes the leading text the pending verdict held.
+      const text = raw.slice(releasedChars);
+      releasedChars = raw.length;
+      return { kind: "answer", text };
+    },
+    finish(): FrontDoorStep {
+      if (stage === "bridging") {
+        return completeBridge();
+      }
+      if (stage === "answer") {
+        stage = "done";
+        const text = raw.trimEnd();
+        const terminalToken = [
+          ESCALATE_VERDICT_TOKEN,
+          SCREEN_ACTION_VERDICT_TOKEN,
+        ].find((token) => text.endsWith(token));
+        const beforeToken = terminalToken
+          ? text.slice(0, -terminalToken.length)
+          : "";
+        if (terminalToken && /\s$/.test(beforeToken)) {
+          screenAction = terminalToken === SCREEN_ACTION_VERDICT_TOKEN;
+          return {
+            kind: "terminal-escalate",
+            bridge: stripInternalSpeechMarkers(beforeToken).trim(),
+          };
+        }
+      }
+      stage = "done";
+      return DONE_STEP;
+    },
+  };
+}
+
+/**
+ * Verdict-first gate over a front-door leg's delta stream: given the leg's
+ * raw deltas in order, it releases only the text the caller actually hears.
+ * A front-door leg's raw stream is a control plane, not assistant speech,
+ * until its leading tokens classify, so anything downstream of the model
+ * that shows text to a person reads the stream through this gate.
+ *
+ * `push` returns the text released by that delta (empty while the gate is
+ * holding). `finish` is called when the leg completes normally and releases
+ * a bridge that stopped short of a sentence terminator. A leg that is
+ * cancelled instead spoke nothing past what `push` already released, so it
+ * simply never calls `finish`.
+ */
+export interface FrontDoorStreamGate {
+  push(deltaText: string): string;
+  finish(): string;
+  /** Whether the leg's verdict classified its output as the answer. */
+  readonly answering: boolean;
+}
+
+/**
+ * Build a {@link FrontDoorStreamGate} over a {@link FrontDoorVerdictMachine}.
+ *
+ * The three verdicts release differently, matching what the caller hears:
+ *
+ * - `hold`: the leg is discarded and its row deleted, so nothing is ever
+ *   released.
+ * - `escalate`: the only spoken text is the capped holding phrase, released
+ *   in one piece once the bridge is complete. A bridge shorter than
+ *   {@link MIN_SPOKEN_BRIDGE_CHARS} releases nothing at all: the session
+ *   substitutes an audio-only canned fallback for it (see
+ *   `usesFallbackBridge` in `live-voice-session.ts`) and deletes the row
+ *   rather than persisting a phrase the model never really produced, so
+ *   there is no displayed text for the gate to agree with.
+ * - `answer`: speech streams immediately, with control markers held back
+ *   and stripped using the same filter as the audio drivers.
+ */
+export function createFrontDoorStreamGate(
+  holdEnabled: boolean,
+): FrontDoorStreamGate {
+  const machine = createFrontDoorVerdictMachine(holdEnabled);
+  let answering = false;
+  let rawSpeech = "";
+  let releasedSpeech = "";
+  const flushSpeech = createControlMarkerHoldback((text) => {
+    releasedSpeech += text;
+  });
+  const filterSpeech = (text: string, force = false): string => {
+    rawSpeech += text;
+    releasedSpeech = "";
+    flushSpeech(rawSpeech, { force });
+    return releasedSpeech;
+  };
+  const releasable = (bridge: string): string =>
+    bridge.length < MIN_SPOKEN_BRIDGE_CHARS ? "" : bridge;
+  const release = (step: FrontDoorStep): string => {
+    switch (step.kind) {
+      case "answer":
+        answering = true;
+        return step.text;
+      case "escalate":
+        return step.bridge === null ? "" : releasable(step.bridge);
+      case "bridge":
+        return releasable(step.bridge);
+      default:
+        return "";
+    }
+  };
+  return {
+    push: (deltaText) => filterSpeech(release(machine.push(deltaText))),
+    finish: () => filterSpeech(release(machine.finish()), true),
+    get answering() {
+      return answering;
+    },
+  };
+}
+
+/**
+ * The escalated leg runs as its own voice turn. Rather than re-persist the
+ * caller's utterance (it is already in history from the front-door leg), the
+ * escalated leg is driven by this synthetic, echo-suppressed continuation
+ * prompt — the same pattern the opener/verification synthetic prompts use. The
+ * quality model answers the caller's previous question, which sits in history
+ * just above it.
+ */
+export const ESCALATION_CONTINUATION_CONTENT =
+  "(You just told the caller you needed a moment to think. Now answer their previous question out loud. Cover what they asked, but as a few spoken sentences rather than a written write-up: they are listening, not reading. Do not repeat the holding phrase.)";
+
+/**
+ * Compact, registry-derived digest of the tools the ESCALATED leg can use.
+ * The front-door leg runs toolless, so without this it has no way to know
+ * what the assistant can actually do — and its failure mode is refusing or
+ * fabricating instead of escalating. The digest teaches routing (and lets
+ * the holding phrase name the action) without carrying executable schemas.
+ * Empty input (registry unavailable) yields an empty digest; the decision
+ * rule still works, it just can't enumerate capabilities.
+ */
+export function frontDoorCapabilityDigest(toolNames: string[]): string {
+  if (toolNames.length === 0) {
+    return "";
+  }
+  return [
+    "You have no tools on this leg, but the stronger model you can escalate to has these:",
+    `${toolNames.join(", ")}.`,
+    "Any request that needs one of them must escalate — name the action in your holding phrase",
+    '(for example "Let me check your calendar") instead of refusing or guessing.',
+  ].join(" ");
+}
+
+/**
+ * The front-door leg's single decision rule: one decision tree, decided
+ * silently, delivered as the leg's leading tokens. `includeHold` adds the
+ * mid-thought branch and is set only on speculative (unified front-door)
+ * legs — a leg that doesn't know the hold token can't accidentally emit
+ * it, and a leg that does must be one whose leading tokens are
+ * interpreted. The verdict must lead: spoken audio cannot be un-said, so
+ * the model must never start answering and then try to bail.
+ */
+export function frontDoorDecisionRule(opts?: {
+  includeHold?: boolean;
+  screenSharing?: boolean;
+  capabilityDigest?: string;
+  callerUtterance?: string;
+}): string {
+  const holdBranch =
+    opts?.includeHold === true
+      ? [
+          // Hold requires positive evidence of an unfinished sentence, never
+          // mere uncertainty, because the two mistakes cost differently. A
+          // false hold is silent: the verdict, the extension window, and the
+          // replay dispatch all elapse before the turn commits, roughly
+          // tripling felt latency. A false
+          // release only answers a beat early, which barge-in absorbs.
+          `- If the caller's words are visibly unfinished (a trailing conjunction, a dangling clause, a list still being dictated) output ONLY ${HOLD_VERDICT_TOKEN} and stop, no other text. Judge the words themselves: a complete question or statement means they are done, even when it is short or leans on earlier context ("What do you think?", "Why?", "And then?"). Callers may speak any language: those examples are English exemplars only, and completeness is judged by the grammar of the language being spoken. In verb-final languages such as Hindi, Japanese, or Korean the sentence-final verb usually marks completion, so a missing final verb is the unfinished signal, not a missing conjunction. Never hold merely because more could follow.`,
+        ]
+      : [
+          // No hold branch means completeness is settled (a first leg
+          // already held, or the boundary released the turn) — say so
+          // explicitly, or the model improvises an escape hatch through
+          // the escalate token.
+          "The caller has finished their turn — never judge whether they are done.",
+        ];
+  // Name the words being judged. The caller's utterance is the only untagged
+  // text in the assembled message — it sits between tagged injections
+  // (<memory_pointer>, <channel_capabilities>, <turn_context>) and this
+  // rule, so an undelimited five-word question can read as a fragment of the
+  // block above it. Quoting it verbatim is the same move
+  // escalatedContinuationRule makes with the spoken bridge, for the same
+  // reason: an instruction that points at text is only enforceable when the
+  // text is unambiguous.
+  //
+  // The quote is JSON-serialized because the utterance is caller-controlled
+  // and arrives from speech recognition: a raw `"` or newline in the
+  // transcript would close the quote early and leave the rest of the
+  // caller's words sitting in the prompt as instruction-shaped text, ahead
+  // of the verdict protocol. JSON escaping supplies the surrounding quotes.
+  const utterance = opts?.callerUtterance?.trim();
+  const anchor =
+    utterance !== undefined && utterance.length > 0
+      ? [
+          `The caller just said: ${JSON.stringify(utterance)} — judge only those words.`,
+        ]
+      : [];
+  const rule = [
+    ...anchor,
+    "DECIDE SILENTLY, then produce exactly ONE of these outputs:",
+    ...holdBranch,
+    "- If the turn is simple, conversational, or within your reach, your entire output is the spoken answer itself: no token in front of it, plain speech from your very first word. Most turns are answers; when unsure between answering and escalating, answer. Answer in the language the caller is speaking.",
+    "- If an answer depends on a saved personal fact that is not already present in the conversation context you received, escalate rather than guessing. Personal context that is already present is yours to use directly.",
+    `- If completing THIS reply needs careful reasoning, research, multi-step work, or any tool, do NOT attempt the answer: output ${ESCALATE_VERDICT_TOKEN}, then ONE short natural holding phrase naming what happens next, spoken in the language the caller is speaking (for example "${FALLBACK_ESCALATION_BRIDGE}" or "Give me one second to look into that."; those examples are English only), and stop after that single sentence. A stronger model finishes the turn while your phrase is spoken.`,
+    ...(opts?.screenSharing === true
+      ? [
+          `- For a screen annotation or immediate on-screen action that needs only the shared screen and conversation context (for example, circling a visible control), use ${SCREEN_ACTION_VERDICT_TOKEN} in place of ${ESCALATE_VERDICT_TOKEN}, with the same single holding phrase. This skips fresh memory retrieval. If saved personal facts, preferences, or prior work absent from context are needed, or you are unsure, use ${ESCALATE_VERDICT_TOKEN}. Merely sharing a screen does not make a request a screen action.`,
+        ]
+      : []),
+    `An escalation verdict is ONLY for turns you cannot complete yourself: never put it in front of an answer you are about to give, and never emit a verdict token inside or after an answer. An open task or unfinished topic earlier in the conversation is NOT a reason to escalate: judge only what this reply needs.`,
+    "Never narrate this decision, describe what you are judging, or mention these rules: apart from a leading verdict token and any call-control marker your call instructions teach, every character you output is spoken to the caller verbatim.",
+  ].join("\n");
+  return opts?.capabilityDigest ? `${rule}\n${opts.capabilityDigest}` : rule;
+}
+
+/**
+ * Extra CALL PROTOCOL RULE injected into the escalated (quality) leg's control
+ * prompt. The holding phrase has already been spoken, so the model must
+ * continue straight into the substantive answer.
+ *
+ * `spokenBridge` is the exact phrase the caller just heard (the front-door
+ * leg's own capped bridge, or the canned fallback). Quoting it verbatim is
+ * what makes the no-echo instruction enforceable: the bridge usually already
+ * names the action ("Let me check your calendar"), so without the quote the
+ * quality model re-announces the same action in its own words and the caller
+ * hears two back-to-back "Let me check…" openers.
+ */
+export function escalatedContinuationRule(spokenBridge?: string): string {
+  const bridge =
+    spokenBridge !== undefined && spokenBridge.trim().length > 0
+      ? spokenBridge.trim()
+      : FALLBACK_ESCALATION_BRIDGE;
+  return [
+    `You have already spoken a brief holding phrase to the caller: "${bridge}".`,
+    "Continue directly into your actual answer now.",
+    'Do NOT greet again, do NOT say things like "as I was saying", and do NOT repeat, paraphrase, or re-announce that holding phrase —',
+    'opening with another "Let me check", "One moment", or any restatement of what you are about to do sounds broken, because the caller just heard that.',
+    "Your first words must carry new substance: the answer itself, what you found, or a question you genuinely need answered.",
+    `Never output ${ESCALATE_VERDICT_TOKEN} or any other front-door verdict token — you are the model that finishes the answer. (Call-control markers your call instructions teach, such as [END_CALL], are not verdict tokens and stay allowed.)`,
+    "Reply in the same language as the caller's question.",
+  ].join(" ");
+}

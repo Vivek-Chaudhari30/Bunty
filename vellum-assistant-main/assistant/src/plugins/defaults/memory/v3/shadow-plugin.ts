@@ -1,0 +1,960 @@
+/**
+ * Memory v3 — config-gated live orchestration engine.
+ *
+ * When `memory.v3.live` is set, runs the v3 orchestrator each turn and records
+ * its selection set to `memory_v3_selections` and its candidate pool to
+ * `memory_v3_pools`. The injector (`memoryV3Injector` in `./injector.ts`)
+ * renders this turn's selections into a `<memory>` block and returns it at
+ * v2's dynamic-memory placement (`after-memory-prefix`).
+ *
+ * On each live turn:
+ *   1. Lazy-init the v3 lanes (section index, section-grain BM25 needle,
+ *      dense lane config, link-graph edge graph, curated core set, frecency
+ *      hot set), memoizing the init promise so concurrent first turns share a
+ *      single build. The memo lives until the persisted lanes-version token
+ *      changes (see `./lanes-version-store.js`) — writers in any process bump
+ *      it via {@link invalidateLanes}, and {@link getLanes} observes the change
+ *      and rebuilds.
+ *   2. Build a {@link MemoryRoutingTurn} from the conversation's recent messages.
+ *   3. Run {@link orchestrate} and record its selection set to
+ *      `memory_v3_selections` with a best-effort lane attribution, plus the
+ *      full candidate pool and verdict to `memory_v3_pools` for the inspector,
+ *      and, under `memory.v3.poolLog.captureInput`, the selector's exact
+ *      input to `memory_v3_pool_inputs` / `memory_v3_pool_texts`, as one
+ *      transaction ({@link writeTurnLog}).
+ *
+ * {@link observeTurn} wraps everything in try/catch — any failure is logged and
+ * swallowed so it can never affect the live turn. The injector treats a
+ * `null`/empty result as "no v3 injection".
+ */
+
+import { existsSync, readFileSync } from "node:fs";
+
+import {
+  getMessages,
+  listInstalledSkills,
+  parseMessageMetadata,
+  safeStringSlice,
+  stringifyMessageContent,
+  VOICE_ESCALATION_CONTINUATION_MESSAGE_KIND,
+} from "@vellumai/plugin-api";
+
+import { getConfig } from "../../../../config/loader.js";
+import { isMemoryEnabled } from "../../../../config/memory-v3-gate.js";
+import type { AssistantConfig } from "../../../../config/schema.js";
+import {
+  recordLatencySubSpan,
+  timeLatencySubSpan,
+} from "../../../../daemon/turn-latency-sub-spans.js";
+import { enqueueMemoryJob } from "../../../../persistence/jobs-store.js";
+import { stripCommentLines } from "../host-utils.js";
+import { getLogger } from "../logging.js";
+import { type MemorySqlite, memorySqliteOrNull } from "../memory-db.js";
+import { getWorkspaceDir, getWorkspacePromptPath } from "../paths.js";
+import { getPageIndex, invalidatePageIndex } from "../substrate/page-index.js";
+import { readPage, renderPageContent } from "../substrate/page-store.js";
+import {
+  capabilityOrDiskBody,
+  renderCapabilityContent,
+} from "./capabilities.js";
+import { renderCard } from "./card.js";
+import { loadCoreSet } from "./core-set.js";
+import type { EdgeGraph } from "./edge.js";
+import { buildEdgeGraph } from "./edge.js";
+import type { EntityIndex } from "./entity-lane.js";
+import { buildEntityIndex } from "./entity-lane.js";
+import { getActiveSections, sectionRefSetHas } from "./ever-injected-store.js";
+import { computeFreshSet } from "./fresh-set.js";
+import { computeHotSet } from "./hot-set.js";
+import { bumpLanesVersion, readLanesVersion } from "./lanes-version-store.js";
+import { computeLearnedEdgeGraph } from "./learned-edges.js";
+import type { OrchestrateResult } from "./orchestrate.js";
+import { orchestrate } from "./orchestrate.js";
+import { ensureMemoryV3SelectionsSectionKeyOnce } from "./plugin-schema.js";
+import {
+  buildPoolInput,
+  buildPoolRecord,
+  type PoolInputCapture,
+  type PoolRecord,
+  writePool,
+  writePoolInput,
+} from "./pool-log-store.js";
+import {
+  MemoryV3RetrievalUnavailableError,
+  resolveSelectorPrompt,
+} from "./pool-select.js";
+import {
+  ensureSectionCollection,
+  holdSectionDenseReadsUntilRebuilt,
+} from "./section-dense-store.js";
+import type { SectionNeedle } from "./section-needle.js";
+import { buildSectionNeedle } from "./section-needle.js";
+import { buildSectionIndex } from "./sections.js";
+import { resolveV3Tuning } from "./tuning-profile.js";
+import {
+  type MemoryRoutingTurn,
+  type SectionIndex,
+  sectionKey,
+  sectionRefId,
+  type SelectionSource,
+  type Slug,
+} from "./types.js";
+
+const log = getLogger("memory-v3-shadow");
+
+/** How many recent messages to fold into the shadow `recentContext` string. */
+const RECENT_CONTEXT_MESSAGES = 6;
+
+/** How many trailing characters of the previous assistant reply feed the
+ *  reply-query finder pass. */
+const REPLY_QUERY_TAIL_CHARS = 2500;
+
+/** Selection-log scan window for the learned-edge graph. At the default
+ *  30-day half-life, rows beyond ~3 half-lives carry negligible weight — the
+ *  window bounds the scan, not the math. */
+const LEARNED_EDGES_WINDOW_DAYS = 90;
+
+/**
+ * The lazily-built, process-lifetime v3 lanes. The core and hot sets are
+ * computed here (not per turn) because they are the candidate pool's STABLE
+ * PREFIX — recomputing them mid-conversation would reorder the prefix and bust
+ * the selector's KV cache. Lane memoization is the recompute cadence:
+ * `invalidateLanes()` (called by the maintain job at consolidation) forces a
+ * rebuild on the next turn.
+ */
+export interface ShadowLanes {
+  sectionIndex: SectionIndex;
+  needle: SectionNeedle;
+  /** Heading-anchored entity catalog, built at lane init when the entity lane
+   *  is enabled (`memory.v3.entity.enabled`). Omitted disables the lane. */
+  entityIndex?: EntityIndex;
+  /** Config the dense lane needs to embed the query + search the section
+   *  collection. */
+  denseConfig: AssistantConfig;
+  edgeGraph: EdgeGraph;
+  /** Curated core set in file order, filtered to pages in the section index. */
+  coreSlugs: string[];
+  /** Frecency hot set in score order: core excluded, filtered to pages in the
+   *  section index. */
+  hotSlugs: string[];
+  /** Modification-recency fresh set in recency order: core and hot excluded,
+   *  filtered to pages in the section index. */
+  freshSlugs: string[];
+  /** Skills placed in the stable prefix every turn (`always-candidate: true`
+   *  in SKILL.md), existence-filtered and core/hot/fresh-excluded. */
+  alwaysCandidateSlugs: string[];
+  /** Learned-edge graph: co-selection NPMI associations over the selection
+   *  log, rebuilt with the lanes when the learned lane is enabled. */
+  learnedGraph?: EdgeGraph;
+  /** Pre-rendered FULL cards for the stable-prefix (core+hot+fresh) slugs,
+   *  keyed by slug. Frozen at lane build so the selector's stable prefix is
+   *  byte-identical across turns until the next invalidation. */
+  prefixCards: Map<Slug, string>;
+  /** Real concept-page count at lane build (page-index entries with a real
+   *  mtime): the corpus-size signal for {@link resolveV3Tuning}. The lane-build
+   *  tuning (hot/fresh K, learned-edge graph) is derived from it here, and the
+   *  per-turn orchestrate knobs are re-resolved from it each turn so a live
+   *  config edit takes effect without waiting for a lane rebuild. */
+  realConceptPageCount: number;
+}
+
+/** Milliseconds per day — converts `hotSet.halfLifeDays` config to ms. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Memoized init promise. Caching the PROMISE (not the resolved value) means
+ * concurrent first turns all await the same build instead of racing several
+ * section-index / needle / edge-graph passes.
+ */
+let lanesPromise: Promise<ShadowLanes> | null = null;
+
+/** The persisted lanes-version token captured when the memoized build started
+ *  ({@link readLanesVersion}). {@link getLanes} rebuilds when the store's token
+ *  differs. */
+let builtLanesVersion: string | null = null;
+
+/** Drop THIS process's lane caches: the memo and the page-index cache the
+ *  rebuild reads through. Shared by the writer path ({@link invalidateLanes})
+ *  and the observer path in {@link getLanes}. */
+function dropLanesLocal(): void {
+  lanesPromise = null;
+  invalidatePageIndex();
+}
+
+/**
+ * Drop the memoized lanes so the NEXT `getLanes` rebuilds them from scratch
+ * (fresh section index + fresh needle + fresh edge graph). The rebuild is lazy
+ * — this only clears the caches, so the cost is paid by the next caller, and
+ * concurrent first-callers after the invalidation still share a single build via
+ * the re-memoized promise. Call this whenever the underlying pages change on
+ * disk.
+ *
+ * Three effects, and every caller needs all three:
+ *   - null the local memo, so this process rebuilds on its next turn;
+ *   - drop the page-index cache, so the rebuild re-scans the workspace even
+ *     when the pages changed without a daemon tool hook firing (direct disk
+ *     edits, another process's writes);
+ *   - bump the persisted lanes-version token, so OTHER processes observe the
+ *     invalidation — the memory worker is where the maintain job calls this,
+ *     and without the bump the daemon's lanes would never rebuild.
+ *
+ * The bump is best-effort: invalidation must never throw (it runs inside
+ * jobs, the rebuild-index route, and tests), so a token-write failure only
+ * logs — the local invalidation above still holds.
+ */
+export function invalidateLanes(): void {
+  dropLanesLocal();
+  try {
+    bumpLanesVersion(getWorkspaceDir());
+  } catch (err) {
+    log.warn(
+      { err },
+      "lanes-version bump failed; other processes will not observe this invalidation",
+    );
+  }
+}
+
+/** Test-only alias for {@link invalidateLanes}. */
+export function resetShadowLanesForTests(): void {
+  invalidateLanes();
+}
+
+async function initLanes(config: AssistantConfig): Promise<ShadowLanes> {
+  const pageIndex = await getPageIndex(getWorkspaceDir());
+  const slugs = pageIndex.entries.map((entry) => entry.slug);
+
+  // Synthetic capability slugs (skills / CLI commands) carry `modifiedAt: 0`;
+  // real on-disk concept pages carry a file mtime. The real-page count drives
+  // the corpus-size-adaptive tuning: a sparse corpus runs the lean new-user
+  // profile until it crosses the page threshold, then the configured/full one.
+  const realConceptPageCount = pageIndex.entries.filter(
+    (entry) => entry.modifiedAt > 0,
+  ).length;
+  const tuning = resolveV3Tuning(config, realConceptPageCount);
+
+  // Read each page ONCE and feed BOTH forms downstream: the frontmatter-stripped
+  // body to the section index (lexical/dense matching), and the raw page
+  // (frontmatter + body) to the edge graph (so the `links:` frontmatter is
+  // available). A per-slug cache holds the parsed page so the second consumer
+  // reuses the first read.
+  const pageCache = new Map<Slug, { body: string; raw: string } | null>();
+  async function loadPage(
+    slug: Slug,
+  ): Promise<{ body: string; raw: string } | null> {
+    if (pageCache.has(slug)) {
+      return pageCache.get(slug)!;
+    }
+    let loaded: { body: string; raw: string } | null = null;
+    try {
+      const page = await readPage(getWorkspaceDir(), slug);
+      if (page) {
+        loaded = { body: page.body, raw: renderPageContent(page) };
+      }
+    } catch {
+      loaded = null;
+    }
+    pageCache.set(slug, loaded);
+    return loaded;
+  }
+  // Synthetic capability slugs (skills / CLI commands) have no on-disk page, so
+  // they contribute their full INDEX-form capability content (for CLI commands,
+  // the complete help text — injection renders only the short summary). This
+  // puts them in the section index, so the needle lane (and, once a backfill
+  // embeds them, the dense lane) ranks them by relevance like any other page,
+  // instead of being blindly added to the select pool every turn. Real pages
+  // read their body through the cached `loadPage`.
+  const pageBody = async (slug: Slug): Promise<string> =>
+    capabilityOrDiskBody(slug, async (s) => (await loadPage(s))?.body ?? "");
+  const pageRaw = async (slug: Slug): Promise<string> => {
+    const loaded = await loadPage(slug);
+    if (!loaded) {
+      throw new Error(`page not found: ${slug}`);
+    }
+    return loaded.raw;
+  };
+
+  const sectionIndex = await buildSectionIndex(slugs, pageBody);
+  const needle = buildSectionNeedle(sectionIndex);
+
+  // The entity lane's heading catalog: distinctive `## ` heading tokens → the
+  // sections they head, so a named entity in the turn message surfaces its page
+  // even when additive BM25 buries it under the message's bulk theme. Gated by
+  // the needle's corpus IDF so hub tokens (e.g. "vellum") never become keys.
+  const entityCfg = config.memory.v3.entity;
+  const entityIndex = entityCfg.enabled
+    ? buildEntityIndex(
+        sectionIndex,
+        (token) => needle.idf(token) >= entityCfg.idfFloor,
+      )
+    : undefined;
+
+  // The stable-prefix lanes. Core is the maintainer-curated file (file order
+  // preserved — it is the prefix's stable sort), filtered to pages that exist
+  // in the live section index so a dangling entry can never reach the pool.
+  // Hot is the frecency top-K over `memory_v3_selections` with core excluded
+  // (hot never duplicates core), filtered the same way — selection rows can
+  // outlive their pages. Both are recomputed only on lane invalidation (the
+  // consolidation cadence), keeping the prefix stable between rebuilds.
+  const coreSlugs = loadCoreSet(getWorkspaceDir()).filter((slug) =>
+    sectionIndex.byArticle.has(slug),
+  );
+  const hotSlugs = computeHotSet({
+    k: tuning.hotSetK,
+    halfLifeMs: config.memory.v3.hotSet.halfLifeDays * DAY_MS,
+    now: Date.now(),
+    excludeSlugs: new Set(coreSlugs),
+  })
+    .map((entry) => entry.slug)
+    .filter((slug) => sectionIndex.byArticle.has(slug));
+
+  // Fresh is the effective-recency top-K over the page index (`freshAt`:
+  // origin date when declared, else mtime, so backdated imports rank by their
+  // original chronology) with core and hot excluded (fresh never duplicates
+  // the rest of the prefix). Page mtimes move at consolidation, the same
+  // event that invalidates the lanes, so the set is recomputed exactly when
+  // it can have changed.
+  const freshSlugs = computeFreshSet(pageIndex.entries, {
+    k: tuning.freshSetK,
+    excludeSlugs: new Set([...coreSlugs, ...hotSlugs]),
+  }).filter((slug) => sectionIndex.byArticle.has(slug));
+
+  // Always-candidate skills are placed in the stable prefix every turn so the
+  // selector can choose a cross-cutting capability (e.g. workflows) even when no
+  // retrieval lane surfaces it — its relevance is a judgment the model makes,
+  // not something embedding similarity finds. Filtered to skills present in the
+  // section index and excluded from core/hot/fresh so the prefix never
+  // double-lists a slug.
+  const prefixSet = new Set([...coreSlugs, ...hotSlugs, ...freshSlugs]);
+  const alwaysCandidateSlugs = (await listInstalledSkills())
+    .filter((summary) => summary.alwaysCandidate === true)
+    .map((summary) => `skills/${summary.id}`)
+    .filter((slug) => sectionIndex.byArticle.has(slug) && !prefixSet.has(slug));
+
+  // Pre-render the stable-prefix cards ONCE per lane build: the selector's
+  // stable prefix must be byte-identical across turns to ride the provider KV
+  // cache, so the cards are frozen here (lane invalidation at consolidation is
+  // the recompute point) instead of being re-read per turn. Capability slugs
+  // card as their short injection form (matching the net-new capability
+  // cards) — a CLI command in the hot set must not pin its full-help index
+  // body into the byte-stable prefix. Disk pages render raw (frontmatter +
+  // body) through `renderCard` so `kind: index` pages surface their `links:`
+  // map in the card TOC. Each disk card carries its lane annotation; fresh
+  // cards additionally carry the page's effective-recency time (`freshAt`, so
+  // imported pages display their original date; an absolute stamp that only
+  // changes when the page does, so the card stays byte-stable between lane
+  // recomputes).
+  const freshAtBySlug = new Map(
+    pageIndex.entries.map((entry) => [entry.slug, entry.freshAt]),
+  );
+  const laneAnnotation = (
+    slug: Slug,
+    lane: "core" | "hot" | "fresh" | "always",
+  ) => {
+    if (lane !== "fresh") {
+      return `[lane: ${lane}]`;
+    }
+    const freshAt = freshAtBySlug.get(slug);
+    if (
+      freshAt === undefined ||
+      freshAt === null ||
+      !Number.isFinite(freshAt)
+    ) {
+      return "[lane: fresh]";
+    }
+    const stamp = new Date(freshAt)
+      .toISOString()
+      .slice(0, 16)
+      .replace("T", " ");
+    // "dated", not "updated": for origin-dated imports the stamp is the
+    // content's original chronology, not a last-modified time, and claiming
+    // an update would feed the selector false temporal metadata.
+    return `[lane: fresh · dated ${stamp} UTC]`;
+  };
+  const prefixCards = new Map<Slug, string>();
+  for (const [lane, slugs] of [
+    ["core", coreSlugs],
+    ["hot", hotSlugs],
+    ["fresh", freshSlugs],
+    ["always", alwaysCandidateSlugs],
+  ] as const) {
+    for (const slug of slugs) {
+      const capability = renderCapabilityContent(slug);
+      if (capability !== null) {
+        prefixCards.set(slug, capability);
+        continue;
+      }
+      const raw = (await loadPage(slug))?.raw ?? "";
+      prefixCards.set(slug, renderCard(slug, raw, laneAnnotation(slug, lane)));
+    }
+  }
+
+  const edgeGraph = await buildEdgeGraph(pageIndex.entries, pageRaw, {
+    hubDegree: config.memory.v3.edge.hubDegree,
+  });
+  // The learned graph reads the same selection log as the hot set; section-
+  // index membership is the existence filter (capability slugs included —
+  // they are first-class pages there).
+  const learned = config.memory.v3.learnedEdges;
+  const learnedGraph =
+    tuning.learnedEdgesCap > 0 && learned.maxPerPage > 0
+      ? computeLearnedEdgeGraph({
+          halfLifeMs: learned.halfLifeDays * DAY_MS,
+          minCount: learned.minCount,
+          npmiFloor: learned.npmiFloor,
+          maxPerPage: learned.maxPerPage,
+          now: Date.now(),
+          windowMs: LEARNED_EDGES_WINDOW_DAYS * DAY_MS,
+          knownSlugs: new Set(sectionIndex.byArticle.keys()),
+        })
+      : undefined;
+  // Ensuring the dense collection is best-effort: the needle + edge lanes and
+  // the core/hot prefix are in-memory and independent of Qdrant, so a Qdrant outage
+  // must NOT reject lane init (which would return `null` from observeTurn and
+  // disable ALL of v3, plus poison the memoized lanes until invalidation). On
+  // failure we log and continue with the dense lane degraded — denseLane already
+  // returns no hits on a Qdrant error, and maintain/backfill re-ensure the
+  // collection once Qdrant recovers.
+  try {
+    await ensureSectionCollection(config);
+  } catch (err) {
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      "memory-v3: section collection ensure failed; continuing with the dense lane degraded",
+    );
+  }
+  // Dense reads are held while the section store awaits the rebuild a
+  // chunker version change forces (its points' ordinals can name the wrong
+  // section of this index), or while the check that decides it cannot
+  // complete (Qdrant unreachable; the dense read path retries it). The check
+  // that first reports the rebuild in this process, here or retried, kicks
+  // the maintain job at once instead of waiting out the six-hour backstop.
+  // Best-effort like the ensure above: a failed enqueue leaves the backstop
+  // to run the rebuild, with reads held meanwhile.
+  await holdSectionDenseReadsUntilRebuilt(() => {
+    try {
+      enqueueMemoryJob("memory_v3_maintain", {});
+    } catch (err) {
+      log.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        "memory-v3: failed to enqueue the section rebuild; the maintenance backstop will run it",
+      );
+    }
+  });
+
+  return {
+    sectionIndex,
+    needle,
+    entityIndex,
+    denseConfig: config,
+    edgeGraph,
+    learnedGraph,
+    coreSlugs,
+    hotSlugs,
+    freshSlugs,
+    alwaysCandidateSlugs,
+    prefixCards,
+    realConceptPageCount,
+  };
+}
+
+/**
+ * Lazy, memoized accessor for the shadow lanes. The memo is valid while the
+ * persisted lanes-version token matches the one captured at build start; a
+ * mismatch (another process — or this one — called {@link invalidateLanes})
+ * drops the memo and rebuilds. A failed token read serves the memo unchanged.
+ */
+function getLanes(config: AssistantConfig): Promise<ShadowLanes> {
+  if (lanesPromise) {
+    const current = readLanesVersion(getWorkspaceDir());
+    if (current !== undefined && current !== builtLanesVersion) {
+      // A writer bumped the persisted token since this build — the memory
+      // worker's maintain job after a consolidation, or the rebuild-index
+      // route. This observer path never re-bumps the token: writers bump,
+      // observers only compare — a re-bump here would make every rebuild
+      // trigger another one on the following turn.
+      dropLanesLocal();
+    }
+  }
+  if (!lanesPromise) {
+    // Capture the token BEFORE building: a bump that lands mid-build is then
+    // detected on the next call (one extra rebuild, never a missed one).
+    builtLanesVersion = readLanesVersion(getWorkspaceDir()) ?? null;
+    lanesPromise = initLanes(config).catch((err) => {
+      // Reset on failure so a transient init error doesn't permanently wedge
+      // the shadow lane — the next turn retries.
+      lanesPromise = null;
+      throw err;
+    });
+  }
+  return lanesPromise;
+}
+
+/**
+ * Read the live NOW.md scratchpad (the user's short "what's salient right now"
+ * file), stripped of its comment lines. Mirrors `readNowScratchpad` but reads
+ * through the light platform / strip utilities directly, keeping the v3
+ * plugin's load (and its test) free of heavier module graphs. Returns `null`
+ * when absent, empty, or unreadable.
+ */
+function readNowContext(): string | null {
+  const nowPath = getWorkspacePromptPath("NOW.md");
+  if (!existsSync(nowPath)) {
+    return null;
+  }
+  try {
+    const stripped = stripCommentLines(readFileSync(nowPath, "utf-8")).trim();
+    return stripped.length > 0 ? stripped : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compose the situational signal threaded into pool selection: the current date
+ * plus the live NOW.md scratchpad. The date alone is a weak signal, but together
+ * with the scratchpad it lets retrieval surface a page the message never names
+ * (e.g. an anniversary that falls today). Always returns at least the date line
+ * — this mirrors the `c_now`/NOW.md signal the v2 retriever uses.
+ */
+function buildSituationalContext(): string {
+  const now = readNowContext();
+  const at = new Date();
+  // Clock time matters, not just the date: fresh cards carry `dated <time>`
+  // stamps (effective recency, so imports show their content's chronology
+  // rather than write time), and hour-grain windows ("while I was asleep",
+  // "this morning") are only computable against a current-time anchor —
+  // measured on a state-recall turn, the anchor alone moved selection more
+  // than prompt steering did.
+  const today = `Today is ${at.toDateString()}, ${at.toISOString().slice(11, 16)} UTC.`;
+  return now ? `${today}\n\n${now}` : today;
+}
+
+/**
+ * Build a v3 {@link MemoryRoutingTurn} from the conversation's persisted messages.
+ * `currentMessage` is the latest user message, except that the synthetic voice
+ * escalation continuation routes on the preceding caller message;
+ * `previousAssistantMessage` is the tail of the last assistant reply BEFORE
+ * the routed message (the reply-query pass's input, absent on a conversation's
+ * first turn); `recentContext` is
+ * the tail of the recent transcript; `situationalContext` carries the current
+ * date and the live NOW.md scratchpad. Returns `null` when there is no user
+ * message to route on (nothing to shadow this turn).
+ */
+async function buildShadowTurn(
+  conversationId: string,
+  turnIndex: number,
+): Promise<MemoryRoutingTurn | null> {
+  const rows = await getMessages(conversationId);
+  if (rows.length === 0) {
+    return null;
+  }
+
+  let currentMessage = "";
+  let currentIndex = -1;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!;
+    if (row.role !== "user") {
+      continue;
+    }
+    const candidate = stringifyMessageContent(row.content);
+    const metadata = await parseMessageMetadata(row.metadata);
+    const isVoiceEscalationContinuation =
+      metadata?.hidden === true &&
+      metadata.messageKind === VOICE_ESCALATION_CONTINUATION_MESSAGE_KIND;
+    if (isVoiceEscalationContinuation) {
+      continue;
+    }
+    if (candidate.length > 0) {
+      currentMessage = candidate;
+      currentIndex = i;
+      break;
+    }
+  }
+  if (currentMessage.length === 0) {
+    return null;
+  }
+
+  // The last assistant reply before the routed user message. Only the tail is
+  // kept: replies run long, and the live threads — what the lanes should
+  // retrieve on — concentrate at the end.
+  let previousAssistantMessage: string | undefined;
+  for (let i = currentIndex - 1; i >= 0; i--) {
+    if (rows[i]!.role !== "assistant") {
+      continue;
+    }
+    const text = stringifyMessageContent(rows[i]!.content);
+    if (text.length > 0) {
+      previousAssistantMessage = safeStringSlice(
+        text,
+        Math.max(0, text.length - REPLY_QUERY_TAIL_CHARS),
+      );
+      break;
+    }
+  }
+
+  const recentContext = rows
+    .slice(-RECENT_CONTEXT_MESSAGES)
+    .map((r) => stringifyMessageContent(r.content))
+    .filter((t) => t.length > 0)
+    .join("\n");
+
+  return {
+    conversationId,
+    turnNumber: turnIndex,
+    currentMessage,
+    recentContext,
+    situationalContext: buildSituationalContext(),
+    previousAssistantMessage,
+  };
+}
+
+interface SelectionRow {
+  slug: Slug;
+  source: SelectionSource;
+  /** Ordinal of the selection's first selected section; null for a page
+   *  selected with no section (a card, or a section-less edge or learned
+   *  line). */
+  sectionOrdinal: number | null;
+  /** Heading of that section; null when there is no selected section. */
+  sectionTitle: string | null;
+  /** That section's `sectionKey` (`types.ts`), the identity the inspector
+   *  resolves the section by; null when there is no selected section. */
+  sectionKey: string | null;
+}
+
+/**
+ * Map an orchestrate result onto telemetry rows with per-lane source
+ * attribution, by pool position: a selection of a stable-prefix page is
+ * attributed `"core"` / `"hot"` / `"fresh"` (the lane that placed it in the
+ * pool), and any other selection is attributed the finder lane that FIRST
+ * surfaced it (`"needle"` / `"dense"` / `"edge"`, recorded at pool-build
+ * time). A finder hit on a stable-prefix page therefore still logs as its
+ * prefix lane — the prefix is where the candidate lived. (`"needle"` is the
+ * fallback if a selected slug is somehow absent from every lane, which should
+ * not happen since every pooled candidate comes from one.) A page with
+ * several finder lines is attributed the lane of the line whose section the
+ * selector chose (the selection's first section), so an additive lane such as
+ * `"rare"` is credited when its line was the one picked; a selection with no
+ * section, or whose section matches no line, takes the lane of the page's
+ * first line.
+ *
+ * The row holds one section per slug: the selection's FIRST selected section
+ * (pool order) stands for the page; a page selected with no section (a card,
+ * or a section-less edge or learned line) logs none.
+ *
+ * A turn whose selector could not run (`selectorFailure`) logs no rows: its
+ * selections are the stable prefix kept unjudged, and the selection table is
+ * what the hot set's frecency and the learned-edge graph read as judgments.
+ * The pool record still carries the turn for the inspector.
+ */
+export function attributeSelections(result: OrchestrateResult): SelectionRow[] {
+  if (result.selectorFailure) {
+    return [];
+  }
+  const core = new Set<Slug>(result.lanes.core);
+  const hot = new Set<Slug>(result.lanes.hot);
+  const fresh = new Set<Slug>(result.lanes.fresh);
+  const firstLane = new Map<Slug, SelectionSource>();
+  const sectionLane = new Map<string, SelectionSource>();
+  for (const candidate of result.lanes.finder) {
+    if (!firstLane.has(candidate.slug)) {
+      firstLane.set(candidate.slug, candidate.lane);
+    }
+    if (candidate.section) {
+      const id = sectionRefId({
+        slug: candidate.slug,
+        key: sectionKey(candidate.section),
+      });
+      if (!sectionLane.has(id)) {
+        sectionLane.set(id, candidate.lane);
+      }
+    }
+  }
+  return result.selections.map((sel) => {
+    const section = sel.sections[0];
+    const lineLane = section
+      ? sectionLane.get(
+          sectionRefId({ slug: sel.slug, key: sectionKey(section) }),
+        )
+      : undefined;
+    return {
+      slug: sel.slug,
+      source: core.has(sel.slug)
+        ? ("core" as const)
+        : hot.has(sel.slug)
+          ? ("hot" as const)
+          : fresh.has(sel.slug)
+            ? ("fresh" as const)
+            : (lineLane ?? firstLane.get(sel.slug) ?? "needle"),
+      sectionOrdinal: section?.ordinal ?? null,
+      sectionTitle: section?.title ?? null,
+      sectionKey: section ? sectionKey(section) : null,
+    };
+  });
+}
+
+/**
+ * Replace the turn's rows in `memory_v3_selections` on `raw` with `rows`, in
+ * selection order. The turn's earlier rows are deleted rather than upserted
+ * over, so a slug an earlier observation of the same turn kept and this one
+ * did not does not survive: a re-observed turn carries only its latest
+ * observation's rows, which is also what the frecency hot set and the
+ * learned-edge graph count. `message_id` is written NULL (the assistant
+ * message does not exist at injection time) and stamped at turn end by
+ * `backfillMemoryV3SelectionMessageId`. Throws on a failed statement; the
+ * caller owns the transaction.
+ */
+function replaceSelections(
+  raw: MemorySqlite,
+  conversationId: string,
+  turn: number,
+  rows: SelectionRow[],
+): void {
+  raw
+    .query(
+      /*sql*/ `DELETE FROM memory_v3_selections
+               WHERE conversation_id = ? AND turn = ?`,
+    )
+    .run(conversationId, turn);
+  if (rows.length === 0) {
+    return;
+  }
+  const stmt = raw.query(/*sql*/ `
+    INSERT INTO memory_v3_selections (
+      conversation_id, turn, slug, source, created_at,
+      message_id, section_ordinal, section_title, section_key
+    ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
+  `);
+  const now = Date.now();
+  for (const row of rows) {
+    stmt.run(
+      conversationId,
+      turn,
+      row.slug,
+      row.source,
+      now,
+      row.sectionOrdinal,
+      row.sectionTitle,
+      row.sectionKey,
+    );
+  }
+}
+
+/**
+ * Write the turn's log over the dedicated memory connection: its attributed
+ * selection rows to `memory_v3_selections` and its candidate pool to
+ * `memory_v3_pools`, plus, when the caller captured it under
+ * `memory.v3.poolLog.captureInput`, the selector's exact `input` to
+ * `memory_v3_pool_inputs` / `memory_v3_pool_texts`, in one transaction. A
+ * turn observed again (a retried or re-entered turn index) replaces its rows
+ * in every table as a unit, so the pool's `chosen` flags, the selection rows,
+ * and the captured input always describe the same observation. Best-effort:
+ * an unavailable memory database or a failed statement drops this
+ * observation's log rather than affecting the turn, and the transaction
+ * leaves the earlier observation's rows in place in every table. The
+ * selection table's plugin-owned `section_key` column is ensured on the
+ * first use of a connection in this process (`plugin-schema.ts`).
+ */
+export function writeTurnLog(
+  conversationId: string,
+  turn: number,
+  rows: SelectionRow[],
+  pool: PoolRecord,
+  input?: PoolInputCapture,
+): void {
+  try {
+    const raw = memorySqliteOrNull("writeTurnLog");
+    if (!raw) {
+      return;
+    }
+    ensureMemoryV3SelectionsSectionKeyOnce(raw);
+    raw.transaction(() => {
+      replaceSelections(raw, conversationId, turn, rows);
+      writePool(raw, conversationId, turn, pool);
+      if (input) {
+        writePoolInput(raw, conversationId, turn, input);
+      }
+    })();
+  } catch (err) {
+    log.warn(
+      { err },
+      "failed to write memory-v3 selections and pool; continuing",
+    );
+  }
+}
+
+/**
+ * Stamp the turn's assistant message id onto the selection rows and the pool
+ * row written for it. Mirrors the v2 activation-log backfill: `writeTurnLog`
+ * writes `message_id = NULL` on both at injection time, and this runs at turn
+ * end once the assistant message exists. `turn` is the injector's `turnIndex`
+ * for the finished turn, so a row an earlier turn left unstamped (it crashed
+ * or was cancelled before reaching turn end) is never claimed by a later
+ * message: it stays NULL and stays unreachable by message id. Lets the
+ * inspector look v3 selections up by the turn's message ids (robust against
+ * v2/v3 turn-counter drift). The selection rows are stamped first so a
+ * failing pool stamp degrades the inspector to selections-only rather than
+ * blanking it.
+ */
+export function backfillMemoryV3SelectionMessageId(
+  conversationId: string,
+  turn: number,
+  assistantMessageId: string,
+): void {
+  try {
+    const raw = memorySqliteOrNull("backfillMemoryV3SelectionMessageId");
+    if (!raw) {
+      return;
+    }
+    raw
+      .query(
+        /*sql*/ `UPDATE memory_v3_selections SET message_id = ?
+                 WHERE conversation_id = ? AND turn = ? AND message_id IS NULL`,
+      )
+      .run(assistantMessageId, conversationId, turn);
+    raw
+      .query(
+        /*sql*/ `UPDATE memory_v3_pools SET message_id = ?
+                 WHERE conversation_id = ? AND turn = ? AND message_id IS NULL`,
+      )
+      .run(assistantMessageId, conversationId, turn);
+  } catch (err) {
+    log.warn(
+      { err },
+      "failed to backfill memory-v3 selection messageId; continuing",
+    );
+  }
+}
+
+/**
+ * Run v3 orchestration for one turn and log the selection set, returning the
+ * orchestrate result so a live caller can render it. Never throws — all
+ * failures are logged and swallowed (returning `null`) so the live turn is
+ * unaffected. Returns `null` when there is no user message to route on.
+ */
+export async function observeTurn(
+  conversationId: string,
+  turnIndex: number,
+): Promise<OrchestrateResult | null> {
+  try {
+    const turn = await buildShadowTurn(conversationId, turnIndex);
+    if (!turn) {
+      return null;
+    }
+
+    const cfg = getConfig();
+    if (!isMemoryEnabled(cfg)) {
+      return null;
+    }
+    // Lane init is module-memoized: the first turn after daemon start pays
+    // the full build (section index, BM25/entity lanes, prefix cards) here;
+    // warm turns record ~0ms and are floored away by the recorder.
+    const lanes = await timeLatencySubSpan(
+      "v3_lanes_init",
+      "Memory lane init",
+      () => getLanes(cfg),
+    );
+    const v3 = cfg.memory.v3;
+    // Re-resolve the corpus-adaptive tuning each turn from the CURRENT config
+    // (with the lane-build corpus-size signal) so a live config.json edit to a
+    // per-turn knob (selectorEnabled, denseK, replyQueryK, edge.*) takes effect
+    // on the next turn instead of waiting for the next lane rebuild. The
+    // lane-build params (hot/fresh K, learned-edge graph) stay frozen on the
+    // lanes for stable-prefix cache reuse.
+    const tuning = resolveV3Tuning(cfg, lanes.realConceptPageCount);
+    // Read-only: lets orchestrate compute the `net_new_count` telemetry field
+    // against the same store the injector renders from. This turn has not
+    // committed yet, so the set matches what the injector will see.
+    const activeSections = getActiveSections(conversationId);
+    const selectorPrompt = resolveSelectorPrompt(
+      v3.selectorPromptPath,
+      getWorkspaceDir(),
+    );
+    const result = await orchestrate(turn, {
+      sectionIndex: lanes.sectionIndex,
+      needle: lanes.needle,
+      entityIndex: lanes.entityIndex,
+      denseConfig: lanes.denseConfig,
+      edgeGraph: lanes.edgeGraph,
+      coreSlugs: lanes.coreSlugs,
+      hotSlugs: lanes.hotSlugs,
+      freshSlugs: lanes.freshSlugs,
+      alwaysCandidateSlugs: lanes.alwaysCandidateSlugs,
+      prefixCards: lanes.prefixCards,
+      needleK: tuning.needleK,
+      denseK: tuning.denseK,
+      realConceptPageCount: lanes.realConceptPageCount,
+      isResident: (slug, key) => sectionRefSetHas(activeSections, slug, key),
+      entityCap: v3.entity.cap,
+      // Rare lines are candidates for the selector's judgment, not evidence
+      // strong enough to inject unjudged, so the lane runs only when the
+      // selector does: with the selector off (the lean profile) every pooled
+      // line is injected.
+      rareTerm:
+        v3.rareTerm.enabled && tuning.selectorEnabled ? v3.rareTerm : undefined,
+      finderSectionsPerPage: v3.finderSectionsPerPage,
+      replyQueryK: tuning.replyQueryK,
+      spanQueryK: tuning.spanQueryK,
+      edgeSeeds: tuning.edgeSeedCount,
+      edgePerSeed: tuning.edgePerSeed,
+      edgeCap: tuning.edgeCap,
+      learnedGraph: lanes.learnedGraph,
+      learnedPerSeed: v3.learnedEdges.perSeed,
+      learnedCap: tuning.learnedEdgesCap,
+      selectorEnabled: tuning.selectorEnabled,
+      selectorPrompt,
+      // Per-turn injection gate: the `memory.v3.gate` tuning, `enabled`
+      // kill-switch included. Read-only downstream, so the config object is
+      // passed as-is.
+      gateConfig: v3.gate,
+    });
+
+    // A zero-selection turn over a non-trivial pool is unusual enough to be
+    // worth a breadcrumb (observed on meta-prompt-shaped system turns): the
+    // turn itself proceeds normally, sections already in context still serve
+    // it.
+    if (result.selections.length === 0) {
+      log.info(
+        {
+          conversationId,
+          core: result.lanes.core.length,
+          hot: result.lanes.hot.length,
+          fresh: result.lanes.fresh.length,
+          finder: result.lanes.finder.length,
+        },
+        "memory-v3: selector returned zero selections",
+      );
+    }
+
+    const persistStartedAt = Date.now();
+    writeTurnLog(
+      conversationId,
+      turnIndex,
+      attributeSelections(result),
+      buildPoolRecord(result),
+      // The selector's exact input, captured only when opted in: the context
+      // strings and every pooled candidate's rendered text.
+      v3.poolLog.captureInput
+        ? buildPoolInput(result, turn, selectorPrompt)
+        : undefined,
+    );
+    recordLatencySubSpan(
+      "v3_persist",
+      "Selection persistence",
+      Date.now() - persistStartedAt,
+    );
+    return result;
+  } catch (err) {
+    // Infrastructure failures are surfaced to callers that want distinct
+    // logging from ordinary orchestration misses. Observation callers swallow
+    // them so memory-v3 never fails the turn.
+    if (err instanceof MemoryV3RetrievalUnavailableError) {
+      throw err;
+    }
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err), conversationId },
+      "memory-v3 orchestration failed (non-fatal)",
+    );
+    return null;
+  }
+}

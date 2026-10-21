@@ -1,0 +1,725 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, test } from "bun:test";
+
+import {
+  preModelCallSanitize,
+  retainedToolResultMediaKeys,
+  retainedToolResultMediaKeysBeforeCap,
+} from "../context/outbound-sanitize.js";
+import { uploadFileBackedAttachment } from "../persistence/attachments-store.js";
+import { initializeDb } from "../persistence/db-init.js";
+import type {
+  ContentBlock,
+  MediaRetention,
+  Message,
+  ToolResultContent,
+} from "../providers/types.js";
+import { setConfig } from "./helpers/set-config.js";
+
+await initializeDb();
+
+const MB = 1024 * 1024;
+
+/** Base64 of a 12-byte PNG head: the signature the send path sniffs, in exactly 16 characters. */
+const PNG_HEAD_B64 = "iVBORw0KGgoAAAAN";
+
+/** An inline PNG whose base64 payload is `wireBytes` long, or the 16-character head when smaller. */
+function inlineImage(wireBytes: number): ContentBlock {
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: "image/png",
+      data:
+        PNG_HEAD_B64 + "A".repeat(Math.max(0, wireBytes - PNG_HEAD_B64.length)),
+    },
+  };
+}
+
+/** An inline image whose bytes are an SVG document, which no provider reads. */
+function inlineSvg(wireBytes: number): ContentBlock {
+  const head = Buffer.from(
+    '<svg xmlns="http://www.w3.org/2000/svg"/>',
+  ).toString("base64");
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: "image/svg+xml",
+      data: head + "A".repeat(Math.max(0, wireBytes - head.length)),
+    },
+  };
+}
+
+/** An inline MP3 of `decodedBytes`, which every adapter inlines and the transport cap does not shrink. */
+function inlineAudio(decodedBytes: number): ContentBlock {
+  return {
+    type: "file",
+    source: {
+      type: "base64",
+      media_type: "audio/mpeg",
+      data: "A".repeat(Math.ceil((decodedBytes * 4) / 3)),
+    },
+  };
+}
+
+/**
+ * A persisted image reference of `sizeBytes` stored bytes, optionally hinting
+ * the smaller size the send path produces after transport optimization.
+ */
+function refImage(
+  sizeBytes: number,
+  transportSizeBytes?: number,
+  mediaType = "image/png",
+): ContentBlock {
+  return {
+    type: "image",
+    source: {
+      type: "workspace_ref",
+      media_type: mediaType,
+      attachmentId: "att-1",
+      sizeBytes,
+      ...(transportSizeBytes !== undefined ? { transportSizeBytes } : {}),
+    },
+  };
+}
+
+/** A persisted file reference of `sizeBytes` decoded bytes and the given MIME type. */
+function refFile(mediaType: string, sizeBytes: number): ContentBlock {
+  return {
+    type: "file",
+    source: {
+      type: "workspace_ref",
+      media_type: mediaType,
+      attachmentId: "att-file",
+      sizeBytes,
+      filename: "attachment",
+    },
+  };
+}
+
+/** One tool step: the assistant's call and the user-role result carrying media. */
+function toolStep(
+  id: string,
+  retention: MediaRetention | undefined,
+  media: ContentBlock[],
+): Message[] {
+  return [
+    {
+      role: "assistant",
+      content: [{ type: "tool_use", id, name: "read", input: {} }],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: id,
+          content: `loaded ${id}`,
+          contentBlocks: media,
+          ...(retention ? { mediaRetention: retention } : {}),
+        },
+      ],
+    },
+  ];
+}
+
+const userText = (text: string): Message => ({
+  role: "user",
+  content: [{ type: "text", text }],
+});
+
+/** A user turn: its text, then the given attachments. */
+const userTurn = (text: string, ...attachments: ContentBlock[]): Message => ({
+  role: "user",
+  content: [{ type: "text", text }, ...attachments],
+});
+
+const assistantText = (text: string): Message => ({
+  role: "assistant",
+  content: [{ type: "text", text }],
+});
+
+/** The text a block was replaced with, or undefined when it is still media. */
+function markerText(history: Message[], msgIdx: number, blockIdx: number) {
+  const block = history[msgIdx].content[blockIdx];
+  return block.type === "text" ? block.text : undefined;
+}
+
+/** `n` sequential document steps of `wireBytes` each, ids `d1..dn`. */
+function documentSteps(n: number, wireBytes: number): Message[] {
+  const out: Message[] = [];
+  for (let i = 1; i <= n; i++) {
+    out.push(...toolStep(`d${i}`, "document", [inlineImage(wireBytes)]));
+  }
+  return out;
+}
+
+function toolResult(history: Message[], msgIdx: number): ToolResultContent {
+  const block = history[msgIdx].content[0];
+  if (block.type !== "tool_result") {
+    throw new Error(`message ${msgIdx} is not a tool result`);
+  }
+  return block;
+}
+
+const hasMedia = (block: ToolResultContent): boolean =>
+  block.contentBlocks?.some((b) => b.type === "image" || b.type === "file") ??
+  false;
+
+describe("tool-result media retention", () => {
+  test("frame media (the default) survives only in the current tool step", () => {
+    // GIVEN two sequential screenshot steps with no retention declared
+    const history = [
+      userText("go"),
+      ...toolStep("s1", undefined, [inlineImage(100)]),
+      ...toolStep("s2", undefined, [inlineImage(100)]),
+    ];
+
+    // WHEN the outbound copy is sanitized
+    const sent = preModelCallSanitize(history);
+
+    // THEN the older frame is replaced by the removed-media marker and the
+    // newest frame is kept
+    const older = toolResult(sent, 2);
+    expect(hasMedia(older)).toBe(false);
+    expect(older.content).toStartWith("loaded s1");
+    expect(older.content).toContain("binary data removed to save context");
+    expect(hasMedia(toolResult(sent, 4))).toBe(true);
+    // AND the durable history is untouched
+    expect(hasMedia(toolResult(history, 2))).toBe(true);
+  });
+
+  test("anything but an explicit document class is treated as a frame", () => {
+    // GIVEN an older result whose class is not one the policy knows
+    const history = [
+      ...toolStep("x1", "forever" as unknown as MediaRetention, [
+        inlineImage(100),
+      ]),
+      ...toolStep("s2", undefined, [inlineImage(100)]),
+    ];
+
+    // THEN it follows the frame rule and is dropped behind the current step
+    expect(hasMedia(toolResult(preModelCallSanitize(history), 1))).toBe(false);
+  });
+
+  test("document media is kept across steps and across user turns", () => {
+    // GIVEN file reads on two steps of one turn, a new user turn, then another read
+    const history = [
+      userText("compare the renders"),
+      ...toolStep("d1", "document", [inlineImage(100)]),
+      ...toolStep("d2", "document", [inlineImage(100)]),
+      userText("and the newest one?"),
+      ...toolStep("d3", "document", [inlineImage(100)]),
+    ];
+
+    // WHEN sanitized
+    const sent = preModelCallSanitize(history);
+
+    // THEN every read is still in view
+    expect(sent).toEqual(history);
+    expect(retainedToolResultMediaKeys(history)).toEqual(
+      new Set(["2:0", "4:0", "7:0"]),
+    );
+  });
+
+  test("frames and documents follow their own rules in one history", () => {
+    // GIVEN an old screenshot, an old file read, then a fresh screenshot
+    const history = [
+      userText("go"),
+      ...toolStep("s1", "frame", [inlineImage(100)]),
+      ...toolStep("d1", "document", [inlineImage(100)]),
+      ...toolStep("s2", "frame", [inlineImage(100)]),
+    ];
+
+    // WHEN sanitized
+    const sent = preModelCallSanitize(history);
+
+    // THEN the old screenshot is dropped, the file read and the fresh
+    // screenshot are kept
+    expect(hasMedia(toolResult(sent, 2))).toBe(false);
+    expect(hasMedia(toolResult(sent, 4))).toBe(true);
+    expect(hasMedia(toolResult(sent, 6))).toBe(true);
+  });
+
+  test("the byte cap evicts the oldest documents down to the low mark, once per crossing", () => {
+    // GIVEN the 10 MB high / 6 MB low band and 2.5 MB reads
+
+    // WHEN four reads total 10 MB, on the mark
+    const four = documentSteps(4, 2.5 * MB);
+    // THEN nothing is evicted
+    expect(preModelCallSanitize(four)).toEqual(four);
+
+    // WHEN a fifth read pushes the total to 12.5 MB
+    const five = documentSteps(5, 2.5 * MB);
+    const sentFive = preModelCallSanitize(five);
+    // THEN the three oldest are evicted (12.5 -> 10 -> 7.5 -> 5 MB, under
+    // the low mark)
+    expect(retainedToolResultMediaKeys(five)).toEqual(new Set(["7:0", "9:0"]));
+    const evicted = toolResult(sentFive, 1);
+    expect(hasMedia(evicted)).toBe(false);
+    expect(evicted.content).toStartWith("loaded d1");
+    expect(evicted.content).toContain("payload limit");
+    expect(evicted.content).toContain("Call the tool again");
+
+    // WHEN a sixth and seventh read arrive (7.5 MB, then 10 MB on the mark)
+    const seven = documentSteps(7, 2.5 * MB);
+    const sentSeven = preModelCallSanitize(seven);
+    // THEN no new eviction happens and the earlier prefix is byte-identical,
+    // so the prompt cache holds between crossings
+    expect(retainedToolResultMediaKeys(seven)).toEqual(
+      new Set(["7:0", "9:0", "11:0", "13:0"]),
+    );
+    expect(JSON.stringify(sentSeven.slice(0, five.length))).toBe(
+      JSON.stringify(sentFive),
+    );
+
+    // WHEN an eighth read crosses the high mark again (12.5 MB)
+    const eight = documentSteps(8, 2.5 * MB);
+    // THEN the next three oldest go
+    expect(retainedToolResultMediaKeys(eight)).toEqual(
+      new Set(["13:0", "15:0"]),
+    );
+  });
+
+  test("a crossing never evicts the step that caused it", () => {
+    // GIVEN a single audio read above the high mark on its own (9 MB raw is
+    // 12 MB on the wire)
+    const alone = toolStep("d1", "document", [inlineAudio(9 * MB)]);
+    // THEN it is still sent
+    expect(preModelCallSanitize(alone)).toEqual(alone);
+
+    // GIVEN a small image read followed by that audio read
+    const history = [
+      ...toolStep("d1", "document", [inlineImage(1 * MB)]),
+      ...toolStep("d2", "document", [inlineAudio(9 * MB)]),
+    ];
+    // THEN only the older read is evicted
+    expect(retainedToolResultMediaKeys(history)).toEqual(new Set(["3:0"]));
+  });
+
+  test("the image-count cap evicts oldest documents down to the low count", () => {
+    // GIVEN 61 tiny reads against a 60-image high mark and 40-image low mark
+    const history = documentSteps(61, 1);
+
+    // WHEN sanitized
+    const retained = retainedToolResultMediaKeys(history);
+
+    // THEN the newest 40 are kept and the oldest 21 are evicted
+    expect(retained.size).toBe(40);
+    expect(retained.has(`${2 * 21 - 1}:0`)).toBe(false);
+    expect(retained.has(`${2 * 22 - 1}:0`)).toBe(true);
+    expect(retained.has(`${2 * 61 - 1}:0`)).toBe(true);
+  });
+
+  test("a trip spares the attachments of the turn it happens in", () => {
+    // GIVEN a 6 MB user upload followed by two 3 MB reads in the same turn
+    const upload: Message = {
+      role: "user",
+      content: [{ type: "text", text: "here" }, inlineImage(6 * MB)],
+    };
+    const history = [
+      upload,
+      ...toolStep("d1", "document", [inlineImage(3 * MB)]),
+      ...toolStep("d2", "document", [inlineImage(3 * MB)]),
+    ];
+
+    // WHEN sanitized (9 MB fits under the 10 MB mark, 12 MB does not)
+    const sent = preModelCallSanitize(history);
+
+    // THEN the upload is intact, the older read is evicted, the newer read kept
+    expect(sent[0]).toEqual(upload);
+    expect(hasMedia(toolResult(sent, 2))).toBe(false);
+    expect(hasMedia(toolResult(sent, 4))).toBe(true);
+  });
+
+  test("a persisted reference is costed at its base64 size on the wire", () => {
+    // GIVEN a 7.5 MB audio reference (10 MB as base64, exactly the high
+    // mark) and a 4-byte inline read after it
+    const history = [
+      ...toolStep("d1", "document", [refFile("audio/mpeg", 7.5 * MB)]),
+      ...toolStep("d2", "document", [inlineImage(4)]),
+    ];
+
+    // WHEN sanitized
+    const retained = retainedToolResultMediaKeys(history);
+
+    // THEN the second read tips the total over the mark and the reference goes
+    expect(retained).toEqual(new Set(["3:0"]));
+    // AND the reference alone sits on the mark without tripping it
+    expect(retainedToolResultMediaKeys(history.slice(0, 2))).toEqual(
+      new Set(["1:0"]),
+    );
+  });
+
+  test("a stored image is costed at the size the send path produces, not its stored size", () => {
+    // GIVEN a 12 MB upload whose reference records that transport
+    // optimization sends it as 3 MB, followed by two 2 MB reads
+    const reads = [
+      ...toolStep("d1", "document", [inlineImage(2 * MB)]),
+      ...toolStep("d2", "document", [inlineImage(2 * MB)]),
+    ];
+    const hinted = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "here" }, refImage(12 * MB, 3 * MB)],
+      } as Message,
+      ...reads,
+    ];
+
+    // THEN the upload counts for 4 MB on the wire and nothing is evicted
+    expect(preModelCallSanitize(hinted)).toEqual(hinted);
+
+    // AND a reference persisted before the hint existed is costed at its
+    // stored size, the conservative reading, so the older read is evicted
+    const unhinted = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "here" }, refImage(12 * MB)],
+      } as Message,
+      ...reads,
+    ];
+    expect(retainedToolResultMediaKeys(unhinted)).toEqual(new Set(["4:0"]));
+  });
+
+  test("an image reference no provider reads adds nothing to the total", () => {
+    // GIVEN a 20 MB SVG upload, which the send path replaces with a text
+    // note, followed by two 3 MB reads
+    const history = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "here" },
+          refImage(20 * MB, undefined, "image/svg+xml"),
+        ],
+      } as Message,
+      ...toolStep("d1", "document", [inlineImage(3 * MB)]),
+      ...toolStep("d2", "document", [inlineImage(3 * MB)]),
+    ];
+
+    // THEN neither read is evicted and the SVG counts as no image
+    expect(preModelCallSanitize(history)).toEqual(history);
+  });
+
+  test("a reference whose stored bytes no provider reads adds nothing, whatever its declared type", () => {
+    // GIVEN a reference declared PNG whose persist-time hint says the send
+    // path puts nothing on the wire (the stored bytes were, say, an SVG the
+    // sniffer could not correct), followed by two 3 MB reads
+    const history = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "here" }, refImage(20 * MB, 0)],
+      } as Message,
+      ...toolStep("d1", "document", [inlineImage(3 * MB)]),
+      ...toolStep("d2", "document", [inlineImage(3 * MB)]),
+    ];
+
+    // THEN neither read is evicted and the reference counts as no image
+    expect(preModelCallSanitize(history)).toEqual(history);
+  });
+
+  test("an inline image no provider reads adds nothing to the total", () => {
+    // GIVEN a 20 MB inline SVG, which the send path replaces with a text note
+    // after sniffing its bytes, followed by two 3 MB reads
+    const history = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "here" }, inlineSvg(20 * MB)],
+      } as Message,
+      ...toolStep("d1", "document", [inlineImage(3 * MB)]),
+      ...toolStep("d2", "document", [inlineImage(3 * MB)]),
+    ];
+
+    // THEN neither read is evicted
+    expect(preModelCallSanitize(history)).toEqual(history);
+  });
+
+  test("a malformed stored size never reduces the total", () => {
+    // GIVEN a reference whose stored size is negative (an imported or
+    // hand-edited blob the legacy repair path passed through) followed by
+    // three 4 MB reads, which trip the 10 MB mark on their own
+    const corrupt = refImage(-5 * MB);
+    const history = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "here" }, corrupt],
+      } as Message,
+      ...toolStep("d1", "document", [inlineImage(4 * MB)]),
+      ...toolStep("d2", "document", [inlineImage(4 * MB)]),
+      ...toolStep("d3", "document", [inlineImage(4 * MB)]),
+    ];
+
+    // THEN the corrupt size counts as nothing rather than as a credit, so the
+    // reads still trip the cap and only the newest survives
+    expect(retainedToolResultMediaKeys(history)).toEqual(new Set(["6:0"]));
+  });
+
+  test("files no adapter inlines add nothing to the total", () => {
+    // GIVEN a 50 MB video, a 9 MB text file, and a 9 MB m4a the user
+    // attached, none of which any adapter inlines, then two 3 MB reads
+    const refsOnly = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "here" },
+          refFile("video/mp4", 50 * MB),
+          refFile("text/plain", 9 * MB),
+          refFile("audio/x-m4a", 9 * MB),
+        ],
+      } as Message,
+      ...toolStep("d1", "document", [inlineImage(3 * MB)]),
+      ...toolStep("d2", "document", [inlineImage(3 * MB)]),
+    ];
+
+    // THEN neither read is evicted: none of those files puts bytes on the wire
+    expect(preModelCallSanitize(refsOnly)).toEqual(refsOnly);
+
+    // AND an MP3, which adapters do inline, counts in full
+    const withAudio = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "here" },
+          refFile("audio/mpeg", 9 * MB),
+        ],
+      } as Message,
+      ...toolStep("d1", "document", [inlineImage(3 * MB)]),
+      ...toolStep("d2", "document", [inlineImage(3 * MB)]),
+    ];
+    expect(retainedToolResultMediaKeys(withAudio)).toEqual(new Set(["4:0"]));
+  });
+
+  test("is idempotent after an eviction", () => {
+    // GIVEN a history that trips the cap
+    const history = documentSteps(7, 3 * MB);
+    const once = preModelCallSanitize(history);
+
+    // WHEN the projection is sanitized again (every send re-runs the bundle)
+    const twice = preModelCallSanitize(once);
+
+    // THEN nothing changes
+    expect(twice).toEqual(once);
+  });
+
+  test("the before-cap key set covers evicted documents but not stale frames", () => {
+    // GIVEN an old frame and five 3 MB reads, of which the cap keeps three
+    const history = [
+      ...toolStep("s1", undefined, [inlineImage(10)]),
+      ...documentSteps(5, 3 * MB),
+    ];
+    expect(retainedToolResultMediaKeys(history)).toEqual(
+      new Set(["7:0", "9:0", "11:0"]),
+    );
+
+    // THEN the before-cap set has every read and still omits the stale frame
+    expect(retainedToolResultMediaKeysBeforeCap(history)).toEqual(
+      new Set(["3:0", "5:0", "7:0", "9:0", "11:0"]),
+    );
+  });
+
+  test("rewriting kept media in place shifts the cap's picks, which is why rewriters use the before-cap set", () => {
+    // GIVEN five 3 MB reads with the newest three kept
+    const history = documentSteps(5, 3 * MB);
+    const kept = retainedToolResultMediaKeys(history);
+    expect(kept).toEqual(new Set(["5:0", "7:0", "9:0"]));
+
+    // WHEN the kept images are replaced by text, as captioning does
+    const rewritten = history.map((msg, msgIdx) => ({
+      ...msg,
+      content: msg.content.map((block, blockIdx) =>
+        block.type === "tool_result" && kept.has(`${msgIdx}:${blockIdx}`)
+          ? {
+              ...block,
+              contentBlocks: [{ type: "text" as const, text: "[caption]" }],
+            }
+          : block,
+      ),
+    }));
+
+    // THEN a recomputation keeps the two older reads the first pass evicted
+    expect(retainedToolResultMediaKeys(rewritten)).toEqual(
+      new Set(["1:0", "3:0"]),
+    );
+  });
+
+  test("retained keys cover the current step's frames and kept documents only", () => {
+    // GIVEN an old frame, a kept document, and a current frame
+    const history = [
+      ...toolStep("s1", undefined, [inlineImage(10)]),
+      ...toolStep("d1", "document", [inlineImage(10)]),
+      ...toolStep("s2", undefined, [inlineImage(10)]),
+    ];
+
+    // THEN the old frame is absent, the document and current frame present
+    expect(retainedToolResultMediaKeys(history)).toEqual(
+      new Set(["3:0", "5:0"]),
+    );
+  });
+});
+
+describe("attachment eviction under the payload cap", () => {
+  test("attachments from earlier turns are evicted oldest first", () => {
+    // GIVEN three turns that each attach a 4 MB image
+    const history = [
+      userTurn("first", inlineImage(4 * MB)),
+      assistantText("seen"),
+      userTurn("second", inlineImage(4 * MB)),
+      assistantText("seen"),
+      userTurn("third", inlineImage(4 * MB)),
+    ];
+
+    // WHEN the third upload crosses the 10 MB mark (12 MB)
+    const sent = preModelCallSanitize(history);
+
+    // THEN the two older uploads are replaced by markers (12 -> 8 -> 4 MB,
+    // under the 6 MB low mark) and the newest is kept
+    const marker = markerText(sent, 0, 1);
+    expect(marker).toStartWith("[Attachment (image/png, ");
+    expect(marker).toContain("payload limit");
+    // AND an upload with no stored attachment row cannot be pointed at a file
+    expect(marker).toContain("Ask the user to attach it again");
+    expect(markerText(sent, 2, 1)).toBeDefined();
+    expect(sent[4]).toEqual(history[4]);
+    // AND the durable history is untouched and the projection is stable
+    expect(history[0].content[1].type).toBe("image");
+    expect(preModelCallSanitize(sent)).toEqual(sent);
+  });
+
+  test("a trip mid-turn spares that turn's attachments, and a later turn can evict them", () => {
+    // GIVEN an earlier 3 MB upload, then a turn that attaches 5 MB and
+    // reads a 3 MB file
+    const turnTwo = [
+      userTurn("earlier", inlineImage(3 * MB)),
+      assistantText("seen"),
+      userTurn("compare these", inlineImage(5 * MB)),
+      ...toolStep("d1", "document", [inlineImage(3 * MB)]),
+    ];
+
+    // WHEN the read crosses the 10 MB mark (11 MB)
+    const sentTwo = preModelCallSanitize(turnTwo);
+
+    // THEN only the earlier turn's upload goes (11 -> 8 MB): the turn in
+    // progress keeps its upload and its read
+    expect(markerText(sentTwo, 0, 1)).toBeDefined();
+    expect(sentTwo[2]).toEqual(turnTwo[2]);
+    expect(hasMedia(toolResult(sentTwo, 4))).toBe(true);
+
+    // WHEN the conversation moves on to a text-only turn
+    const turnThree = [...turnTwo, assistantText("done"), userText("thanks")];
+    const sentThree = preModelCallSanitize(turnThree);
+
+    // THEN the earlier projection is byte-identical, so the prompt cache holds
+    expect(JSON.stringify(sentThree.slice(0, turnTwo.length))).toBe(
+      JSON.stringify(sentTwo),
+    );
+
+    // WHEN a read in the new turn crosses the mark again (11 MB)
+    const read = [
+      ...turnThree,
+      ...toolStep("d2", "document", [inlineImage(3 * MB)]),
+    ];
+    const sentRead = preModelCallSanitize(read);
+
+    // THEN the previous turn's upload is the oldest media left and goes
+    // (11 -> 6 MB), while both reads stay
+    expect(markerText(sentRead, 2, 1)).toBeDefined();
+    expect(hasMedia(toolResult(sentRead, 4))).toBe(true);
+    expect(hasMedia(toolResult(sentRead, 8))).toBe(true);
+  });
+
+  test("a system notice injected mid-turn does not start a new turn", () => {
+    // GIVEN a turn whose upload is followed by an empty-response nudge (a
+    // user-role message holding only a system notice) and then a read
+    const history = [
+      userTurn("earlier", inlineImage(3 * MB)),
+      assistantText("seen"),
+      userTurn("compare these", inlineImage(5 * MB)),
+      assistantText("..."),
+      userText(
+        "<system_notice>Your previous response was empty.</system_notice>",
+      ),
+      ...toolStep("d1", "document", [inlineImage(3 * MB)]),
+    ];
+
+    // WHEN the read crosses the 10 MB mark
+    const sent = preModelCallSanitize(history);
+
+    // THEN the turn's own upload is still spared and the earlier one goes
+    expect(markerText(sent, 0, 1)).toBeDefined();
+    expect(sent[2]).toEqual(history[2]);
+  });
+
+  test("an attachment that puts nothing on the wire is never evicted", () => {
+    // GIVEN an earlier turn that attached a text file no adapter inlines
+    // alongside a 4 MB image, then an 8 MB upload
+    const textFile = refFile("text/plain", 9 * MB);
+    const history = [
+      userTurn("earlier", textFile, inlineImage(4 * MB)),
+      assistantText("seen"),
+      userTurn("now", inlineImage(8 * MB)),
+    ];
+
+    // WHEN sanitized (12 MB crosses the mark)
+    const sent = preModelCallSanitize(history);
+
+    // THEN the image is replaced while the file, which frees nothing, stays
+    expect(sent[0].content[1]).toEqual(textFile);
+    expect(markerText(sent, 0, 2)).toBeDefined();
+  });
+
+  test("the marker names the file an evicted attachment is stored in", () => {
+    // GIVEN an earlier upload stored on disk, then an 8 MB upload
+    const dir = mkdtempSync(join(tmpdir(), "attachment-eviction-"));
+    const filePath = join(dir, "pair-01.png");
+    writeFileSync(filePath, Buffer.from(PNG_HEAD_B64, "base64"));
+    const stored = uploadFileBackedAttachment(
+      "pair-01.png",
+      "image/png",
+      filePath,
+      3 * MB,
+    );
+    const history = [
+      userTurn("earlier", {
+        type: "image",
+        source: {
+          type: "workspace_ref",
+          media_type: "image/png",
+          attachmentId: stored.id,
+          sizeBytes: 3 * MB,
+          transportSizeBytes: 3 * MB,
+        },
+      }),
+      assistantText("seen"),
+      userTurn("now", inlineImage(8 * MB)),
+    ];
+
+    // WHEN the newer upload crosses the mark (4 + 8 = 12 MB)
+    const sent = preModelCallSanitize(history);
+
+    // THEN the older upload's marker says where to read it back from
+    expect(markerText(sent, 0, 1)).toBe(
+      `[Attachment (image/png, ${3 * MB} bytes) shown in an earlier turn was removed from this request to stay within the provider's payload limit. Read ${filePath} with file_read to view it again.]`,
+    );
+  });
+});
+
+describe("media.payloadCap override", () => {
+  afterEach(() => {
+    setConfig("media", {});
+  });
+
+  test("raises the byte marks for an installation that knows its transport", () => {
+    // GIVEN five 3 MB reads, which the shipped 10 MB / 6 MB band thins to three
+    const reads = documentSteps(5, 3 * MB);
+    expect(retainedToolResultMediaKeys(reads).size).toBe(3);
+
+    // WHEN the workspace config raises the band to Anthropic-sized marks
+    setConfig("media", { payloadCap: { highMb: 22, lowMb: 14 } });
+
+    // THEN every read stays in view on the next send
+    expect(retainedToolResultMediaKeys(reads).size).toBe(5);
+    expect(preModelCallSanitize(reads)).toEqual(reads);
+  });
+});

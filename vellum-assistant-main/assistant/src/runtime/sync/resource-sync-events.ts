@@ -1,0 +1,326 @@
+import type { IdentityFields } from "../../daemon/handlers/identity.js";
+import {
+  conversationMessagesSyncTag,
+  conversationMetadataSyncTag,
+  SYNC_TAGS,
+} from "../../daemon/message-types/sync.js";
+import { resolveConversationTitle } from "../../i18n/index.js";
+import { syncAvatarToPlatform } from "../../platform/sync-avatar.js";
+import { getAvatarImagePath } from "../../util/platform.js";
+import { broadcastMessage } from "../assistant-event-hub.js";
+import { isStreamSeqStampingDisabled } from "../assistant-stream-state.js";
+import { publishSyncInvalidation } from "./sync-publisher.js";
+import {
+  notifyDaemonActivationProgressChanged,
+  notifyDaemonConversationListChanged,
+  notifyDaemonConversationPersisted,
+  notifyDaemonDocumentsChanged,
+} from "./worker-daemon-notify.js";
+
+/**
+ * Derive the initiating client's id from request headers so a sync publish can
+ * carry it as `originClientId`, letting that client self-echo-suppress its own
+ * invalidation. Trimmed; blank/absent headers yield `undefined`.
+ */
+export function getOriginClientId(
+  headers: Record<string, string> | undefined,
+): string | undefined {
+  return headers?.["x-vellum-client-id"]?.trim() || undefined;
+}
+
+export function publishAvatarChanged(originClientId?: string): void {
+  broadcastMessage({
+    type: "avatar_updated",
+    avatarPath: getAvatarImagePath(),
+  });
+  void publishSyncInvalidation([SYNC_TAGS.assistantAvatar], originClientId);
+  syncAvatarToPlatform();
+}
+
+export function publishIdentityChanged(
+  fields: IdentityFields,
+  originClientId?: string,
+): void {
+  broadcastMessage({
+    type: "identity_changed",
+    name: fields.name,
+    role: fields.role,
+    personality: fields.personality,
+    emoji: fields.emoji,
+    home: fields.home,
+  });
+  void publishSyncInvalidation([SYNC_TAGS.assistantIdentity], originClientId);
+}
+
+export function publishConfigChanged(originClientId?: string): void {
+  broadcastMessage({ type: "config_changed" });
+  void publishSyncInvalidation([SYNC_TAGS.assistantConfig], originClientId);
+}
+
+export function publishSoundsConfigUpdated(originClientId?: string): void {
+  broadcastMessage({ type: "sounds_config_updated" });
+  void publishSyncInvalidation([SYNC_TAGS.assistantSounds], originClientId);
+}
+
+export function publishSchedulesChanged(originClientId?: string): void {
+  void publishSyncInvalidation([SYNC_TAGS.assistantSchedules], originClientId);
+}
+
+export function publishWorkspaceThemeChanged(originClientId?: string): void {
+  void publishSyncInvalidation([SYNC_TAGS.assistantTheme], originClientId);
+}
+
+export function publishAppsChanged(originClientId?: string): void {
+  void publishSyncInvalidation([SYNC_TAGS.appsList], originClientId);
+}
+
+/**
+ * How long a documents-list invalidation waits for the writes around it to
+ * settle before it is broadcast.
+ *
+ * Document writes arrive in bursts: the document-editor skill is instructed to
+ * stream a document as many small `document_update` calls, and the web editor
+ * autosaves as the user types. Every burst member publishes, and every publish
+ * makes each client drain its `documentsGet` queries (the per-conversation
+ * assets pill, the Library, the intelligence stats), during an SSE stream that
+ * is already saturated. Open editors track each individual write through
+ * `document_editor_update`, so the list-level invalidation only has to land
+ * once the burst settles.
+ */
+export const DOCUMENTS_CHANGED_COALESCE_MS = 150;
+
+/**
+ * Ceiling on how long an unbroken run of writes can defer the invalidation, so
+ * a document streamed in sub-window chunks still refreshes the list while it is
+ * being written instead of only when the turn ends.
+ */
+export const DOCUMENTS_CHANGED_MAX_DEFER_MS = 1_000;
+
+let documentsPublishTimer: ReturnType<typeof setTimeout> | undefined;
+let documentsPublishDeadline = 0;
+let documentsPublishOrigin: string | undefined;
+let documentsPublishOriginSeen = false;
+
+function flushDocumentsChanged(): void {
+  documentsPublishTimer = undefined;
+  documentsPublishDeadline = 0;
+  const originClientId = documentsPublishOrigin;
+  documentsPublishOrigin = undefined;
+  documentsPublishOriginSeen = false;
+
+  // In a sidecar worker (seq stamping disabled) the local hub has no SSE
+  // subscribers, so a local publish reaches no client and a document edited by
+  // a scheduled or background turn stays invisible. Hand off to the daemon,
+  // which republishes the invalidation where subscribers observe it. Such a
+  // turn has no originating client, so no `originClientId` is forwarded.
+  if (isStreamSeqStampingDisabled()) {
+    void notifyDaemonDocumentsChanged();
+    return;
+  }
+  void publishSyncInvalidation([SYNC_TAGS.documentsList], originClientId);
+}
+
+/**
+ * Invalidate the document list on every client, coalescing a burst of writes
+ * into a single broadcast (see {@link DOCUMENTS_CHANGED_COALESCE_MS}).
+ */
+export function publishDocumentsChanged(originClientId?: string): void {
+  if (!documentsPublishOriginSeen) {
+    documentsPublishOrigin = originClientId;
+    documentsPublishOriginSeen = true;
+  } else if (documentsPublishOrigin !== originClientId) {
+    // Writes from more than one client merged into this broadcast, so no single
+    // client may suppress it as its own echo.
+    documentsPublishOrigin = undefined;
+  }
+
+  const now = Date.now();
+  if (documentsPublishTimer) {
+    clearTimeout(documentsPublishTimer);
+  } else {
+    documentsPublishDeadline = now + DOCUMENTS_CHANGED_MAX_DEFER_MS;
+  }
+  documentsPublishTimer = setTimeout(
+    flushDocumentsChanged,
+    Math.max(
+      0,
+      Math.min(DOCUMENTS_CHANGED_COALESCE_MS, documentsPublishDeadline - now),
+    ),
+  );
+}
+
+export function publishPluginsChanged(originClientId?: string): void {
+  void publishSyncInvalidation([SYNC_TAGS.pluginsList], originClientId);
+}
+
+export function publishMcpChanged(): void {
+  void publishSyncInvalidation([SYNC_TAGS.mcpList]);
+}
+
+/**
+ * Invalidate the activation-checklist progress resource on every client.
+ *
+ * Reached from the routes the client writes through and from the turn hooks
+ * that count a launched task's steps. Those hooks run inside whichever
+ * process is driving the turn, and a scheduled or background turn runs in a
+ * sidecar worker (seq stamping disabled) whose local hub has no SSE
+ * subscribers, so a local publish would reach nobody and the checklist row
+ * would sit on Working until the client refetched for another reason. Hand
+ * off to the daemon there, as the documents list does. A worker turn has no
+ * originating client, so no `originClientId` is forwarded.
+ */
+export function publishActivationProgressChanged(
+  originClientId?: string,
+): void {
+  if (isStreamSeqStampingDisabled()) {
+    void notifyDaemonActivationProgressChanged();
+    return;
+  }
+  void publishSyncInvalidation([SYNC_TAGS.activationProgress], originClientId);
+}
+
+/**
+ * Reasons that change the *shape* of the conversation list — a row is
+ * added, removed, or its position changes. These require web clients to
+ * refetch the paginated list because the row patch path (`refreshConversationRow`)
+ * only handles a single known id. Reasons not in this set are *content-only*
+ * changes to an existing row (e.g. `seen_changed`, `renamed`) and are
+ * delivered exclusively via the per-conversation `sync_changed` tag, which
+ * web consumes by GET-and-patching the single row.
+ */
+type ConversationListReason =
+  | "created"
+  | "renamed"
+  | "deleted"
+  | "reordered"
+  | "seen_changed";
+
+const SHAPE_CHANGING_REASONS: ReadonlySet<ConversationListReason> = new Set([
+  "created",
+  "deleted",
+  "reordered",
+]);
+
+export function publishConversationListChanged(
+  reason: ConversationListReason,
+  originClientId?: string,
+): void {
+  void publishSyncInvalidation([SYNC_TAGS.conversationsList], originClientId);
+}
+
+export function publishConversationMessagesChanged(
+  conversationId: string,
+  originClientId?: string,
+): void {
+  // In a sidecar worker (seq stamping disabled) the local hub has no SSE
+  // subscribers and the seq counter is inert, so a local publish reaches no
+  // client and records no honest anchor. Hand off to the daemon — the seq
+  // authority clients subscribe to — which records the anchor at its own seq
+  // and republishes the invalidation. A background worker turn has no
+  // originating client, so no `originClientId` is forwarded.
+  if (isStreamSeqStampingDisabled()) {
+    void notifyDaemonConversationPersisted(conversationId);
+    return;
+  }
+  void publishSyncInvalidation(
+    [conversationMessagesSyncTag(conversationId)],
+    originClientId,
+  );
+}
+
+export function publishConversationListAndMetadataChanged(
+  reason: ConversationListReason,
+  conversationIds: string | string[],
+  originClientId?: string,
+): void {
+  const ids = Array.isArray(conversationIds)
+    ? conversationIds
+    : [conversationIds];
+
+  // In a sidecar worker the local hub has no SSE subscribers, so a publish
+  // here reaches nobody and the sidebar keeps showing a list the worker has
+  // already changed. Hand off to the daemon, which republishes on the hub
+  // clients actually subscribe to. A background worker turn has no
+  // originating client, so no `originClientId` is forwarded.
+  if (isStreamSeqStampingDisabled()) {
+    void notifyDaemonConversationListChanged(reason, ids);
+    return;
+  }
+
+  // Shape-changing reasons (`created`, `deleted`, `reordered`) add or
+  // remove rows or change the order of the paginated window — web must
+  // refetch the list, so include the `conversationsList` umbrella tag.
+  // Content-only reasons (`renamed`, `seen_changed`) modify an existing
+  // row; web consumes the per-conversation metadata tag and GET-and-
+  // patches the single row, avoiding the full paginated list drain
+  // (`limit=50&offset=0..N` × foreground + background — ~14 requests
+  // per write at a few hundred conversations).
+  const tags: string[] = ids.map((conversationId) =>
+    conversationMetadataSyncTag(conversationId),
+  );
+  if (SHAPE_CHANGING_REASONS.has(reason)) {
+    tags.unshift(SYNC_TAGS.conversationsList);
+  }
+  void publishSyncInvalidation(tags, originClientId);
+}
+
+export function publishConversationTitleChanged(
+  conversationId: string,
+  title: string,
+  originClientId?: string,
+): void {
+  broadcastMessage(
+    {
+      type: "conversation_title_updated",
+      conversationId,
+      title: resolveConversationTitle(title),
+    },
+    conversationId,
+  );
+  // Renames are content-only — the paired typed `conversation_title_updated`
+  // event already carries the new title and patches the row in place; the
+  // `sync_changed` metadata tag is included as a belt-and-suspenders signal
+  // for any sibling-tab consumer that missed the typed event.
+  void publishSyncInvalidation(
+    [conversationMetadataSyncTag(conversationId)],
+    originClientId,
+  );
+}
+
+export function publishConversationEnabledPluginsChanged(
+  conversationId: string,
+  originClientId?: string,
+): void {
+  void publishSyncInvalidation(
+    [SYNC_TAGS.conversationsList, conversationMetadataSyncTag(conversationId)],
+    originClientId,
+  );
+}
+
+export function publishConversationInferenceProfileChanged(
+  params: {
+    conversationId: string;
+    profile: string | null;
+    sessionId?: string | null;
+    expiresAt?: number | null;
+  },
+  originClientId?: string,
+): void {
+  broadcastMessage(
+    {
+      type: "conversation_inference_profile_updated",
+      conversationId: params.conversationId,
+      profile: params.profile,
+      sessionId: params.sessionId,
+      expiresAt: params.expiresAt,
+    },
+    params.conversationId,
+  );
+  void publishSyncInvalidation(
+    [
+      SYNC_TAGS.conversationsList,
+      conversationMetadataSyncTag(params.conversationId),
+    ],
+    originClientId,
+  );
+}

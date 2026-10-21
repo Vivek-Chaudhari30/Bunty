@@ -1,0 +1,1319 @@
+/**
+ * Route handler tests for the OAuth CLI command endpoints exposed by
+ * `assistant/src/runtime/routes/oauth-commands-routes.ts`.
+ *
+ * Scope: argument validation, provider / mode dispatch, and the shape of
+ * returned payloads for the 9 endpoints (oauth_disconnect, oauth_mode_get,
+ * oauth_mode_set, oauth_status, oauth_ping, oauth_token, oauth_request,
+ * oauth_managed_connect_start, oauth_managed_connect_poll). These routes
+ * back the thin IPC wrappers in `assistant/src/cli/commands/oauth/`.
+ *
+ * Deeper coverage of the underlying store / token-refresh / platform logic
+ * lives in `oauth-store.test.ts`, `credential-vault.test.ts`, and the other
+ * oauth-*-routes test files.
+ */
+
+import { beforeEach, describe, expect, mock, test } from "bun:test";
+
+// ---------------------------------------------------------------------------
+// Mock state — flipped per-test in beforeEach hooks
+// ---------------------------------------------------------------------------
+
+interface MockProviderRow {
+  provider: string;
+  authorizeUrl: string;
+  managedServiceConfigKey: string | null;
+  baseUrl: string | null;
+  injectionTemplates: string | null;
+  defaultScopes?: string;
+  authorizeParams?: string | null;
+  scopeSeparator?: string;
+  pingUrl: string | null;
+  pingMethod: string | null;
+  pingHeaders: string | null;
+  pingBody: string | null;
+  responseOkField: string | null;
+}
+
+const baseProvider: MockProviderRow = {
+  provider: "google",
+  authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+  managedServiceConfigKey: "google-oauth",
+  baseUrl: "https://api.google.com",
+  injectionTemplates: null,
+  pingUrl: null,
+  pingMethod: null,
+  pingHeaders: null,
+  pingBody: null,
+  responseOkField: null,
+};
+
+let mockProviders: Record<string, MockProviderRow> = {};
+let mockActiveConnectionsByProvider: Record<string, unknown[]> = {};
+let mockAllConnections: Record<string, unknown[]> = {};
+let mockApps: Record<string, unknown> = {};
+let mockTokenValue = "tok-fake";
+let platformAvailable = true;
+let platformAssistantId: string | null = "assistant-1";
+let mockFetchImpl: (
+  path: string,
+  init?: RequestInit,
+) => Promise<{
+  ok: boolean;
+  status: number;
+  json: () => Promise<unknown>;
+  text: () => Promise<string>;
+}> = async () => ({
+  ok: true,
+  status: 200,
+  json: async () => ({}),
+  text: async () => "",
+});
+let mockResolveResponse: {
+  status: number;
+  headers: Record<string, string>;
+  body: unknown;
+} = { status: 200, headers: {}, body: { ok: true } };
+let mockResolveRequests: unknown[] = [];
+let mockSyncManualTokenCalls: string[] = [];
+
+const mockDisconnectOAuthProvider = mock(() => Promise.resolve());
+
+mock.module("../oauth/oauth-store.js", () => ({
+  disconnectOAuthProvider: mockDisconnectOAuthProvider,
+  getActiveConnection: (
+    provider: string,
+    opts?: { clientId?: string; account?: string },
+  ) => {
+    const list = (mockActiveConnectionsByProvider[provider] ?? []) as Array<{
+      id: string;
+      clientId?: string;
+      accountInfo?: string | null;
+    }>;
+    if (opts?.account) {
+      return list.find((c) => c.accountInfo === opts.account);
+    }
+    if (opts?.clientId) {
+      return list.find((c) => c.clientId === opts.clientId);
+    }
+    return list[0];
+  },
+  getAppByProviderAndClientId: (provider: string, clientId: string) => {
+    return mockApps[`${provider}:${clientId}`];
+  },
+  getConnection: (id: string) => {
+    for (const list of Object.values(mockAllConnections)) {
+      const row = (list as Array<{ id: string }>).find((r) => r.id === id);
+      if (row) {
+        return row;
+      }
+    }
+    return undefined;
+  },
+  getProvider: (provider: string) => mockProviders[provider],
+  listActiveConnectionsByProvider: (provider: string) =>
+    mockActiveConnectionsByProvider[provider] ?? [],
+  listConnections: (provider: string) => mockAllConnections[provider] ?? [],
+  // Imported by seed-providers.js at module load; the seed data is read here,
+  // never written.
+  migrateProviderBaseUrl: () => {},
+  seedProviders: () => {},
+}));
+
+mock.module("../oauth/connection-resolver.js", () => {
+  const makeConnection = () => ({
+    id: "conn-1",
+    accountInfo: "user@example.com",
+    request: async (req: unknown) => {
+      mockResolveRequests.push(req);
+      return mockResolveResponse;
+    },
+  });
+  return {
+    resolveOAuthConnection: async (_provider: string) => makeConnection(),
+    resolveOAuthConnectionWithMeta: async (_provider: string) => ({
+      connection: makeConnection(),
+      ambiguous: false,
+      allAccounts: ["user@example.com"],
+    }),
+  };
+});
+
+mock.module("../oauth/manual-token-connection.js", () => ({
+  syncManualTokenConnection: async (provider: string) => {
+    mockSyncManualTokenCalls.push(provider);
+  },
+}));
+
+mock.module("../platform/client.js", () => ({
+  VellumPlatformClient: {
+    create: async () => {
+      if (!platformAvailable) {
+        return null;
+      }
+      return {
+        platformAssistantId,
+        fetch: (path: string, init?: RequestInit) => mockFetchImpl(path, init),
+      };
+    },
+  },
+}));
+
+mock.module("../security/token-manager.js", () => ({
+  withValidToken: async <T>(_provider: string, fn: (t: string) => Promise<T>) =>
+    fn(mockTokenValue),
+}));
+
+import { loadRawConfig } from "../config/loader.js";
+import { PROVIDER_SEED_DATA } from "../oauth/seed-providers.js";
+import {
+  BadRequestError,
+  InternalError,
+  NotFoundError,
+} from "../runtime/routes/errors.js";
+import { ROUTES } from "../runtime/routes/oauth-commands-routes.js";
+import type { RouteHandlerArgs } from "../runtime/routes/types.js";
+import { setConfig } from "./helpers/set-config.js";
+
+/** Seed `services.<key>.mode` entries into the workspace config for real. */
+function seedServiceModes(modes: Record<string, "managed" | "your-own">): void {
+  setConfig(
+    "services",
+    Object.fromEntries(
+      Object.entries(modes).map(([key, mode]) => [key, { mode }]),
+    ),
+  );
+}
+
+function getRoute(method: string, endpoint: string) {
+  const route = ROUTES.find(
+    (r) => r.method === method && r.endpoint === endpoint,
+  );
+  if (!route) {
+    throw new Error(`Route not found: ${method} ${endpoint}`);
+  }
+  return route;
+}
+
+function makeArgs(
+  opts: {
+    pathParams?: Record<string, string>;
+    queryParams?: Record<string, string>;
+    body?: Record<string, unknown>;
+  } = {},
+): RouteHandlerArgs {
+  return {
+    pathParams: opts.pathParams,
+    queryParams: opts.queryParams,
+    body: opts.body,
+  };
+}
+
+beforeEach(() => {
+  mockProviders = { google: { ...baseProvider } };
+  // The real schema default for `services.google-oauth.mode` is "managed";
+  // seed "your-own" so BYO-mode tests keep their baseline.
+  seedServiceModes({ "google-oauth": "your-own" });
+  mockActiveConnectionsByProvider = {};
+  mockAllConnections = {};
+  mockApps = {};
+  mockTokenValue = "tok-fake";
+  platformAvailable = true;
+  platformAssistantId = "assistant-1";
+  mockFetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({}),
+    text: async () => "",
+  });
+  mockResolveResponse = { status: 200, headers: {}, body: { ok: true } };
+  mockResolveRequests = [];
+  mockSyncManualTokenCalls = [];
+  mockDisconnectOAuthProvider.mockClear();
+});
+
+// ---------------------------------------------------------------------------
+// Route registry — establishes that all 9 endpoints are wired correctly.
+// ---------------------------------------------------------------------------
+
+describe("oauth-commands-routes route registry", () => {
+  test("registers all 9 IPC endpoints", () => {
+    const ops = ROUTES.map((r) => r.operationId).sort();
+    expect(ops).toEqual([
+      "oauth_disconnect",
+      "oauth_managed_connect_poll",
+      "oauth_managed_connect_start",
+      "oauth_mode_get",
+      "oauth_mode_set",
+      "oauth_ping",
+      "oauth_request",
+      "oauth_status",
+      "oauth_token",
+    ]);
+  });
+
+  test("every route enforces policy", () => {
+    for (const route of ROUTES) {
+      expect(route.policy).not.toBeNull();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST oauth/disconnect
+// ---------------------------------------------------------------------------
+
+describe("POST oauth/disconnect", () => {
+  test("rejects missing provider", async () => {
+    await expect(
+      getRoute("POST", "oauth/disconnect").handler(makeArgs({ body: {} })),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("rejects unknown provider", async () => {
+    await expect(
+      getRoute("POST", "oauth/disconnect").handler(
+        makeArgs({ body: { provider: "unknown" } }),
+      ),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  test("rejects both account and connection_id", async () => {
+    await expect(
+      getRoute("POST", "oauth/disconnect").handler(
+        makeArgs({
+          body: {
+            provider: "google",
+            account: "alice@example.com",
+            connection_id: "conn-1",
+          },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("BYO mode disconnects via oauth-store", async () => {
+    mockActiveConnectionsByProvider.google = [
+      { id: "conn-1", accountInfo: "alice@example.com" },
+    ];
+    const result = (await getRoute("POST", "oauth/disconnect").handler(
+      makeArgs({ body: { provider: "google" } }),
+    )) as { ok: boolean; connectionId: string };
+    expect(result.ok).toBe(true);
+    expect(result.connectionId).toBe("conn-1");
+    expect(mockDisconnectOAuthProvider).toHaveBeenCalledTimes(1);
+  });
+
+  test("managed mode with no active connections raises NotFound", async () => {
+    seedServiceModes({ "google-oauth": "managed" });
+    mockFetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => [],
+      text: async () => "[]",
+    });
+    await expect(
+      getRoute("POST", "oauth/disconnect").handler(
+        makeArgs({ body: { provider: "google" } }),
+      ),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  test("managed mode with multiple connections demands disambiguation", async () => {
+    seedServiceModes({ "google-oauth": "managed" });
+    mockFetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => [
+        { id: "conn-a", account_label: "a@example.com" },
+        { id: "conn-b", account_label: "b@example.com" },
+      ],
+      text: async () => "",
+    });
+    await expect(
+      getRoute("POST", "oauth/disconnect").handler(
+        makeArgs({ body: { provider: "google" } }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET oauth/mode
+// ---------------------------------------------------------------------------
+
+describe("GET oauth/mode", () => {
+  test("rejects missing provider", () => {
+    // handleModeGet is synchronous — use toThrow rather than rejects.
+    expect(() =>
+      getRoute("GET", "oauth/mode").handler(makeArgs({ queryParams: {} })),
+    ).toThrow(BadRequestError);
+  });
+
+  test("returns managed-supported provider mode", async () => {
+    seedServiceModes({ "google-oauth": "managed" });
+    const result = (await getRoute("GET", "oauth/mode").handler(
+      makeArgs({ queryParams: { provider: "google" } }),
+    )) as { mode: string; managedModeSupported: boolean };
+    expect(result.mode).toBe("managed");
+    expect(result.managedModeSupported).toBe(true);
+  });
+
+  test("BYO-only provider returns your-own with managedModeSupported=false", async () => {
+    mockProviders.byo = {
+      ...baseProvider,
+      provider: "byo",
+      managedServiceConfigKey: null,
+    };
+    const result = (await getRoute("GET", "oauth/mode").handler(
+      makeArgs({ queryParams: { provider: "byo" } }),
+    )) as { mode: string; managedModeSupported: boolean };
+    expect(result.mode).toBe("your-own");
+    expect(result.managedModeSupported).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST oauth/mode
+// ---------------------------------------------------------------------------
+
+describe("POST oauth/mode", () => {
+  test("rejects invalid mode value", async () => {
+    await expect(
+      getRoute("POST", "oauth/mode").handler(
+        makeArgs({ body: { provider: "google", mode: "bogus" } }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("rejects switching to managed on BYO-only provider", async () => {
+    mockProviders.byo = {
+      ...baseProvider,
+      provider: "byo",
+      managedServiceConfigKey: null,
+    };
+    await expect(
+      getRoute("POST", "oauth/mode").handler(
+        makeArgs({ body: { provider: "byo", mode: "managed" } }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("switching to your-own on BYO-only provider is a no-op success", async () => {
+    mockProviders.byo = {
+      ...baseProvider,
+      provider: "byo",
+      managedServiceConfigKey: null,
+    };
+    const rawBefore = JSON.stringify(loadRawConfig());
+    const result = (await getRoute("POST", "oauth/mode").handler(
+      makeArgs({ body: { provider: "byo", mode: "your-own" } }),
+    )) as { changed: boolean };
+    expect(result.changed).toBe(false);
+    // The no-op path must not write the config file.
+    expect(JSON.stringify(loadRawConfig())).toBe(rawBefore);
+  });
+
+  test("requires platform connection when switching to managed", async () => {
+    platformAvailable = false;
+    await expect(
+      getRoute("POST", "oauth/mode").handler(
+        makeArgs({ body: { provider: "google", mode: "managed" } }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("persists mode change when current differs from new", async () => {
+    seedServiceModes({ "google-oauth": "your-own" });
+    const result = (await getRoute("POST", "oauth/mode").handler(
+      makeArgs({ body: { provider: "google", mode: "managed" } }),
+    )) as { changed: boolean };
+    expect(result.changed).toBe(true);
+    const raw = loadRawConfig() as {
+      services?: Record<string, { mode?: string }>;
+    };
+    expect(raw.services?.["google-oauth"]?.mode).toBe("managed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET oauth/status
+// ---------------------------------------------------------------------------
+
+describe("GET oauth/status", () => {
+  test("rejects missing provider", async () => {
+    await expect(
+      getRoute("GET", "oauth/status").handler(makeArgs({ queryParams: {} })),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("BYO mode surfaces active connections with parsed scopes", async () => {
+    mockAllConnections.google = [
+      {
+        id: "conn-1",
+        accountInfo: "alice@example.com",
+        grantedScopes: '["email","profile"]',
+        status: "active",
+        hasRefreshToken: 1,
+        expiresAt: 1735689600000,
+      },
+      {
+        // Inactive row should be filtered out
+        id: "conn-2",
+        accountInfo: null,
+        grantedScopes: null,
+        status: "revoked",
+        hasRefreshToken: 0,
+        expiresAt: null,
+      },
+    ];
+    const result = (await getRoute("GET", "oauth/status").handler(
+      makeArgs({ queryParams: { provider: "google" } }),
+    )) as {
+      mode: string;
+      connections: Array<{ id: string; grantedScopes: string[] }>;
+    };
+    expect(result.mode).toBe("byo");
+    expect(result.connections).toHaveLength(1);
+    expect(result.connections[0]!.id).toBe("conn-1");
+    expect(result.connections[0]!.grantedScopes).toEqual(["email", "profile"]);
+  });
+
+  test("malformed grantedScopes JSON defaults to empty", async () => {
+    mockAllConnections.google = [
+      {
+        id: "conn-bad",
+        accountInfo: null,
+        grantedScopes: "not-json",
+        status: "active",
+        hasRefreshToken: 0,
+        expiresAt: null,
+      },
+    ];
+    const result = (await getRoute("GET", "oauth/status").handler(
+      makeArgs({ queryParams: { provider: "google" } }),
+    )) as { connections: Array<{ grantedScopes: string[] }> };
+    expect(result.connections[0]!.grantedScopes).toEqual([]);
+  });
+
+  test("BYO mode reconciles manual-token providers before listing status", async () => {
+    mockProviders.telegram = {
+      ...baseProvider,
+      provider: "telegram",
+      authorizeUrl: "urn:manual-token",
+      managedServiceConfigKey: null,
+      baseUrl: "https://api.telegram.org",
+    };
+    mockAllConnections.telegram = [
+      {
+        id: "conn-telegram",
+        accountInfo: "@example_bot",
+        grantedScopes: "[]",
+        status: "active",
+        hasRefreshToken: 0,
+        expiresAt: null,
+      },
+    ];
+
+    const result = (await getRoute("GET", "oauth/status").handler(
+      makeArgs({ queryParams: { provider: "telegram" } }),
+    )) as { connections: Array<{ account: string | null }> };
+
+    expect(mockSyncManualTokenCalls).toEqual(["telegram"]);
+    expect(result.connections[0]!.account).toBe("@example_bot");
+  });
+
+  test("managed mode surfaces platform connections", async () => {
+    seedServiceModes({ "google-oauth": "managed" });
+    mockFetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => [
+        {
+          id: "conn-platform",
+          account_label: "alice@example.com",
+          scopes_granted: ["email"],
+          status: "ACTIVE",
+        },
+      ],
+      text: async () => "",
+    });
+    const result = (await getRoute("GET", "oauth/status").handler(
+      makeArgs({ queryParams: { provider: "google" } }),
+    )) as { mode: string; connections: Array<{ id: string }> };
+    expect(result.mode).toBe("managed");
+    expect(result.connections[0]!.id).toBe("conn-platform");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST oauth/ping
+// ---------------------------------------------------------------------------
+
+describe("POST oauth/ping", () => {
+  test("rejects provider without configured pingUrl", async () => {
+    await expect(
+      getRoute("POST", "oauth/ping").handler(
+        makeArgs({ body: { provider: "google" } }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("returns ok=true for 2xx response", async () => {
+    mockProviders.google = {
+      ...baseProvider,
+      pingUrl: "https://api.google.com/v1/me",
+    };
+    mockResolveResponse = { status: 200, headers: {}, body: { ok: true } };
+    const result = (await getRoute("POST", "oauth/ping").handler(
+      makeArgs({ body: { provider: "google" } }),
+    )) as { ok: boolean; provider: string; status: number };
+    expect(result).toEqual({ ok: true, provider: "google", status: 200 });
+  });
+
+  test("returns ok=false with reconnect hint on 401", async () => {
+    mockProviders.google = {
+      ...baseProvider,
+      pingUrl: "https://api.google.com/v1/me",
+    };
+    mockResolveResponse = {
+      status: 401,
+      headers: {},
+      body: { error: "unauthorized" },
+    };
+    const result = (await getRoute("POST", "oauth/ping").handler(
+      makeArgs({ body: { provider: "google" } }),
+    )) as { ok: boolean; status: number; hint?: string };
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(401);
+    expect(result.hint).toContain("oauth connect");
+  });
+
+  // Slack's auth.test refuses a revoked token inside an HTTP 200, so a ping
+  // that read only the status would report a dead bot credential as healthy.
+  test("a 2xx ping whose body reports failure in the declared ok field is not ok", async () => {
+    const seed = PROVIDER_SEED_DATA.slack_channel;
+    mockProviders.slack_channel = {
+      ...baseProvider,
+      provider: "slack_channel",
+      pingUrl: seed.pingUrl ?? null,
+      responseOkField: seed.responseOkField ?? null,
+    };
+    mockResolveResponse = {
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: { ok: false, error: "invalid_auth" },
+    };
+    const result = (await getRoute("POST", "oauth/ping").handler(
+      makeArgs({ body: { provider: "slack_channel" } }),
+    )) as {
+      ok: boolean;
+      status: number;
+      error: string;
+      body?: unknown;
+      hint?: string;
+    };
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(200);
+    expect(result.error).toContain("ok: false");
+    expect(result.body).toEqual({ ok: false, error: "invalid_auth" });
+    expect(result.hint).toContain("oauth connect");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST oauth/token
+// ---------------------------------------------------------------------------
+
+describe("POST oauth/token", () => {
+  test("rejects managed-mode providers", async () => {
+    seedServiceModes({ "google-oauth": "managed" });
+    await expect(
+      getRoute("POST", "oauth/token").handler(
+        makeArgs({ body: { provider: "google" } }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("returns token from withValidToken in BYO mode", async () => {
+    mockTokenValue = "tok-real";
+    const result = (await getRoute("POST", "oauth/token").handler(
+      makeArgs({ body: { provider: "google" } }),
+    )) as { ok: boolean; token: string };
+    expect(result).toEqual({ ok: true, token: "tok-real" });
+  });
+
+  test("rejects when account is given but no matching connection", async () => {
+    // No active connections registered for google
+    await expect(
+      getRoute("POST", "oauth/token").handler(
+        makeArgs({
+          body: { provider: "google", account: "missing@example.com" },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST oauth/request
+// ---------------------------------------------------------------------------
+
+describe("POST oauth/request", () => {
+  test("rejects missing url", async () => {
+    await expect(
+      getRoute("POST", "oauth/request").handler(
+        makeArgs({ body: { provider: "google" } }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("rejects @- stdin body data — daemon stdin is not the caller's", async () => {
+    await expect(
+      getRoute("POST", "oauth/request").handler(
+        makeArgs({
+          body: {
+            provider: "google",
+            url: "https://api.google.com/v1/me",
+            data: "@-",
+          },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("happy-path GET returns response payload", async () => {
+    mockResolveResponse = {
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: { hello: "world" },
+    };
+    const result = (await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: { provider: "google", url: "https://api.google.com/v1/me" },
+      }),
+    )) as { ok: boolean; status: number; body: unknown };
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ hello: "world" });
+  });
+
+  // The hint's wording is pinned in oauth-request-hints.test.ts. Here only
+  // the facts the route hands the composer are proved to arrive: the
+  // response headers, the base the request resolved against, and the bot
+  // channel resolved from the provider key.
+  test("hands the composer the response, the resolved base, and the identity", async () => {
+    mockProviders.slack_channel = seededProvider("slack_channel");
+    mockResolveResponse = {
+      status: 403,
+      headers: { "content-type": "text/html; charset=utf-8" },
+      body: "<html><title>Slack</title></html>",
+    };
+    const asBot = (await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: {
+          provider: "slack_channel",
+          url: "https://files.slack.com/files-pri/T0123-F0456/download/shot.png",
+        },
+      }),
+    )) as { ok: boolean; status: number; hint?: string };
+    expect(asBot.ok).toBe(false);
+    expect(asBot.status).toBe(403);
+    // An absolute URL's own origin is the resolved base.
+    expect(asBot.hint).toContain("from files.slack.com");
+    expect(asBot.hint).toContain("assistant channels get slack");
+
+    // A relative path resolves against the provider's base.
+    mockResolveResponse = {
+      status: 404,
+      headers: { "content-type": "text/html; charset=UTF-8" },
+      body: "<html><title>Error 404 (Not Found)</title></html>",
+    };
+    const relative = (await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: {
+          provider: "google",
+          url: "/calendar/v3/calendars/primary/events",
+        },
+      }),
+    )) as { ok: boolean; hint?: string };
+    expect(relative.ok).toBe(false);
+    expect(relative.hint).toContain('base URL "https://api.google.com"');
+  });
+
+  test("passes a pre-parsed string body through to the connection unchanged", async () => {
+    const multipart =
+      "--boundary\r\nContent-Type: application/json\r\n\r\n{}\r\n--boundary--\r\n";
+
+    await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: {
+          provider: "google",
+          url: "https://api.google.com/upload/drive/v3/files",
+          method: "POST",
+          headers: { "Content-Type": "multipart/related; boundary=boundary" },
+          parsed_data: multipart,
+        },
+      }),
+    );
+
+    expect(mockResolveRequests).toHaveLength(1);
+    const req = mockResolveRequests[0] as {
+      body: unknown;
+      headers: Record<string, string>;
+    };
+    expect(req.body).toBe(multipart);
+    expect(req.headers["Content-Type"]).toBe(
+      "multipart/related; boundary=boundary",
+    );
+  });
+
+  test("keeps a raw data string raw under a non-JSON Content-Type", async () => {
+    await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: {
+          provider: "google",
+          url: "https://api.google.com/upload/drive/v3/files",
+          method: "POST",
+          headers: { "content-type": "text/csv" },
+          data: '{"looks":"like json"}',
+        },
+      }),
+    );
+
+    const req = mockResolveRequests[0] as { body: unknown };
+    expect(req.body).toBe('{"looks":"like json"}');
+  });
+
+  test("parses a raw data string as JSON under a JSON Content-Type", async () => {
+    await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: {
+          provider: "google",
+          url: "https://api.google.com/v1/sheets",
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          data: '{"title":"Sheet"}',
+        },
+      }),
+    );
+
+    const req = mockResolveRequests[0] as { body: unknown };
+    expect(req.body).toEqual({ title: "Sheet" });
+  });
+
+  test("decodes a base64 request body into a Buffer", async () => {
+    const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00]);
+
+    await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: {
+          provider: "google",
+          url: "https://api.google.com/upload/drive/v3/files",
+          method: "POST",
+          headers: { "Content-Type": "application/pdf" },
+          parsed_data: binary.toString("base64"),
+          body_encoding: "base64",
+        },
+      }),
+    );
+
+    const req = mockResolveRequests[0] as { body: unknown };
+    expect(Buffer.isBuffer(req.body)).toBe(true);
+    expect(Buffer.from(req.body as Uint8Array).equals(binary)).toBe(true);
+  });
+
+  test("base64-encodes binary response bodies for the JSON envelope", async () => {
+    const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00]);
+    mockResolveResponse = {
+      status: 200,
+      headers: { "content-type": "application/octet-stream" },
+      body: binary,
+    };
+    const result = (await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: {
+          provider: "google",
+          url: "https://api.google.com/drive/v3/files/file-123?alt=media",
+        },
+      }),
+    )) as {
+      ok: boolean;
+      status: number;
+      body: unknown;
+      bodyEncoding?: string;
+    };
+    expect(result.ok).toBe(true);
+    expect(result.body).toBe(binary.toString("base64"));
+    expect(result.bodyEncoding).toBe("base64");
+    expect(Buffer.from(String(result.body), "base64").equals(binary)).toBe(
+      true,
+    );
+  });
+
+  test("rejects absolute URL host outside provider base host when no injection templates exist", async () => {
+    await expect(
+      getRoute("POST", "oauth/request").handler(
+        makeArgs({
+          body: { provider: "google", url: "https://attacker.example/v1/me" },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+    expect(mockResolveRequests).toHaveLength(0);
+  });
+
+  test("rejects protocol downgrade for absolute OAuth request URLs", async () => {
+    await expect(
+      getRoute("POST", "oauth/request").handler(
+        makeArgs({
+          body: { provider: "google", url: "http://api.google.com/v1/me" },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+    expect(mockResolveRequests).toHaveLength(0);
+  });
+
+  test("rejects absolute URL host outside provider injection templates", async () => {
+    mockProviders.slack_channel = {
+      ...baseProvider,
+      provider: "slack_channel",
+      managedServiceConfigKey: null,
+      baseUrl: "https://slack.com/api",
+      injectionTemplates: JSON.stringify([
+        {
+          hostPattern: "slack.com",
+          injectionType: "header",
+          headerName: "Authorization",
+          valuePrefix: "Bearer ",
+        },
+      ]),
+    };
+
+    await expect(
+      getRoute("POST", "oauth/request").handler(
+        makeArgs({
+          body: {
+            provider: "slack_channel",
+            url: "https://attacker.example/api/auth.test",
+          },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+    expect(mockResolveRequests).toHaveLength(0);
+  });
+
+  test("allows absolute URL host matching provider injection templates", async () => {
+    mockProviders.slack_channel = {
+      ...baseProvider,
+      provider: "slack_channel",
+      managedServiceConfigKey: null,
+      baseUrl: "https://slack.com/api",
+      injectionTemplates: JSON.stringify([
+        {
+          hostPattern: "slack.com",
+          injectionType: "header",
+          headerName: "Authorization",
+          valuePrefix: "Bearer ",
+        },
+      ]),
+    };
+
+    await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: {
+          provider: "slack_channel",
+          url: "https://slack.com/api/auth.test?team=T123",
+        },
+      }),
+    );
+
+    expect(mockResolveRequests).toEqual([
+      {
+        method: "GET",
+        path: "/api/auth.test",
+        query: { team: "T123" },
+        baseUrl: "https://slack.com",
+      },
+    ]);
+  });
+
+  /** The provider row exactly as seeding writes it, so the seed data is what the guard reads. */
+  function seededProvider(provider: keyof typeof PROVIDER_SEED_DATA) {
+    const seed = PROVIDER_SEED_DATA[provider];
+    return {
+      ...baseProvider,
+      provider,
+      managedServiceConfigKey: null,
+      baseUrl: seed.baseUrl ?? null,
+      injectionTemplates: JSON.stringify(seed.injectionTemplates),
+      responseOkField: seed.responseOkField ?? null,
+    };
+  }
+
+  test("admits a Slack file URL on both seeded Slack providers", async () => {
+    // Each Slack credential reads messages, and a file shared in a message is
+    // fetched from its `url_private_download` on files.slack.com with the
+    // same token.
+    for (const provider of ["slack", "slack_channel"] as const) {
+      mockProviders[provider] = seededProvider(provider);
+      mockResolveRequests = [];
+
+      await getRoute("POST", "oauth/request").handler(
+        makeArgs({
+          body: {
+            provider,
+            url: "https://files.slack.com/files-pri/T0123-F0456/download/shot.png",
+          },
+        }),
+      );
+
+      expect(mockResolveRequests).toEqual([
+        {
+          method: "GET",
+          path: "/files-pri/T0123-F0456/download/shot.png",
+          baseUrl: "https://files.slack.com",
+        },
+      ]);
+    }
+  });
+
+  test("the seeded Slack host policy admits nothing beyond the documented hosts", async () => {
+    mockProviders.slack_channel = seededProvider("slack_channel");
+
+    // A lookalike, an unrelated host, and the CDN host Slack redirects file
+    // downloads to: the guard sees only the URL the caller names, and that
+    // URL is the documented file host or nothing.
+    for (const url of [
+      "https://files.slack.com.attacker.example/files-pri/T0123-F0456/x.png",
+      "https://attacker.example/files-pri/T0123-F0456/x.png",
+      "https://files-origin.slack.com/files-pri/T0123-F0456/x.png",
+    ]) {
+      await expect(
+        getRoute("POST", "oauth/request").handler(
+          makeArgs({ body: { provider: "slack_channel", url } }),
+        ),
+      ).rejects.toBeInstanceOf(BadRequestError);
+    }
+    expect(mockResolveRequests).toHaveLength(0);
+  });
+
+  test("names the required scopes a stored grant lacks on the request itself", async () => {
+    // A connection made before a scope was required keeps working for every
+    // call that does not need it, so the caller must be told on the request,
+    // not only by the next health check.
+    const seed = PROVIDER_SEED_DATA.slack;
+    mockProviders.slack = {
+      ...seededProvider("slack"),
+      defaultScopes: JSON.stringify(seed.defaultScopes),
+      authorizeParams: JSON.stringify(seed.authorizeParams),
+      scopeSeparator: " ",
+    };
+    const grantedBeforeFilesRead = seed
+      .authorizeParams!.user_scope.split(",")
+      .filter((scope) => scope !== "files:read");
+    mockAllConnections.slack = [
+      {
+        id: "conn-1",
+        provider: "slack",
+        grantedScopes: JSON.stringify(grantedBeforeFilesRead),
+      },
+    ];
+
+    const stale = (await getRoute("POST", "oauth/request").handler(
+      makeArgs({ body: { provider: "slack", url: "/conversations.history" } }),
+    )) as { ok: boolean; hint?: string };
+
+    expect(stale.ok).toBe(true);
+    expect(stale.hint).toContain("files:read");
+    expect(stale.hint).toContain("oauth connect slack");
+
+    mockAllConnections.slack = [
+      {
+        id: "conn-1",
+        provider: "slack",
+        grantedScopes: JSON.stringify(
+          seed.authorizeParams!.user_scope.split(","),
+        ),
+      },
+    ];
+    const current = (await getRoute("POST", "oauth/request").handler(
+      makeArgs({ body: { provider: "slack", url: "/conversations.history" } }),
+    )) as { hint?: string };
+    expect(current.hint).toBeUndefined();
+  });
+
+  test("allows cross-host absolute URLs declared by provider injection templates", async () => {
+    mockProviders.google = {
+      ...baseProvider,
+      baseUrl: "https://gmail.googleapis.com/gmail/v1/users/me",
+      injectionTemplates: JSON.stringify([
+        {
+          hostPattern: "gmail.googleapis.com",
+          injectionType: "header",
+          headerName: "Authorization",
+          valuePrefix: "Bearer ",
+        },
+        {
+          hostPattern: "www.googleapis.com",
+          injectionType: "header",
+          headerName: "Authorization",
+          valuePrefix: "Bearer ",
+        },
+      ]),
+    };
+
+    await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: {
+          provider: "google",
+          url: "https://www.googleapis.com/calendar/v3/calendars",
+        },
+      }),
+    );
+
+    expect(mockResolveRequests).toEqual([
+      {
+        method: "GET",
+        path: "/calendar/v3/calendars",
+        baseUrl: "https://www.googleapis.com",
+      },
+    ]);
+  });
+
+  test("rejects unregistered client_id in BYO mode", async () => {
+    // No entry in mockApps for google:client-x
+    await expect(
+      getRoute("POST", "oauth/request").handler(
+        makeArgs({
+          body: {
+            provider: "google",
+            url: "https://api.google.com/v1/me",
+            client_id: "client-x",
+          },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  // Slack documents that every Web API response carries a top-level boolean
+  // `ok`, false on failure, under a successful status. The provider row
+  // declares that field, and the door reads it, so a refused call is not
+  // reported as a success to the caller.
+  test("a 2xx whose body reports failure in the provider's declared ok field is not ok", async () => {
+    mockProviders.slack_channel = seededProvider("slack_channel");
+    mockResolveResponse = {
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: { ok: false, error: "not_in_channel" },
+    };
+    const result = (await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: {
+          provider: "slack_channel",
+          url: "/chat.postMessage",
+          parsed_data: { channel: "C1", text: "digest" },
+        },
+      }),
+    )) as { ok: boolean; status: number; body: unknown; hint?: string };
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ ok: false, error: "not_in_channel" });
+    expect(result.hint).toContain("ok: false");
+  });
+
+  test("a body without the declared ok field leaves the status as the verdict", async () => {
+    // A file download from the same credential answers with bytes, not the
+    // envelope, and must not read as a refusal.
+    mockProviders.slack_channel = seededProvider("slack_channel");
+    mockResolveResponse = {
+      status: 200,
+      headers: { "content-type": "image/png" },
+      body: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    };
+    const result = (await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: {
+          provider: "slack_channel",
+          url: "https://files.slack.com/files-pri/T0123-F0456/download/shot.png",
+        },
+      }),
+    )) as { ok: boolean; hint?: string };
+    expect(result.ok).toBe(true);
+    expect(result.hint).toBeUndefined();
+  });
+
+  test("a provider that declares no ok field is judged by status alone", async () => {
+    mockResolveResponse = {
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: { ok: false, error: "not_an_envelope" },
+    };
+    const result = (await getRoute("POST", "oauth/request").handler(
+      makeArgs({
+        body: { provider: "google", url: "https://api.google.com/v1/me" },
+      }),
+    )) as { ok: boolean };
+    expect(result.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST oauth/managed-connect/start
+// ---------------------------------------------------------------------------
+
+describe("POST oauth/managed-connect/start", () => {
+  test("returns connect_url on platform 200", async () => {
+    mockFetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ connect_url: "https://app.vellum.ai/connect/abc" }),
+      text: async () => "",
+    });
+    const result = (await getRoute(
+      "POST",
+      "oauth/managed-connect/start",
+    ).handler(
+      makeArgs({ body: { provider: "google", scopes: ["email"] } }),
+    )) as { ok: boolean; connect_url: string };
+    expect(result.connect_url).toBe("https://app.vellum.ai/connect/abc");
+  });
+
+  test("forwards tenant_host to the platform only when one is supplied", async () => {
+    // Shopify's endpoints live on the merchant's host, which the platform
+    // substitutes into its templates; other providers must not see the key.
+    const bodies: Array<Record<string, unknown>> = [];
+    mockFetchImpl = async (_path, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          connect_url: "https://app.vellum.ai/connect/abc",
+        }),
+        text: async () => "",
+      };
+    };
+    await getRoute("POST", "oauth/managed-connect/start").handler(
+      makeArgs({
+        body: { provider: "shopify", tenant_host: " my-store.myshopify.com " },
+      }),
+    );
+    await getRoute("POST", "oauth/managed-connect/start").handler(
+      makeArgs({ body: { provider: "google", tenant_host: "   " } }),
+    );
+    expect(bodies[0]?.tenant_host).toBe("my-store.myshopify.com");
+    expect(bodies[1]).not.toHaveProperty("tenant_host");
+  });
+
+  test("raises InternalError when platform returns 401", async () => {
+    mockFetchImpl = async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({}),
+      text: async () => "unauthorized",
+    });
+    await expect(
+      getRoute("POST", "oauth/managed-connect/start").handler(
+        makeArgs({ body: { provider: "google" } }),
+      ),
+    ).rejects.toBeInstanceOf(InternalError);
+  });
+
+  test("raises InternalError when platform omits connect_url", async () => {
+    mockFetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => "",
+    });
+    await expect(
+      getRoute("POST", "oauth/managed-connect/start").handler(
+        makeArgs({ body: { provider: "google" } }),
+      ),
+    ).rejects.toBeInstanceOf(InternalError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET oauth/managed-connect/poll
+// ---------------------------------------------------------------------------
+
+describe("GET oauth/managed-connect/poll", () => {
+  test("rejects missing provider", async () => {
+    await expect(
+      getRoute("GET", "oauth/managed-connect/poll").handler(
+        makeArgs({ queryParams: {} }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("returns platform connections list", async () => {
+    mockFetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => [
+        {
+          id: "conn-1",
+          account_label: "alice@example.com",
+          scopes_granted: ["email"],
+        },
+      ],
+      text: async () => "",
+    });
+    const result = (await getRoute("GET", "oauth/managed-connect/poll").handler(
+      makeArgs({ queryParams: { provider: "google" } }),
+    )) as {
+      ok: boolean;
+      connections: Array<{
+        id: string;
+        account_label: string | null;
+        scopes_granted: string[];
+        provider_params: Record<string, string>;
+      }>;
+    };
+    expect(result.ok).toBe(true);
+    expect(result.connections).toEqual([
+      {
+        id: "conn-1",
+        account_label: "alice@example.com",
+        scopes_granted: ["email"],
+        provider_params: {},
+      },
+    ]);
+  });
+
+  test("raises BadRequestError when platform unavailable", async () => {
+    platformAvailable = false;
+    await expect(
+      getRoute("GET", "oauth/managed-connect/poll").handler(
+        makeArgs({ queryParams: { provider: "google" } }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("passes through the provider params a connection is scoped by", async () => {
+    // QuickBooks pins the company (realm) the user picked to the connection;
+    // a caller addressing /companyinfo/<realmId> needs it back.
+    mockFetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => [
+        {
+          id: "conn-qb",
+          account_label: "Acme Widgets",
+          scopes_granted: ["com.intuit.quickbooks.accounting"],
+          provider_params: { realm_id: "9130357849012345" },
+        },
+      ],
+      text: async () => "",
+    });
+    const result = (await getRoute("GET", "oauth/managed-connect/poll").handler(
+      makeArgs({ queryParams: { provider: "quickbooks" } }),
+    )) as {
+      connections: Array<{ provider_params: Record<string, string> }>;
+    };
+    expect(result.connections[0]?.provider_params).toEqual({
+      realm_id: "9130357849012345",
+    });
+  });
+});

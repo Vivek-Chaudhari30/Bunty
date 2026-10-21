@@ -1,0 +1,165 @@
+/**
+ * Tests for machineName field in AssistantEventHub client registration.
+ *
+ * Validates:
+ *   - subscribing with machineName set results in listClients() returning the name
+ *   - subscribing without machineName results in listClients() returning undefined
+ */
+import { describe, expect, test } from "bun:test";
+
+import { initializeDb } from "../persistence/db-init.js";
+import { AssistantEventHub } from "../runtime/assistant-event-hub.js";
+import { handleSubscribeAssistantEvents } from "../runtime/routes/events-routes.js";
+
+await initializeDb();
+
+describe("AssistantEventHub — machineName", () => {
+  test("subscribing with machineName returns it from listClients()", () => {
+    const ac = new AbortController();
+    const hub = new AssistantEventHub();
+
+    handleSubscribeAssistantEvents(
+      {
+        headers: {
+          "x-vellum-client-id": "client-with-name-001",
+          "x-vellum-interface-id": "macos",
+          "x-vellum-machine-name": "alice-mbp.local",
+        },
+        abortSignal: ac.signal,
+      },
+      { hub },
+    );
+
+    const clients = hub.listClients();
+    const entry = clients.find((c) => c.clientId === "client-with-name-001");
+    expect(entry).toBeDefined();
+    expect(entry?.machineName).toBe("alice-mbp.local");
+
+    ac.abort();
+  });
+
+  test("subscribing without machineName returns undefined from listClients()", () => {
+    const ac = new AbortController();
+    const hub = new AssistantEventHub();
+
+    handleSubscribeAssistantEvents(
+      {
+        headers: {
+          "x-vellum-client-id": "client-without-name-001",
+          "x-vellum-interface-id": "macos",
+        },
+        abortSignal: ac.signal,
+      },
+      { hub },
+    );
+
+    const clients = hub.listClients();
+    const entry = clients.find((c) => c.clientId === "client-without-name-001");
+    expect(entry).toBeDefined();
+    expect(entry?.machineName).toBeUndefined();
+
+    ac.abort();
+  });
+
+  test("machineName is trimmed when set", () => {
+    const ac = new AbortController();
+    const hub = new AssistantEventHub();
+
+    handleSubscribeAssistantEvents(
+      {
+        headers: {
+          "x-vellum-client-id": "client-with-trimmed-name-001",
+          "x-vellum-interface-id": "macos",
+          "x-vellum-machine-name": "  bob-mbp.local  ",
+        },
+        abortSignal: ac.signal,
+      },
+      { hub },
+    );
+
+    const clients = hub.listClients();
+    const entry = clients.find(
+      (c) => c.clientId === "client-with-trimmed-name-001",
+    );
+    expect(entry).toBeDefined();
+    expect(entry?.machineName).toBe("bob-mbp.local");
+
+    ac.abort();
+  });
+
+  test("direct hub subscribe with machineName returns it from listClients()", () => {
+    const hub = new AssistantEventHub();
+
+    hub.subscribe({
+      type: "client",
+      clientId: "direct-client-001",
+      interfaceId: "macos",
+      capabilities: ["host_bash"],
+      machineName: "charlie-mbp.local",
+      callback: () => {},
+    });
+
+    const clients = hub.listClients();
+    const entry = clients.find((c) => c.clientId === "direct-client-001");
+    expect(entry).toBeDefined();
+    expect(entry?.machineName).toBe("charlie-mbp.local");
+  });
+
+  test("direct hub subscribe without machineName returns undefined from listClients()", () => {
+    const hub = new AssistantEventHub();
+
+    hub.subscribe({
+      type: "client",
+      clientId: "direct-client-no-name-001",
+      interfaceId: "macos",
+      capabilities: ["host_bash"],
+      callback: () => {},
+    });
+
+    const clients = hub.listClients();
+    const entry = clients.find(
+      (c) => c.clientId === "direct-client-no-name-001",
+    );
+    expect(entry).toBeDefined();
+    expect(entry?.machineName).toBeUndefined();
+  });
+});
+
+describe.each([
+  ["x-vellum-cu-window-capture", "host_cu_window_capture"],
+  ["x-vellum-cu-sequence", "host_cu_sequence"],
+] as const)("%s negotiation", (header, capability) => {
+  test.each([
+    ["macos", undefined, false],
+    ["macos", "0", false],
+    ["macos", "unknown", false],
+    ["macos", "1", true],
+    ["windows", "1", false],
+    ["linux", "1", false],
+    ["chrome-extension", "1", false],
+  ] as const)(
+    "%s advertising %s negotiates support=%s",
+    (interfaceId, advertised, supported) => {
+      const ac = new AbortController();
+      const hub = new AssistantEventHub();
+      try {
+        handleSubscribeAssistantEvents(
+          {
+            headers: {
+              "x-vellum-client-id": "client-1",
+              "x-vellum-interface-id": interfaceId,
+              ...(advertised ? { [header]: advertised } : {}),
+            },
+            abortSignal: ac.signal,
+          },
+          { hub },
+        );
+        expect(
+          hub.getClientById("client-1")?.capabilities.includes(capability),
+        ).toBe(supported);
+      } finally {
+        ac.abort();
+      }
+    },
+  );
+});

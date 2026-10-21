@@ -1,0 +1,295 @@
+/**
+ * Shared image→text substitution for the image-fallback plugin's hooks.
+ *
+ * Three hooks replace `image` content blocks with a text caption when the
+ * turn's model can't process images: `user-prompt-submit` sweeps the turn's
+ * history at turn start, `post-tool-use` handles images a tool returns (e.g. a
+ * browser screenshot) as they arrive, and `post-compact` re-sweeps the rebuilt
+ * history after a mid-turn compaction. This module holds what they share —
+ * deciding whether a profile needs the fallback ({@link needsImageFallback}),
+ * the per-block substitution ({@link captionImageBlocks}): persist the
+ * original image to a known location, caption it via a vision-capable
+ * profile, and swap in a `[Image …]` text block — and the message-level deep
+ * sweep ({@link captionImagesInMessages}) that reaches images nested inside
+ * `tool_result` blocks as well as top-level ones. The message-level sweeps
+ * close by merging text-only user content into a single text block
+ * ({@link flattenTextOnlyBlocks}), the shape providers serialize as a plain
+ * string.
+ *
+ * The substitution mutates the blocks in place, but the hook pipeline hands
+ * each hook a deep clone of its context, so the caption reaches only the
+ * provider-bound history — persisted rows keep the raw image (clients render
+ * it). Rebuild-from-persistence paths therefore re-surface raw images, which
+ * is why the sweeps re-run per turn and per compaction; the caption cache
+ * makes re-encounters lookup-only.
+ *
+ * The caption text states up front that the model can't view images and the
+ * image was auto-described to text, so the model treats the block as a derived
+ * description rather than a verbatim transcript.
+ *
+ * Fail-open is the dominant error mode: a captioning failure or timeout
+ * leaves a placeholder text block rather than the raw image (which a
+ * text-only provider would reject) or nothing (which would lose information).
+ * A vision-request timeout uses a distinct placeholder so the model can tell
+ * the user to try a different vision-capable model.
+ */
+
+import {
+  type ContentBlock,
+  doesSupportVision,
+  getModelProfiles,
+  type ImageContent,
+  type Message,
+  type PluginLogger,
+  resolveMediaSourceData,
+  retainedToolResultMediaKeysBeforeCap,
+} from "@vellumai/plugin-api";
+
+import { persistImage } from "./image-persist.js";
+import {
+  captionImage,
+  type CaptionResult,
+  visionProfileLabel,
+} from "./vision-caption.js";
+
+/**
+ * Prompt text substituted for an image block after captioning. A timeout
+ * names the vision model that timed out so the turn can continue and the
+ * model can tell the user to try a different one.
+ */
+function captionPromptText(
+  result: CaptionResult,
+  visionProfileKey: string,
+): string {
+  if (result.status === "caption") {
+    return `[Image auto-described for text-only model: ${result.text}]`;
+  }
+  if (result.status === "timeout") {
+    const label = visionProfileLabel(visionProfileKey);
+    return `[Image: the vision model "${label}" timed out reading it. Consider using a different vision-capable model.]`;
+  }
+  return `[Image: auto-description failed (text-only model)]`;
+}
+
+/**
+ * Whether the profile a turn runs needs image→text fallback (i.e. it can't
+ * process images itself).
+ *
+ * Used by `user-prompt-submit`, whose context carries the effective profile
+ * identity. Profileless configs use the resolved model id, which
+ * `doesSupportVision` can check directly.
+ */
+export function needsImageFallback(modelProfileKey: string): boolean {
+  const profiles = getModelProfiles();
+  const profile = profiles.find((p) => p.key === modelProfileKey);
+  if (profile == null) {
+    return !doesSupportVision(modelProfileKey);
+  }
+  return !doesSupportVision(profile);
+}
+
+/**
+ * Replace every `image` block in `blocks` (in place) with a text caption so a
+ * text-only model can still reason about the image's content.
+ *
+ * @param blocks            Content-block array to scan and mutate in place.
+ * @param conversationId    Conversation the blocks belong to, recorded on the
+ *                          caption-cache rows so `conversation-deleted`
+ *                          cleanup stays accurate.
+ * @param visionProfileKey  Key of a vision-capable profile for captioning, or
+ *                          `null` when none is configured (fail-open
+ *                          placeholder).
+ * @param logger            Turn-scoped logger for attribution.
+ */
+export async function captionImageBlocks(
+  blocks: ContentBlock[],
+  conversationId: string,
+  visionProfileKey: string | null,
+  logger: PluginLogger,
+): Promise<number> {
+  let replaced = 0;
+
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    if (block.type !== "image") {
+      continue;
+    }
+
+    replaced++;
+    const image = block as ImageContent;
+
+    // Persist the original to a known, content-hash-deduped location so it
+    // survives the text substitution and stays findable on disk. Resolve a
+    // reference source to its bytes first (a no-op for inline base64).
+    const resolvedForPersist = resolveMediaSourceData(image.source);
+    if (resolvedForPersist) {
+      persistImage(resolvedForPersist.data, resolvedForPersist.media_type);
+    }
+
+    if (visionProfileKey != null) {
+      const result = await captionImage(
+        image,
+        conversationId,
+        visionProfileKey,
+        logger,
+      );
+      blocks[i] = {
+        type: "text",
+        text: captionPromptText(result, visionProfileKey),
+      };
+    } else {
+      // No vision profile configured at all: fail-open placeholder.
+      blocks[i] = {
+        type: "text",
+        text: `[Image: no vision-capable model configured to describe it]`,
+      };
+    }
+  }
+
+  return replaced;
+}
+
+/**
+ * Replace image blocks nested in a message's `tool_result` blocks' rich
+ * `contentBlocks` (in place) with text captions.
+ */
+async function captionToolResultMedia(
+  message: Message,
+  isRetained: (blockIndex: number) => boolean,
+  conversationId: string,
+  visionProfileKey: string | null,
+  logger: PluginLogger,
+): Promise<number> {
+  let replaced = 0;
+  for (let i = 0; i < message.content.length; i++) {
+    const block = message.content[i];
+    if (
+      block.type === "tool_result" &&
+      block.contentBlocks != null &&
+      isRetained(i)
+    ) {
+      replaced += await captionImageBlocks(
+        block.contentBlocks,
+        conversationId,
+        visionProfileKey,
+        logger,
+      );
+    }
+  }
+  return replaced;
+}
+
+/**
+ * Merge a user message's text blocks (in place) into a single text block,
+ * joined by a blank line, for every message whose content is more than one
+ * block and entirely text. Returns how many messages were merged.
+ *
+ * A text-only turn's user content is text after image substitution, and a
+ * single text block is the shape providers serialize as a plain string:
+ * OpenAI-compatible endpoints that accept only `messages[].content` as a
+ * string (rejecting an array of content parts with
+ * `body/messages/N/content must be string`) can then take the turn, and the
+ * request costs fewer tokens than the equivalent array of parts. The blank
+ * line keeps the boundaries between the blocks a user message carries (the
+ * turn's runtime-injected context blocks plus the user's own text) legible.
+ *
+ * Content holding any non-text block (audio, tool results, an image no
+ * fallback replaced) keeps its array shape, since merging would drop it.
+ */
+export function flattenTextOnlyBlocks(messages: Message[]): number {
+  let flattened = 0;
+  for (const message of messages) {
+    if (message.role !== "user" || message.content.length <= 1) {
+      continue;
+    }
+    if (!message.content.every((block) => block.type === "text")) {
+      continue;
+    }
+    const text = message.content
+      .map((block) => (block.type === "text" ? block.text : ""))
+      .join("\n\n");
+    message.content = [{ type: "text", text }];
+    flattened++;
+  }
+  return flattened;
+}
+
+/**
+ * Deep-sweep a message list (in place) for image blocks and replace each with
+ * a text caption via {@link captionImageBlocks}. Covers both top-level image
+ * blocks (user-attached images, the compactor's retained-image message) and
+ * images nested in a `tool_result` block's rich `contentBlocks` (tool results
+ * restored from persistence carry their raw images there).
+ *
+ * Text-only user content is then merged via {@link flattenTextOnlyBlocks}.
+ */
+export async function captionImagesInMessages(
+  messages: Message[],
+  conversationId: string,
+  visionProfileKey: string | null,
+  logger: PluginLogger,
+): Promise<number> {
+  let replaced = 0;
+  for (const message of messages) {
+    replaced += await captionImageBlocks(
+      message.content,
+      conversationId,
+      visionProfileKey,
+      logger,
+    );
+    replaced += await captionToolResultMedia(
+      message,
+      () => true,
+      conversationId,
+      visionProfileKey,
+      logger,
+    );
+  }
+  flattenTextOnlyBlocks(messages);
+  return replaced;
+}
+
+/**
+ * Caption the image blocks a rejected model call, or its retry, can carry
+ * after the host's outbound media retention: every top-level image block (the
+ * user's attachments, which the policy keeps until its payload cap retires
+ * them) plus the tool_result media the retention policy keeps before its
+ * payload cap ({@link retainedToolResultMediaKeysBeforeCap}: the current
+ * step's screenshots and every file read). Stale screenshots are left raw so
+ * the retry replaces them with the compact removed-media marker rather than a
+ * full caption.
+ *
+ * Attachments and file reads the cap had thinned from the rejected request
+ * are captioned too, not left for the marker: captioning removes media bytes
+ * from history, the retry recomputes the cap over the lighter history, and
+ * media it had evicted comes back into the request as raw images, which the
+ * text-only provider rejects again with the one-shot recovery already spent.
+ *
+ * Text-only user content is then merged via {@link flattenTextOnlyBlocks}.
+ */
+export async function captionOutboundImagesInMessages(
+  messages: Message[],
+  conversationId: string,
+  visionProfileKey: string | null,
+  logger: PluginLogger,
+): Promise<number> {
+  const retained = retainedToolResultMediaKeysBeforeCap(messages);
+  let replaced = 0;
+  for (let i = 0; i < messages.length; i++) {
+    replaced += await captionImageBlocks(
+      messages[i].content,
+      conversationId,
+      visionProfileKey,
+      logger,
+    );
+    replaced += await captionToolResultMedia(
+      messages[i],
+      (blockIndex) => retained.has(`${i}:${blockIndex}`),
+      conversationId,
+      visionProfileKey,
+      logger,
+    );
+  }
+  flattenTextOnlyBlocks(messages);
+  return replaced;
+}

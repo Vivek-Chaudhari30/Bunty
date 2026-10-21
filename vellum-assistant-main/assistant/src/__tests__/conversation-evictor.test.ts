@@ -1,0 +1,382 @@
+import { beforeEach, describe, expect, mock, test } from "bun:test";
+
+// The evictor's onEvict/shouldProtect methods consult the subagent manager.
+// Stub it so eviction tests run without a real manager: no protected children
+// by default, and abortAllForParent records the conversations it was called for.
+const abortedParents: string[] = [];
+mock.module("../subagent/index.js", () => ({
+  getSubagentManager: () => ({
+    abortAllForParent: (id: string) => abortedParents.push(id),
+  }),
+}));
+
+import {
+  ConversationEvictor,
+  defaultMemoryThresholdBytes,
+  type EvictableConversation,
+} from "../daemon/conversation-evictor.js";
+
+function createMockSession(
+  processing = false,
+  queued = false,
+): EvictableConversation & { disposed: boolean } {
+  return {
+    disposed: false,
+    hasInFlightWork() {
+      return processing || queued;
+    },
+    dispose() {
+      this.disposed = true;
+    },
+  };
+}
+
+describe("ConversationEvictor", () => {
+  let sessions: Map<string, EvictableConversation & { disposed: boolean }>;
+  let evictor: ConversationEvictor;
+
+  beforeEach(() => {
+    abortedParents.length = 0;
+    sessions = new Map();
+    evictor = new ConversationEvictor(
+      sessions as Map<string, EvictableConversation>,
+      {
+        ttlMs: 1000,
+        maxConversations: 3,
+        memoryThresholdBytes: Number.MAX_SAFE_INTEGER, // disable memory pressure for most tests
+        sweepIntervalMs: 60_000,
+      },
+    );
+  });
+
+  describe("TTL eviction", () => {
+    test("evicts sessions that have exceeded TTL", () => {
+      const s1 = createMockSession();
+      const s2 = createMockSession();
+      sessions.set("a", s1);
+      sessions.set("b", s2);
+
+      // Touch both, then backdate one beyond TTL
+      evictor.touch("a");
+      evictor.touch("b");
+
+      // Simulate time passing — set last access to 2 seconds ago (TTL is 1s)
+      (
+        evictor as unknown as { lastAccess: Map<string, number> }
+      ).lastAccess.set("a", Date.now() - 2000);
+
+      const result = evictor.sweep();
+
+      expect(result.ttlEvicted).toBe(1);
+      expect(sessions.has("a")).toBe(false);
+      expect(sessions.has("b")).toBe(true);
+      expect(s1.disposed).toBe(true);
+      expect(s2.disposed).toBe(false);
+    });
+
+    test("evicts sessions that were never touched (lastAccess = 0)", () => {
+      const s1 = createMockSession();
+      sessions.set("a", s1);
+      // Never call evictor.touch('a')
+
+      const result = evictor.sweep();
+
+      expect(result.ttlEvicted).toBe(1);
+      expect(sessions.has("a")).toBe(false);
+      expect(s1.disposed).toBe(true);
+    });
+
+    test("skips processing sessions", () => {
+      const s1 = createMockSession(true); // processing
+      sessions.set("a", s1);
+
+      const result = evictor.sweep();
+
+      expect(result.ttlEvicted).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(sessions.has("a")).toBe(true);
+      expect(s1.disposed).toBe(false);
+    });
+
+    test("skips sessions with queued messages even when not processing", () => {
+      // Models the gap between a turn's `finally` and the async queue-drain
+      // dispatch: isProcessing() is false but a queued turn (e.g. a subagent
+      // completion wake) is still pending.
+      const s1 = createMockSession(false, true);
+      sessions.set("a", s1);
+
+      const result = evictor.sweep();
+
+      expect(result.ttlEvicted).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(sessions.has("a")).toBe(true);
+      expect(s1.disposed).toBe(false);
+    });
+
+    test("skips conversations with resident mode-session work", () => {
+      const session = createMockSession();
+      session.hasInFlightWork = () => true;
+      sessions.set("mode-active", session);
+
+      const result = evictor.sweep();
+
+      expect(result.ttlEvicted).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(sessions.has("mode-active")).toBe(true);
+      expect(session.disposed).toBe(false);
+    });
+  });
+
+  describe("LRU eviction", () => {
+    test("evicts least-recently-used conversations when over maxConversations", () => {
+      // maxConversations = 3, add 5 sessions
+      const allSessions: Array<EvictableConversation & { disposed: boolean }> =
+        [];
+      for (let i = 0; i < 5; i++) {
+        const s = createMockSession();
+        sessions.set(`s${i}`, s);
+        allSessions.push(s);
+        evictor.touch(`s${i}`);
+      }
+
+      // Make s0 and s1 the oldest, keep s2-s4 fresh
+      const now = Date.now();
+      const lastAccess = (
+        evictor as unknown as { lastAccess: Map<string, number> }
+      ).lastAccess;
+      lastAccess.set("s0", now - 100); // oldest
+      lastAccess.set("s1", now - 90); // second oldest
+      // s2, s3, s4 remain at ~now (within TTL)
+
+      const result = evictor.sweep();
+
+      expect(result.lruEvicted).toBe(2); // need to remove 2 to get from 5 to 3
+      expect(sessions.size).toBe(3);
+      expect(sessions.has("s0")).toBe(false);
+      expect(sessions.has("s1")).toBe(false);
+      expect(sessions.has("s2")).toBe(true);
+      expect(sessions.has("s3")).toBe(true);
+      expect(sessions.has("s4")).toBe(true);
+    });
+
+    test("skips sessions with queued messages during LRU eviction", () => {
+      // maxConversations = 3, add 4 sessions; the LRU one has a queued turn.
+      const s0 = createMockSession(false, true); // queued — should not be evicted
+      const s1 = createMockSession();
+      const s2 = createMockSession();
+      const s3 = createMockSession();
+      sessions.set("s0", s0);
+      sessions.set("s1", s1);
+      sessions.set("s2", s2);
+      sessions.set("s3", s3);
+
+      const now = Date.now();
+      const lastAccess = (
+        evictor as unknown as { lastAccess: Map<string, number> }
+      ).lastAccess;
+      lastAccess.set("s0", now - 50); // old but has queued messages
+      lastAccess.set("s1", now - 40);
+      lastAccess.set("s2", now);
+      lastAccess.set("s3", now);
+
+      const result = evictor.sweep();
+
+      // s1 is the LRU evictable session, gets evicted
+      expect(result.lruEvicted).toBe(1);
+      expect(sessions.has("s0")).toBe(true); // kept: queued messages
+      expect(sessions.has("s1")).toBe(false); // evicted: LRU
+      expect(s0.disposed).toBe(false);
+      expect(s1.disposed).toBe(true);
+    });
+
+    test("skips processing sessions during LRU eviction", () => {
+      // maxConversations = 3, add 4 sessions, one processing
+      const s0 = createMockSession(true); // processing — should not be evicted
+      const s1 = createMockSession();
+      const s2 = createMockSession();
+      const s3 = createMockSession();
+      sessions.set("s0", s0);
+      sessions.set("s1", s1);
+      sessions.set("s2", s2);
+      sessions.set("s3", s3);
+
+      const now = Date.now();
+      const lastAccess = (
+        evictor as unknown as { lastAccess: Map<string, number> }
+      ).lastAccess;
+      lastAccess.set("s0", now - 50); // old but processing
+      lastAccess.set("s1", now - 40);
+      lastAccess.set("s2", now);
+      lastAccess.set("s3", now);
+
+      const result = evictor.sweep();
+
+      // s1 is the LRU non-processing session, gets evicted
+      expect(result.lruEvicted).toBe(1);
+      expect(sessions.has("s0")).toBe(true); // kept: processing
+      expect(sessions.has("s1")).toBe(false); // evicted: LRU
+      expect(s0.disposed).toBe(false);
+      expect(s1.disposed).toBe(true);
+    });
+
+    test("skips resident mode-session work during LRU eviction", () => {
+      const protectedSession = createMockSession();
+      protectedSession.hasInFlightWork = () => true;
+      const evictable = createMockSession();
+      const fresh1 = createMockSession();
+      const fresh2 = createMockSession();
+      sessions.set("mode-active", protectedSession);
+      sessions.set("evictable", evictable);
+      sessions.set("fresh-1", fresh1);
+      sessions.set("fresh-2", fresh2);
+
+      const lastAccess = (
+        evictor as unknown as { lastAccess: Map<string, number> }
+      ).lastAccess;
+      const now = Date.now();
+      lastAccess.set("mode-active", now - 50);
+      lastAccess.set("evictable", now - 40);
+      lastAccess.set("fresh-1", now);
+      lastAccess.set("fresh-2", now);
+
+      const result = evictor.sweep();
+
+      expect(result.lruEvicted).toBe(1);
+      expect(sessions.has("mode-active")).toBe(true);
+      expect(sessions.has("evictable")).toBe(false);
+      expect(protectedSession.disposed).toBe(false);
+    });
+  });
+
+  describe("memory-pressure eviction", () => {
+    test("keeps resident mode-session work while evicting idle conversations", () => {
+      const resident = createMockSession();
+      resident.hasInFlightWork = () => true;
+      const idle = createMockSession();
+      sessions.set("mode-active", resident);
+      sessions.set("idle", idle);
+      evictor = new ConversationEvictor(sessions, {
+        ttlMs: Number.MAX_SAFE_INTEGER,
+        maxConversations: Number.MAX_SAFE_INTEGER,
+        memoryThresholdBytes: 0,
+      });
+
+      const result = evictor.sweep();
+
+      expect(result.memoryEvicted).toBe(1);
+      expect(sessions.has("mode-active")).toBe(true);
+      expect(sessions.has("idle")).toBe(false);
+      expect(resident.disposed).toBe(false);
+      expect(idle.disposed).toBe(true);
+    });
+
+    test("evicts a bounded batch per sweep, least recently used first", () => {
+      for (let i = 0; i < 15; i++) {
+        sessions.set(`conv-${i}`, createMockSession());
+      }
+      evictor = new ConversationEvictor(sessions, {
+        ttlMs: Number.MAX_SAFE_INTEGER,
+        maxConversations: Number.MAX_SAFE_INTEGER,
+        memoryThresholdBytes: 0,
+      });
+      for (let i = 0; i < 15; i++) {
+        evictor.touch(`conv-${i}`);
+      }
+
+      expect(evictor.sweep().memoryEvicted).toBe(10);
+      expect(sessions.has("conv-0")).toBe(false);
+      expect(sessions.has("conv-10")).toBe(true);
+      expect(evictor.sweep().memoryEvicted).toBe(5);
+      expect(sessions.size).toBe(0);
+    });
+
+    test("derives the threshold from the container limit at first sweep, not construction", () => {
+      const previous = process.env.VELLUM_MEMORY_LIMIT;
+      sessions.set("idle", createMockSession());
+      evictor = new ConversationEvictor(sessions, {
+        ttlMs: Number.MAX_SAFE_INTEGER,
+        maxConversations: Number.MAX_SAFE_INTEGER,
+      });
+      // Half of 1 MiB is far below any live RSS, so the phase must fire.
+      process.env.VELLUM_MEMORY_LIMIT = "1Mi";
+      try {
+        expect(evictor.sweep().memoryEvicted).toBe(1);
+      } finally {
+        if (previous === undefined) {
+          delete process.env.VELLUM_MEMORY_LIMIT;
+        } else {
+          process.env.VELLUM_MEMORY_LIMIT = previous;
+        }
+      }
+    });
+  });
+
+  describe("onEvict", () => {
+    test("aborts subagents for each evicted session", () => {
+      const s1 = createMockSession();
+      sessions.set("a", s1);
+      // Never touched, so it will be TTL evicted.
+
+      evictor.sweep();
+
+      expect(abortedParents).toEqual(["a"]);
+    });
+  });
+
+  describe("remove()", () => {
+    test("cleans up tracking for externally removed sessions", () => {
+      const s1 = createMockSession();
+      sessions.set("a", s1);
+      evictor.touch("a");
+
+      expect(evictor.trackedCount).toBe(1);
+
+      evictor.remove("a");
+      expect(evictor.trackedCount).toBe(0);
+    });
+  });
+
+  describe("stale lastAccess cleanup", () => {
+    test("removes lastAccess entries for sessions no longer in the map", () => {
+      const s1 = createMockSession();
+      sessions.set("a", s1);
+      evictor.touch("a");
+      evictor.touch("phantom"); // tracked but no session in map
+
+      expect(evictor.trackedCount).toBe(2);
+
+      // Backdate 'a' so it's evicted by TTL, 'phantom' cleaned by stale check
+      (
+        evictor as unknown as { lastAccess: Map<string, number> }
+      ).lastAccess.set("a", Date.now() - 2000);
+
+      evictor.sweep();
+
+      expect(evictor.trackedCount).toBe(0);
+    });
+  });
+
+  describe("start/stop", () => {
+    test("stop clears tracking state", () => {
+      evictor.touch("a");
+      evictor.touch("b");
+      expect(evictor.trackedCount).toBe(2);
+
+      evictor.stop();
+      expect(evictor.trackedCount).toBe(0);
+    });
+  });
+});
+
+describe("defaultMemoryThresholdBytes", () => {
+  const GIB = 1024 * 1024 * 1024;
+
+  test("is half the container limit", () => {
+    expect(defaultMemoryThresholdBytes(3 * GIB)).toBe(1.5 * GIB);
+    expect(defaultMemoryThresholdBytes(8 * GIB)).toBe(4 * GIB);
+  });
+
+  test("falls back to 3 GiB without a limit", () => {
+    expect(defaultMemoryThresholdBytes(null)).toBe(3 * GIB);
+  });
+});

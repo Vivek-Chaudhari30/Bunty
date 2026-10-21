@@ -1,0 +1,388 @@
+/**
+ * @vellumai/gateway-client
+ *
+ * Shared client package for assistant-to-gateway communication. Provides
+ * HTTP delivery, trust-rule CRUD, and Unix-socket IPC helpers that the
+ * assistant daemon uses to interact with the gateway service.
+ *
+ * This package is intentionally free of imports from `assistant/` or
+ * `gateway/` so both sides can depend on it without circular references.
+ */
+
+export {
+  ChannelDeliveryError,
+  deliverApprovalPrompt,
+  deliverChannelReply,
+} from "./http-delivery.js";
+
+export * from "./gateway-ipc-contracts.js";
+
+export {
+  ipcCall,
+  IpcCallError,
+  IpcConnectError,
+  PersistentIpcClient,
+} from "./ipc-client.js";
+
+// Outbound delivery contract: Zod schemas + derived types
+export {
+  ApprovalActionOptionSchema,
+  ApprovalUIMetadataSchema,
+  AttachmentMetadataSchema,
+  ChannelDeliveryResultSchema,
+  ChannelReplyPayloadSchema,
+  DELIVER_GATEWAY_REPLY_IPC_METHOD,
+  GatewayReplyRequestSchema,
+  MessageAudienceSchema,
+  PermissionRequestDetailsSchema,
+  StreamOpSchema,
+  StreamPlanSchema,
+  StreamPlanStepSchema,
+  SlackStreamTaskSchema,
+} from "./outbound-contract.js";
+
+export type {
+  ApprovalActionOption,
+  ApprovalUIMetadata,
+  AttachmentMetadata,
+  ChannelDeliveryResult,
+  ChannelReplyPayload,
+  GatewayReplyRequest,
+  MessageAudience,
+  PermissionRequestDetails,
+  StreamOp,
+  StreamPlan,
+  StreamPlanStep,
+  SlackStreamTask,
+} from "./outbound-contract.js";
+
+// Inbound contract (gateway → daemon) — Zod schemas + derived types
+export {
+  CommandIntentSchema,
+  RuntimeInboundPayloadSchema,
+  SourceMetadataSchema,
+} from "./inbound-contract.js";
+
+export type {
+  CommandIntent,
+  RuntimeInboundPayload,
+  SourceMetadata,
+} from "./inbound-contract.js";
+
+// IPC, logger, and utility types
+export type { IpcRequest, IpcResponse, Logger } from "./types.js";
+
+export { noopLogger } from "./types.js";
+
+// Admission policy contract (gateway → daemon) — Zod schemas + derived types + channel sets
+export {
+  ADMISSION_FLOOR,
+  ADMISSION_POLICY_DEFAULT,
+  ADMISSION_POLICY_EXEMPT_CHANNELS,
+  ADMISSION_POLICY_HIDDEN_CHANNELS,
+  ADMISSION_POLICY_VALUES,
+  AdmissionPolicySchema,
+  isAdmissionPolicy,
+  isAdmissionPolicyExemptChannel,
+  isAdmissionPolicyHiddenChannel,
+  meetsAdmissionFloor,
+  TRUST_CLASS_RANK,
+} from "./admission-policy-contract.js";
+
+export type { AdmissionPolicy } from "./admission-policy-contract.js";
+
+export {
+  INBOUND_EVENT_KINDS,
+  inboundEventRefersToAnotherMessage,
+  isInboundEventKind,
+  resolveInboundEventKind,
+  resolveInboundReactionPayload,
+} from "./inbound-event-kind.js";
+export type {
+  InboundEventKind,
+  InboundReactionPayload,
+} from "./inbound-event-kind.js";
+
+// Plugin admission-denied notice (gateway → plugin) — canned deny copy + envelope
+export {
+  ACCESS_DENIED_NOT_APPROVED_REPLY,
+  PLUGIN_ADMISSION_DENIED_NOTICE_PATH,
+  PLUGIN_NOTICES_ROUTE_PREFIX,
+  PluginAdmissionDeniedNoticeSchema,
+} from "./plugin-admission-denied-contract.js";
+
+export type { PluginAdmissionDeniedNotice } from "./plugin-admission-denied-contract.js";
+
+// Trust verdict contract (gateway → daemon) — Zod schemas + derived types
+export {
+  isTrustClass,
+  makeResolutionFailedVerdict,
+  makeUnauthenticatedSenderVerdict,
+  ResolveInboundTrustRequestSchema,
+  ResolveInboundTrustResponseSchema,
+  TRUST_CLASS_VALUES,
+  TrustClassSchema,
+  TrustVerdictSchema,
+} from "./trust-verdict-contract.js";
+
+export type {
+  ResolveInboundTrustRequest,
+  ResolveInboundTrustResponse,
+  TrustClass,
+  TrustVerdict,
+} from "./trust-verdict-contract.js";
+
+// Route trust class, applied by both the daemon router and the gateway IPC proxy
+export {
+  DEFAULT_ROUTE_TRUST_CLASSES,
+  isTrustCheckedScopeProfile,
+  routeAdmitsTrustClass,
+  tokenMayReachRoute,
+  TRUST_EXEMPT_SCOPE_PROFILES,
+} from "./route-trust-class.js";
+
+// Invite contract (shared gateway ↔ daemon) — hash/generate helpers,
+// channel gating, redemption outcome, method map + invite IPC schemas
+export {
+  ActiveVoiceInviteSchema,
+  CreateInviteIpcResponseSchema,
+  generateInviteCode,
+  generateInviteToken,
+  GetActiveVoiceInviteIpcResponseSchema,
+  GetActiveVoiceInviteRequestSchema,
+  hashInviteCode,
+  hashInviteToken,
+  INVITES_IPC_METHODS,
+  InviteRedemptionOutcomeSchema,
+  InviteRedemptionResultSchema,
+  InviteWireSchema,
+  isInviteCodeRedemptionEnabled,
+  isValidE164,
+  ListInvitesIpcResponseSchema,
+  RedeemInviteByTokenRequestSchema,
+  RedeemInviteTokenIpcResponseSchema,
+  RedeemInviteVoiceIpcResponseSchema,
+  RedeemVoiceInviteIpcResponseSchema,
+  RedeemVoiceInviteRequestSchema,
+  RevokeInviteIpcResponseSchema,
+} from "./invite-contract.js";
+
+export type {
+  ActiveVoiceInvite,
+  CreateInviteIpcResponse,
+  GetActiveVoiceInviteIpcResponse,
+  GetActiveVoiceInviteRequest,
+  InviteRedemptionOutcome,
+  InviteRedemptionResult,
+  InvitesIpcMethod,
+  InviteWire,
+  ListInvitesIpcResponse,
+  RedeemInviteByCodeRequest,
+  RedeemInviteByTokenRequest,
+  RedeemInviteTokenIpcResponse,
+  RedeemInviteVoiceIpcResponse,
+  RedeemVoiceInviteIpcResponse,
+  RedeemVoiceInviteRequest,
+  RevokeInviteIpcResponse,
+} from "./invite-contract.js";
+
+// Verification-session contract (shared gateway ↔ daemon) — hash helper,
+// status enums, wire DTO + verification_sessions_* IPC schemas
+export {
+  BindSessionIdentityIpcParamsSchema,
+  CHALLENGE_TTL_MS,
+  CountRecentSendsIpcParamsSchema,
+  CountRecentSendsIpcResponseSchema,
+  CreateInboundSessionIpcParamsSchema,
+  CreateInboundSessionIpcResponseSchema,
+  CreateOutboundSessionConditionalIpcResponseSchema,
+  CreateOutboundSessionConflictSchema,
+  CreateOutboundSessionIpcParamsSchema,
+  CreateOutboundSessionIpcResponseSchema,
+  FindActiveSessionIpcParamsSchema,
+  GetPendingSessionIpcParamsSchema,
+  hashVerificationSecret,
+  IdentityBindingStatusSchema,
+  ResolveBootstrapSessionIpcParamsSchema,
+  bindsSameIdentity,
+  boundIdentity,
+  RevokePendingSessionsIpcParamsSchema,
+  SessionLookupIpcResponseSchema,
+  SessionMutationIpcResponseSchema,
+  SessionStatusSchema,
+  UpdateSessionDeliveryIpcParamsSchema,
+  UpdateSessionStatusIpcParamsSchema,
+  ValidateConsumeSessionIpcParamsSchema,
+  ValidateConsumeSessionIpcResponseSchema,
+  VERIFICATION_SESSIONS_IPC_METHODS,
+  VerificationPurposeSchema,
+  VerificationSessionSchema,
+} from "./verification-session-contract.js";
+
+export type {
+  BindSessionIdentityIpcParams,
+  BoundIdentity,
+  CountRecentSendsIpcParams,
+  CountRecentSendsIpcResponse,
+  CreateInboundSessionIpcParams,
+  CreateInboundSessionIpcResponse,
+  CreateOutboundSessionConditionalIpcResponse,
+  CreateOutboundSessionConflict,
+  CreateOutboundSessionIpcParams,
+  CreateOutboundSessionIpcResponse,
+  FindActiveSessionIpcParams,
+  GetPendingSessionIpcParams,
+  IdentityBindingStatus,
+  IdentityBoundSession,
+  ResolveBootstrapSessionIpcParams,
+  RevokePendingSessionsIpcParams,
+  SessionLookupIpcResponse,
+  SessionMutationIpcResponse,
+  SessionStatus,
+  UpdateSessionDeliveryIpcParams,
+  UpdateSessionStatusIpcParams,
+  ValidateConsumeSessionIpcParams,
+  ValidateConsumeSessionIpcResponse,
+  VerificationPurpose,
+  VerificationSessionsIpcMethod,
+  VerificationSessionWire,
+} from "./verification-session-contract.js";
+
+// Guardian-request contract (shared gateway ↔ daemon) — status/kind enums,
+// wire DTOs, pure helpers + guardian_requests_* IPC schemas
+export {
+  CreateGuardianRequestDeliveryIpcParamsSchema,
+  CreateGuardianRequestDeliveryIpcResponseSchema,
+  CreateGuardianRequestIpcParamsSchema,
+  CreateGuardianRequestIpcResponseSchema,
+  DecideGuardianRequestIpcParamsSchema,
+  DecideGuardianRequestIpcResponseSchema,
+  deriveGuardianRequestSourceType,
+  ExpireGuardianRequestIpcParamsSchema,
+  ExpireInteractionBoundIpcParamsSchema,
+  ExpireInteractionBoundIpcResponseSchema,
+  GetGuardianRequestByCallSessionIpcParamsSchema,
+  GetGuardianRequestByCodeIpcParamsSchema,
+  GetGuardianRequestByPendingQuestionIpcParamsSchema,
+  GetGuardianRequestIpcParamsSchema,
+  GUARDIAN_REQUESTS_IPC_METHODS,
+  GuardianRequestAclOutcomeSchema,
+  GuardianRequestDecisionStatusSchema,
+  GuardianRequestDeliveryListIpcResponseSchema,
+  GuardianRequestDeliverySchema,
+  GuardianRequestInScopeIpcParamsSchema,
+  GuardianRequestInScopeIpcResponseSchema,
+  GuardianRequestKindSchema,
+  GuardianRequestListIpcResponseSchema,
+  GuardianRequestLookupIpcResponseSchema,
+  GuardianRequestMutationIpcResponseSchema,
+  GuardianRequestPatchSchema,
+  GuardianRequestSchema,
+  GuardianRequestSourceTypeSchema,
+  GuardianRequestStatusSchema,
+  isGuardianRequestExpired,
+  ListGuardianRequestDeliveriesByChatIpcParamsSchema,
+  ListGuardianRequestDeliveriesIpcParamsSchema,
+  ListGuardianRequestsIpcParamsSchema,
+  ListPendingGuardianRequestsByDestinationIpcParamsSchema,
+  ListPendingGuardianRequestsByScopeIpcParamsSchema,
+  DELIVERY_STATUS,
+  ListExpiredPendingGuardianRequestsIpcParamsSchema,
+  UpdateGuardianRequestDeliveryIpcParamsSchema,
+  UpdateGuardianRequestIpcParamsSchema,
+} from "./guardian-request-contract.js";
+
+export type {
+  CreateGuardianRequestDeliveryIpcParams,
+  CreateGuardianRequestIpcParams,
+  DecideGuardianRequestIpcParams,
+  DecideGuardianRequestIpcResponse,
+  DeliveryStatus,
+  ExpireGuardianRequestIpcParams,
+  ExpireInteractionBoundIpcParams,
+  ExpireInteractionBoundIpcResponse,
+  GetGuardianRequestByCallSessionIpcParams,
+  GetGuardianRequestByCodeIpcParams,
+  GetGuardianRequestByPendingQuestionIpcParams,
+  GetGuardianRequestIpcParams,
+  GuardianRequestAclOutcome,
+  GuardianRequestDecisionStatus,
+  GuardianRequestDeliveryListIpcResponse,
+  GuardianRequestDeliveryWire,
+  GuardianRequestInScopeIpcParams,
+  GuardianRequestInScopeIpcResponse,
+  GuardianRequestKind,
+  GuardianRequestListIpcResponse,
+  GuardianRequestLookupIpcResponse,
+  GuardianRequestMutationIpcResponse,
+  GuardianRequestPatch,
+  GuardianRequestsIpcMethod,
+  GuardianRequestSourceType,
+  GuardianRequestStatus,
+  GuardianRequestWire,
+  ListGuardianRequestDeliveriesByChatIpcParams,
+  ListGuardianRequestDeliveriesIpcParams,
+  ListGuardianRequestsIpcParams,
+  ListPendingGuardianRequestsByDestinationIpcParams,
+  ListPendingGuardianRequestsByScopeIpcParams,
+  ListExpiredPendingGuardianRequestsIpcParams,
+  UpdateGuardianRequestDeliveryIpcParams,
+  UpdateGuardianRequestIpcParams,
+} from "./guardian-request-contract.js";
+
+// Guardian delivery contract (daemon → gateway pull) — Zod schemas + derived types
+export {
+  GuardianDeliverySchema,
+  ResolveGuardianDeliveryRequestSchema,
+  ResolveGuardianDeliveryResponseSchema,
+} from "./guardian-delivery-contract.js";
+
+export type {
+  GuardianDelivery,
+  ResolveGuardianDeliveryRequest,
+  ResolveGuardianDeliveryResponse,
+} from "./guardian-delivery-contract.js";
+
+// Channel permission matrix contract (gateway ↔ daemon ↔ web) — cascade
+// cells storing a RiskThreshold per (channel × contact-type)
+export {
+  CHANNEL_CONVERSATION_TYPES,
+  CHANNEL_PERMISSION_SCOPE_RANK,
+  CHANNEL_PERMISSION_SCOPES,
+  ChannelConversationTypeSchema,
+  ChannelPermissionCellKeySchema,
+  ChannelPermissionCellSchema,
+  ChannelPermissionScopeSchema,
+  ChannelPermissionSelectorSchema,
+  isChannelConversationType,
+  isRiskThreshold,
+  ResolveChannelPermissionRequestSchema,
+  RISK_THRESHOLD_VALUES,
+  RiskThresholdSchema,
+} from "./channel-permission-contract.js";
+
+export type {
+  ChannelConversationType,
+  ChannelPermissionCell,
+  ChannelPermissionCellKey,
+  ChannelPermissionCellRow,
+  ChannelPermissionScope,
+  ChannelPermissionSelector,
+  ResolveChannelPermissionRequest,
+  ResolvedChannelPermission,
+  RiskThreshold,
+} from "./channel-permission-contract.js";
+
+// Binding-strength vocabulary for the contact `verified_via` provenance —
+// display ladder (introduction card) + the enforcement order the gateway ACL
+// write path uses to refuse demotions (LUM-2505).
+export {
+  bindingStrengthForVerifiedVia,
+  isBindingDemotion,
+  knownStrengthRank,
+  VERIFIED_VIA_CHALLENGE,
+  VERIFIED_VIA_CHANNEL_CLAIM,
+  VERIFIED_VIA_MANUAL,
+} from "./binding-strength-contract.js";
+
+export type { BindingStrength } from "./binding-strength-contract.js";

@@ -1,0 +1,493 @@
+import { existsSync } from "node:fs";
+import { beforeEach, describe, expect, mock, test } from "bun:test";
+
+// Stub out video thumbnail generation (requires ffmpeg)
+mock.module("../daemon/video-thumbnail.js", () => ({
+  generateVideoThumbnail: () => Promise.resolve(null),
+  generateVideoThumbnailFromPath: () => Promise.resolve(null),
+}));
+
+// Stub out permission checker / trust store
+const checkSpy = mock(() => Promise.resolve({ decision: "allow" }));
+const addRuleSpy = mock(() => {});
+
+mock.module("../permissions/checker.js", () => ({
+  isDynamicSkillLoadInvocation: () => false,
+  check: checkSpy,
+  classifyRisk: () => Promise.resolve({ level: "low" }),
+  generateScopeOptions: () => [],
+}));
+
+mock.module("../permissions/trust-store.js", () => ({
+  addRule: addRuleSpy,
+}));
+
+mock.module("../permissions/types.js", () => ({
+  RiskLevel: {
+    Low: "low",
+    Medium: "medium",
+    High: "high",
+  },
+}));
+
+import type { AssistantAttachmentDraft } from "../daemon/assistant-attachments.js";
+import { getFilePathForAttachment } from "../persistence/attachments-store.js";
+import {
+  addMessage,
+  createConversation,
+} from "../persistence/conversation-crud.js";
+import { getDb } from "../persistence/db-connection.js";
+import { initializeDb } from "../persistence/db-init.js";
+await initializeDb();
+
+function resetTables() {
+  const db = getDb();
+  db.run("DELETE FROM message_attachments");
+  db.run("DELETE FROM attachments");
+  db.run("DELETE FROM messages");
+  db.run("DELETE FROM conversations");
+}
+
+/**
+ * Create a base64 string of approximately `bytes` decoded size.
+ */
+function makeBase64(bytes: number): string {
+  const buf = Buffer.alloc(bytes, 0x41); // fill with 'A'
+  return buf.toString("base64");
+}
+
+function estimateBase64Bytes(
+  value: string | { data?: unknown; sizeBytes?: unknown } | null | undefined,
+): number {
+  if (value == null) {
+    return 0;
+  }
+  if (typeof value !== "string") {
+    if (typeof value.sizeBytes === "number") {
+      return value.sizeBytes;
+    }
+    return typeof value.data === "string" ? estimateBase64Bytes(value.data) : 0;
+  }
+  const trimmed = value.replace(/\s/g, "");
+  const padding = trimmed.endsWith("==") ? 2 : trimmed.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((trimmed.length * 3) / 4) - padding);
+}
+
+function toolImageFilename(
+  mediaType: string,
+  toolName?: string,
+  title?: string,
+): string {
+  const prefix =
+    title ||
+    toolName
+      ?.replace(/([a-z])([A-Z])/g, "$1-$2")
+      .replace(/_/g, "-")
+      .toLowerCase() ||
+    "tool-output";
+  return `${prefix}.${mediaType.split("/")[1] ?? "png"}`;
+}
+
+// ---------------------------------------------------------------------------
+// resolveAssistantAttachments — all attachments are now file-backed
+// ---------------------------------------------------------------------------
+
+describe("resolveAssistantAttachments", () => {
+  beforeEach(() => {
+    resetTables();
+    checkSpy.mockClear();
+    addRuleSpy.mockClear();
+  });
+
+  test("small attachments are stored on disk via uploadAttachment", async () => {
+    const conv = createConversation("test-conv");
+    const msg = await addMessage(conv.id, "assistant", "hello");
+
+    const smallSize = 2 * 1024 * 1024; // 2 MB
+    const dataBase64 = makeBase64(smallSize);
+
+    const draft: AssistantAttachmentDraft = {
+      sourceType: "sandbox_file",
+      filename: "small-image.png",
+      mimeType: "image/png",
+      dataBase64,
+      sizeBytes: smallSize,
+      kind: "image",
+    };
+
+    mock.module("../daemon/assistant-attachments.js", () => ({
+      resolveDirectives: () =>
+        Promise.resolve({ drafts: [draft], warnings: [] }),
+      contentBlocksToDrafts: () => [],
+      deduplicateDrafts: (d: AssistantAttachmentDraft[]) => d,
+      validateDrafts: (d: AssistantAttachmentDraft[]) => ({
+        accepted: d,
+        warnings: [],
+      }),
+      estimateBase64Bytes,
+      toolImageFilename,
+    }));
+
+    // Re-import to pick up mocks
+    const { resolveAssistantAttachments: resolve } =
+      await import("../daemon/conversation-attachments.js");
+
+    const result = await resolve(
+      [
+        {
+          source: "sandbox" as const,
+          path: "/fake",
+          filename: "small-image.png",
+          mimeType: "image/png",
+        },
+      ],
+      [],
+      [],
+      "/tmp",
+      async () => true,
+      msg.id,
+    );
+
+    expect(result.emittedAttachments.length).toBe(1);
+    const emitted = result.emittedAttachments[0];
+    expect(emitted.id).toBeDefined();
+    expect(result.linkedAttachmentIds).toEqual([emitted.id!]);
+
+    // All attachments are file-backed and have a file on disk
+    const filePath = getFilePathForAttachment(emitted.id!);
+    expect(filePath).not.toBeNull();
+    expect(existsSync(filePath!)).toBe(true);
+
+    // fileBacked flag is always true now
+    expect(emitted.fileBacked).toBe(true);
+  });
+
+  test("large attachments are stored on disk with file path", async () => {
+    const conv = createConversation("test-conv-large");
+    const msg = await addMessage(conv.id, "assistant", "hello");
+
+    const largeSize = 10 * 1024 * 1024; // 10 MB
+    const dataBase64 = makeBase64(largeSize);
+
+    const draft: AssistantAttachmentDraft = {
+      sourceType: "sandbox_file",
+      filename: "big-video.mov",
+      mimeType: "video/quicktime",
+      dataBase64,
+      sizeBytes: largeSize,
+      kind: "video",
+    };
+
+    mock.module("../daemon/assistant-attachments.js", () => ({
+      resolveDirectives: () =>
+        Promise.resolve({ drafts: [draft], warnings: [] }),
+      contentBlocksToDrafts: () => [],
+      deduplicateDrafts: (d: AssistantAttachmentDraft[]) => d,
+      validateDrafts: (d: AssistantAttachmentDraft[]) => ({
+        accepted: d,
+        warnings: [],
+      }),
+      estimateBase64Bytes,
+      toolImageFilename,
+    }));
+
+    const { resolveAssistantAttachments: resolve } =
+      await import("../daemon/conversation-attachments.js");
+
+    const result = await resolve(
+      [
+        {
+          source: "sandbox" as const,
+          path: "/fake",
+          filename: "big-video.mov",
+          mimeType: "video/quicktime",
+        },
+      ],
+      [],
+      [],
+      "/tmp",
+      async () => true,
+      msg.id,
+    );
+
+    expect(result.emittedAttachments.length).toBe(1);
+    const emitted = result.emittedAttachments[0];
+    expect(emitted.id).toBeDefined();
+
+    // Verify the file exists on disk at the expected path
+    const filePath = getFilePathForAttachment(emitted.id!);
+    expect(filePath).not.toBeNull();
+    expect(filePath!).toContain("attachments");
+    expect(filePath!).toContain("big-video.mov");
+    expect(existsSync(filePath!)).toBe(true);
+
+    // fileBacked flag is always true now
+    expect(emitted.fileBacked).toBe(true);
+  });
+
+  test("persistedFiles carries only directives that resolved and persisted", async () => {
+    const conv = createConversation("test-conv-persisted");
+    const msg = await addMessage(conv.id, "assistant", "hello");
+
+    const accepted: AssistantAttachmentDraft = {
+      sourceType: "sandbox_file",
+      filename: "plan.md",
+      mimeType: "text/markdown",
+      dataBase64: makeBase64(64),
+      sizeBytes: 64,
+      kind: "document",
+      sourcePath: "notes/plan.md",
+    };
+    const oversized: AssistantAttachmentDraft = {
+      sourceType: "sandbox_file",
+      filename: "huge.bin",
+      mimeType: "application/octet-stream",
+      dataBase64: makeBase64(64),
+      sizeBytes: 64,
+      kind: "document",
+      sourcePath: "notes/huge.bin",
+    };
+    const toolBlock: AssistantAttachmentDraft = {
+      sourceType: "tool_block",
+      filename: "tool-output.png",
+      mimeType: "image/png",
+      dataBase64: makeBase64(64),
+      sizeBytes: 64,
+      kind: "image",
+    };
+
+    mock.module("../daemon/assistant-attachments.js", () => ({
+      // The missing file's directive produces a warning and no draft.
+      resolveDirectives: () =>
+        Promise.resolve({
+          drafts: [accepted, oversized],
+          warnings: [
+            'Skipped sandbox attachment "notes/missing.md": file not found.',
+          ],
+        }),
+      contentBlocksToDrafts: () => [toolBlock],
+      deduplicateDrafts: (d: AssistantAttachmentDraft[]) => d,
+      validateDrafts: (d: AssistantAttachmentDraft[]) => ({
+        accepted: d.filter((draft) => draft.filename !== "huge.bin"),
+        warnings: ['Skipped attachment "huge.bin": too large.'],
+      }),
+      estimateBase64Bytes,
+      toolImageFilename,
+    }));
+
+    const { resolveAssistantAttachments: resolve } =
+      await import("../daemon/conversation-attachments.js");
+
+    const result = await resolve(
+      [
+        {
+          source: "sandbox" as const,
+          path: "notes/plan.md",
+          filename: "plan.md",
+          mimeType: "text/markdown",
+        },
+        {
+          source: "sandbox" as const,
+          path: "notes/missing.md",
+          filename: undefined,
+          mimeType: undefined,
+        },
+        {
+          source: "sandbox" as const,
+          path: "notes/huge.bin",
+          filename: undefined,
+          mimeType: undefined,
+        },
+      ],
+      [
+        {
+          type: "image",
+          source: { type: "base64", media_type: "image/png", data: "" },
+        },
+      ],
+      [],
+      "/tmp",
+      async () => true,
+      msg.id,
+    );
+
+    // The rejected directive, the failed validation, and the tool block
+    // (which has no file of its own) are all absent.
+    expect(result.persistedFiles).toEqual([
+      {
+        sourcePath: "notes/plan.md",
+        displayName: "plan.md",
+        sourceType: "sandbox_file",
+      },
+    ]);
+    expect(result.linkedAttachmentIds).toHaveLength(2);
+    expect(result.linkedAttachmentIds).toEqual(
+      result.emittedAttachments.map((attachment) => attachment.id!),
+    );
+  });
+
+  test("persistedFiles is empty when there is no message to persist against", async () => {
+    const accepted: AssistantAttachmentDraft = {
+      sourceType: "sandbox_file",
+      filename: "plan.md",
+      mimeType: "text/markdown",
+      dataBase64: makeBase64(64),
+      sizeBytes: 64,
+      kind: "document",
+      sourcePath: "notes/plan.md",
+    };
+
+    mock.module("../daemon/assistant-attachments.js", () => ({
+      resolveDirectives: () =>
+        Promise.resolve({ drafts: [accepted], warnings: [] }),
+      contentBlocksToDrafts: () => [],
+      deduplicateDrafts: (d: AssistantAttachmentDraft[]) => d,
+      validateDrafts: (d: AssistantAttachmentDraft[]) => ({
+        accepted: d,
+        warnings: [],
+      }),
+      estimateBase64Bytes,
+      toolImageFilename,
+    }));
+
+    const { resolveAssistantAttachments: resolve } =
+      await import("../daemon/conversation-attachments.js");
+
+    // No assistant message id: the draft is emitted for this turn only and
+    // nothing is stored, so it is not a persisted file.
+    const result = await resolve(
+      [
+        {
+          source: "sandbox" as const,
+          path: "notes/plan.md",
+          filename: "plan.md",
+          mimeType: "text/markdown",
+        },
+      ],
+      [],
+      [],
+      "/tmp",
+      async () => true,
+      undefined,
+    );
+
+    expect(result.emittedAttachments).toHaveLength(1);
+    expect(result.persistedFiles).toEqual([]);
+    expect(result.linkedAttachmentIds).toEqual([]);
+  });
+
+  test("reports only successful links when a later upload is skipped", async () => {
+    const conv = createConversation("test-conv-partial-upload");
+    const msg = await addMessage(conv.id, "assistant", "hello");
+    const valid: AssistantAttachmentDraft = {
+      sourceType: "sandbox_file",
+      filename: "valid.txt",
+      mimeType: "text/plain",
+      dataBase64: makeBase64(16),
+      sizeBytes: 16,
+      kind: "document",
+    };
+    const invalid: AssistantAttachmentDraft = {
+      sourceType: "sandbox_file",
+      filename: "invalid.txt",
+      mimeType: "text/plain",
+      dataBase64: "%%%",
+      sizeBytes: 3,
+      kind: "document",
+    };
+
+    mock.module("../daemon/assistant-attachments.js", () => ({
+      resolveDirectives: () =>
+        Promise.resolve({ drafts: [valid, invalid], warnings: [] }),
+      contentBlocksToDrafts: () => [],
+      deduplicateDrafts: (drafts: AssistantAttachmentDraft[]) => drafts,
+      validateDrafts: (drafts: AssistantAttachmentDraft[]) => ({
+        accepted: drafts,
+        warnings: [],
+      }),
+      estimateBase64Bytes,
+      toolImageFilename,
+    }));
+
+    const { resolveAssistantAttachments: resolve } =
+      await import("../daemon/conversation-attachments.js");
+    const result = await resolve(
+      [
+        {
+          source: "sandbox" as const,
+          path: "/fake",
+          filename: "valid.txt",
+          mimeType: "text/plain",
+        },
+      ],
+      [],
+      [],
+      "/tmp",
+      async () => true,
+      msg.id,
+    );
+
+    expect(result.emittedAttachments).toHaveLength(1);
+    expect(result.linkedAttachmentIds).toEqual([
+      result.emittedAttachments[0]!.id!,
+    ]);
+    expect(result.directiveWarnings).toContain(
+      "Attachment invalid.txt skipped: Invalid base64 encoding",
+    );
+  });
+});
+
+describe("approveHostAttachmentRead", () => {
+  beforeEach(() => {
+    resetTables();
+    checkSpy.mockClear();
+    addRuleSpy.mockClear();
+  });
+
+  test("prompts and allows on allow decision", async () => {
+    const conversation = createConversation("attachment-host-gate");
+    const promptSpy = mock(() =>
+      Promise.resolve({ decision: "allow" as const }),
+    );
+
+    const { approveHostAttachmentRead } =
+      await import("../daemon/conversation-attachments.js");
+
+    const allowed = await approveHostAttachmentRead(
+      "/tmp/example.txt",
+      "/tmp",
+      { prompt: promptSpy } as never,
+      conversation.id,
+      false,
+    );
+
+    expect(allowed).toBe(true);
+    expect(checkSpy).not.toHaveBeenCalled();
+    expect(addRuleSpy).not.toHaveBeenCalled();
+    const call = promptSpy.mock.calls[0] as unknown as unknown[];
+    expect(call[3]).toEqual([]);
+    expect(call[4]).toEqual([]);
+    expect(call[8]).toBe(false); // persistentDecisionsAllowed
+  });
+
+  test("denies when hasNoClient is true without prompting", async () => {
+    const conversation = createConversation("attachment-no-client");
+    const promptSpy = mock(() =>
+      Promise.resolve({ decision: "allow" as const }),
+    );
+
+    const { approveHostAttachmentRead } =
+      await import("../daemon/conversation-attachments.js");
+
+    const allowed = await approveHostAttachmentRead(
+      "/tmp/example.txt",
+      "/tmp",
+      { prompt: promptSpy } as never,
+      conversation.id,
+      true,
+    );
+
+    expect(allowed).toBe(false);
+    expect(promptSpy).not.toHaveBeenCalled();
+  });
+});

@@ -1,0 +1,83 @@
+# Build images from the repository root but keep context minimal.
+**
+# Workspace install inputs: the deps stage resolves from the root manifest,
+# lockfile, member manifests, and patch files — no source.
+!package.json
+!bun.lock
+!patches/
+!patches/**
+# Docs site image: the builder copies the full clients/docs sources (this also
+# covers the clients/docs/package.json manifest the other images install from).
+!clients/docs/
+!clients/docs/**
+# Every clients/* workspace member manifest must reach the context: bun's
+# frozen-lockfile install validates the full workspace set, so a member whose
+# package.json is missing fails every image build.
+# Listed explicitly: a `!` pattern with a wildcard before its final path
+# segment disables directory pruning for the entire context walk.
+!clients/chrome-extension/package.json
+!clients/docs/package.json
+!clients/linux/package.json
+!clients/macos/package.json
+!clients/web/package.json
+!clients/windows/package.json
+!cli/package.json
+# Although we have a `**` ignore that correctly excludes large build artifacts from the build context,
+# it seems the walker doesn't prune a directory when there are `!` exceptions that can include files
+# beneath that directory. This manifests as an extremely long build context load time.
+# Adding an explicit exclusion rule seems to help with this.
+clients/.build
+clients/docs/.next
+clients/ios
+clients/chrome-extension
+clients/macos/apple-containers-runtime
+clients/macos/dist
+clients/macos/native
+clients/macos/node_modules
+clients/macos/out
+clients/macos/src
+!assistant/
+!assistant/**
+!credential-executor/
+!credential-executor/**
+!gateway/
+!gateway/**
+!packages/
+!packages/**
+!skills/
+# Shared category taxonomy: the daemon reads this synchronously to normalize
+# plugin marketplace categories without a remote fetch (see
+# assistant/src/skills/categories-cache.ts getLocalCategorySlugs). Without it the
+# Docker image degrades every plugin category to "system" until the remote cache warms.
+!skills/skill-categories-catalog.yaml
+
+# Plugin marketplace manifest: the offline plugin catalog reader statically
+# imports this (assistant/src/cli/lib/plugin-catalog-local.ts, loaded even when
+# platform features are enabled). It is the canonical source for the git-ignored
+# assistant/src/cli/lib/bundled-marketplace.json, which the Dockerfile copies
+# into place. Without it the assistant image cannot resolve that import.
+!plugins/
+!plugins/marketplace.json
+!plugins/mcp-catalog/
+!plugins/mcp-catalog/**
+!meta/
+!meta/sync-bundled-copies.ts
+
+# Exclude local dependencies and build outputs from included directories.
+assistant/dist/
+assistant/out/
+assistant/build/
+assistant/.env
+assistant/.env.*
+# Authoring-reference example plugins are not shipped with the production image.
+assistant/examples/
+clients/docs/.env
+clients/docs/.env.*
+credential-executor/.env
+credential-executor/.env.*
+gateway/.env
+gateway/.env.*
+packages/*/.env
+packages/*/.env.*
+
+**/node_modules/

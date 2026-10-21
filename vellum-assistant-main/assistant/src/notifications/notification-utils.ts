@@ -1,0 +1,431 @@
+/**
+ * Shared leaf utilities for the notification pipeline.
+ *
+ * This module has no intra-pipeline imports (only Node stdlib and leaf
+ * utilities), so any notification module can import it without creating
+ * circular dependencies.
+ */
+
+import type { Root, RootContent } from "mdast";
+
+import { parseMarkdown } from "../messaging/content/parse.js";
+import { stripAnsiAndControlChars, stripAnsiSequences } from "../util/ansi.js";
+import { isPlainObject } from "../util/object.js";
+import type { RenderedChannelCopy } from "./types.js";
+
+// ── String helpers ──────────────────────────────────────────────────────────
+
+/** Return `value` trimmed, or `undefined` when blank/nullish. */
+export function nonEmpty(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Models sometimes write the two-character sequence `\n` (or `\t`) instead of
+ * a real line break. Turn those into actual newlines so a briefing stored as
+ * a notification body still parses as markdown.
+ *
+ * Real newlines and tabs are left alone. A backslash that is not part of `\n`
+ * or `\t` is left alone too.
+ */
+export function decodeLiteralLineBreaks(text: string): string {
+  if (!text.includes("\\")) {
+    return text;
+  }
+  return text.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+}
+
+/**
+ * Safely read a string property from an unknown-typed payload object.
+ * Returns `undefined` when the payload is falsy, not an object, or the
+ * key does not hold a string value.
+ */
+export function readPayloadString(
+  payload: unknown,
+  key: string,
+): string | undefined {
+  if (!isPlainObject(payload)) {
+    return undefined;
+  }
+  const value = payload[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * Safely read a plain-object property from an unknown-typed payload object.
+ * Returns `undefined` when the payload is not an object or the key does not
+ * hold a plain object (arrays and `null` are rejected).
+ */
+export function readPayloadObject(
+  payload: unknown,
+  key: string,
+): Record<string, unknown> | undefined {
+  if (!isPlainObject(payload)) {
+    return undefined;
+  }
+  const value = payload[key];
+  return isPlainObject(value) ? value : undefined;
+}
+
+/**
+ * Safely read a string-array property from an unknown-typed payload object.
+ * Non-string entries are dropped. Returns `undefined` when the payload is
+ * not an object or the key does not hold an array.
+ */
+export function readPayloadStringArray(
+  payload: unknown,
+  key: string,
+): string[] | undefined {
+  if (!isPlainObject(payload)) {
+    return undefined;
+  }
+  const value = payload[key];
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+/** Truncate `text` to `maxLength`, appending "…" when exceeded. */
+export function truncate(text: string, maxLength: number): string {
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return text.slice(0, maxLength - 1) + "…";
+}
+
+// ── Markdown flattening ─────────────────────────────────────────────────────
+
+/**
+ * Node types whose children are blocks rather than an inline run, so their text
+ * needs a paragraph break between children instead of being butted together.
+ */
+const BLOCK_CONTAINER_TYPES = new Set([
+  "blockquote",
+  "listItem",
+  "footnoteDefinition",
+]);
+
+/** Plain text of one mdast node, markers and media dropped. */
+function nodeText(node: RootContent): string {
+  switch (node.type) {
+    // Literal runs. Code keeps its value: a fenced block previews as its code,
+    // and the parser has already decided what is code, so markdown-looking
+    // lines inside it are safe.
+    case "text":
+    case "inlineCode":
+    case "code":
+      return node.value;
+    // Raw HTML, which the parser splits into tag nodes around the text between
+    // them. The in-app renderer registers no `rehype-raw`, so tags and comments
+    // display as nothing there; dropping the tag nodes keeps the preview
+    // matching what the reply actually looks like, and keeps the contents of an
+    // HTML comment off the lock screen. The visible text between a tag pair is
+    // its own `text` node and survives.
+    case "html":
+      return "";
+    // Media carries no prose. A caller names it separately when the flattened
+    // text comes up empty; see {@link mediaEmbedAltTexts}.
+    //
+    // A space rather than nothing: an embed needs no surrounding whitespace, so
+    // `before![alt](url)after` would otherwise flatten to one run-on word. The
+    // callers collapse and trim, so an embed-only reply still reduces to empty
+    // and still reaches its media fallback.
+    case "image":
+    case "imageReference":
+      return " ";
+    case "break":
+      return "\n";
+    case "thematicBreak":
+      return "";
+    case "table":
+    case "list":
+      return node.children.map(nodeText).join("\n");
+    case "tableRow":
+      return node.children.map(nodeText).join(" ");
+    default:
+      return "children" in node
+        ? node.children
+            .map(nodeText)
+            .join(BLOCK_CONTAINER_TYPES.has(node.type) ? "\n\n" : "")
+        : "";
+  }
+}
+
+/**
+ * Flatten markdown to the plain text a notification surface renders, where
+ * markers would otherwise arrive as literal punctuation.
+ *
+ * Parses with the same remark/GFM processor the web client and the channel
+ * renderers use, rather than matching markers by hand. That is what keeps a
+ * balanced-paren URL, a tilde fence nested in a backtick one, a pipeless GFM
+ * table, and image syntax quoted inside a code span from each needing their own
+ * special case.
+ *
+ * Media embeds are dropped whole, alt text included. The alt describes the
+ * attachment rather than adding prose, so keeping it previews a video as its
+ * own caption. Copy that is nothing but embeds therefore flattens to empty,
+ * which is a caller's signal to describe the media instead.
+ *
+ * Line structure survives, so callers needing multi-line copy keep it; collapse
+ * whitespace separately for a single line.
+ */
+export function stripMarkdownForPreview(value: string): string {
+  return parseMarkdown(value).children.map(nodeText).join("\n\n");
+}
+
+/**
+ * Destinations the assistant resolves into attachment rows. Mirrors the link
+ * forms `daemon/assistant-attachments.ts` extracts.
+ */
+const TRACKED_MEDIA_URL_RE = /^vellum:\/\/(?:workspace|host)\//i;
+
+/** A media embed the flattener dropped, kept so a caller can name it. */
+export interface MediaEmbed {
+  /**
+   * Image description, already plain text: the parser resolves a formatted
+   * description rather than handing back its markers.
+   */
+  alt: string;
+  /**
+   * Whether the destination resolves through the attachment store. A
+   * `vellum://` embed becomes an attachment row, so a caller holding
+   * attachment metadata has already counted it; a remote one leaves no row
+   * there and its alt is the only label it has.
+   */
+  tracked: boolean;
+}
+
+/** Collect every image node, depth first. */
+function collectMediaEmbeds(
+  node: Root | RootContent,
+  into: MediaEmbed[],
+): void {
+  if (node.type === "image") {
+    into.push({
+      alt: node.alt ?? "",
+      tracked: TRACKED_MEDIA_URL_RE.test(node.url),
+    });
+    return;
+  }
+  // A reference embed names a definition rather than a destination, so it
+  // cannot be matched against the attachment store.
+  if (node.type === "imageReference") {
+    into.push({ alt: node.alt ?? "", tracked: false });
+    return;
+  }
+  if ("children" in node) {
+    for (const child of node.children) {
+      collectMediaEmbeds(child, into);
+    }
+  }
+}
+
+/**
+ * The media embeds in `value`, in order, empty alts included.
+ *
+ * Lets a caller describe copy whose entire content was embeds. Remote
+ * `https://` embeds are as valid as `vellum://` ones and register nothing in
+ * the attachment store, so without this a reply of one remote image would go
+ * out with no copy at all rather than merely an unhelpful one.
+ */
+export function mediaEmbeds(value: string): MediaEmbed[] {
+  const embeds: MediaEmbed[] = [];
+  collectMediaEmbeds(parseMarkdown(value), embeds);
+  return embeds;
+}
+
+/**
+ * Copy naming media, from whatever labels a caller could recover: attachment
+ * filenames, or the alt texts {@link mediaEmbedAltTexts} pulled back out of
+ * copy that flattened away.
+ *
+ * Labels are model- and tool-authored, so a single one is sanitized before it
+ * can reach the lock screen; one that sanitizes away leaves generic copy rather
+ * than a dangling "Sent ".
+ *
+ * Returns an empty string for no labels, leaving the caller to decide whether
+ * that means suppress the notification or fall back further.
+ */
+export function describeMedia(labels: string[]): string {
+  if (labels.length === 0) {
+    return "";
+  }
+  if (labels.length > 1) {
+    return `Sent ${labels.length} attachments`;
+  }
+  const label = sanitizeMessagePreview(labels[0].replace(/\s+/g, " ").trim());
+  return label ? `Sent ${label}` : "Sent an attachment";
+}
+
+// ── Sanitization ────────────────────────────────────────────────────────────
+
+/**
+ * Strip escape sequences, flatten control characters and newlines to spaces,
+ * then truncate to `maxLength`.
+ */
+function sanitize(value: string, maxLength: number): string {
+  return truncate(stripAnsiAndControlChars(value, " ").trim(), maxLength);
+}
+
+/**
+ * Collapse horizontal whitespace and blank-line runs while keeping paragraph
+ * breaks. Tabs become spaces. Three or more consecutive newlines collapse to
+ * one blank line so padding does not eat the preview budget.
+ */
+export function collapseHorizontalWhitespace(value: string): string {
+  return value
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Sanitize a notification body that should keep its line breaks.
+ *
+ * ANSI sequences and non-newline control characters are stripped; `\r\n` and
+ * `\r` become `\n`. Horizontal whitespace is collapsed. The result is clamped
+ * to {@link MESSAGE_PREVIEW_MAX_LENGTH}.
+ *
+ * Single-line surfaces (titles, identity fields, channel previews that must
+ * not wrap) should keep using {@link sanitizeMessagePreview}.
+ */
+export function sanitizeMultilineMessagePreview(value: string): string {
+  const normalized = stripAnsiSequences(value)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]+/g, " ");
+  return truncate(
+    collapseHorizontalWhitespace(normalized),
+    MESSAGE_PREVIEW_MAX_LENGTH,
+  );
+}
+
+/**
+ * Sanitize an untrusted identity field for inclusion in notification copy.
+ * Strips control characters and clamps to 120 characters.
+ */
+export function sanitizeIdentityField(value: string): string {
+  return sanitize(value, 120);
+}
+
+export const MESSAGE_PREVIEW_MAX_LENGTH = 200;
+
+/**
+ * Sanitize an untrusted message preview for inclusion in notification copy.
+ * Strips control characters and clamps to 200 characters.
+ */
+export function sanitizeMessagePreview(value: string): string {
+  return sanitize(value, MESSAGE_PREVIEW_MAX_LENGTH);
+}
+
+/** Character budget every notification title shares. */
+export const NOTIFICATION_TITLE_MAX_LENGTH = 60;
+
+/**
+ * Flatten an untrusted notification title onto a single line, stripping control
+ * characters and newlines and bounding it at `NOTIFICATION_TITLE_MAX_LENGTH`.
+ *
+ * The newline flattening is the load-bearing part: downstream consumers re-run
+ * the value through `normalizeTitle`, whose prose guard discards any string
+ * containing a newline outright, so a multi-line conversation title would be
+ * thrown away wholesale instead of salvaged. The length bound is a backstop;
+ * `normalizeTitle`'s tighter 40-character budget is what callers observe.
+ */
+export function sanitizeNotificationTitle(value: string): string {
+  return sanitize(value, NOTIFICATION_TITLE_MAX_LENGTH);
+}
+
+/**
+ * Tidy copy after a sentence was cut out of it: trailing spaces before a
+ * line break go, runs of blank lines collapse to one, and the ends trim.
+ */
+export function normalizeStrippedText(value: string): string {
+  return value
+    .replace(/(?<=\S)[ \t]{2,}(?=\S)/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+const DIRECTIVE_VERBS = "approve|reject|verify|trust|block|<your\\s+answer>";
+
+/**
+ * Remove request-code reply mechanics from copy: every sentence that pairs
+ * the code with a reply verb (`Reply "X approve" or "X reject"`, a
+ * paraphrase, a negated form like `Do not reply "X reject"`, and the same
+ * with backticks, smart quotes, or no quotes at all), and every sentence
+ * that names a reference, approval, or request code together with the code
+ * (`Reference code: X.`, `Use reference code X for this request.`).
+ *
+ * Whole sentences go, never a suffix from "reply" onward, so no fragment
+ * like "Alice wants access. Do not" survives. A sentence is text between
+ * line breaks or `.!?` terminators. Sentences that mention other codes or
+ * merely contain the word "reply" are untouched.
+ */
+export function stripRequestCodeDirectives(
+  text: string,
+  requestCode: string,
+): string {
+  const code = RegExp.escape(requestCode);
+  const sentence = (core: string): RegExp =>
+    new RegExp(`[^.!?\\n]*${core}[^.!?\\n]*[.!?]?(?:[ \\t]*\\n)?`, "gi");
+  const next = text
+    .replace(
+      sentence(`(?<![A-Z0-9])${code}\\s+(?:${DIRECTIVE_VERBS})(?![A-Za-z])`),
+      "",
+    )
+    .replace(
+      sentence(
+        `\\b(?:reference|approval|request)\\s+code\\b[^.!?\\n]*?(?<![A-Z0-9])${code}(?![A-Z0-9])`,
+      ),
+      "",
+    );
+  return normalizeStrippedText(next);
+}
+
+/**
+ * Run a reply-mechanics strip over every text field of a channel's copy.
+ * A body, deliveryText, or conversationSeedMessage left empty by the strip
+ * becomes `ask`, the request's own deterministic text, so a card surface
+ * never shows the mechanics it exists to avoid; without one it keeps its
+ * text rather than becoming empty, which downstream reads as missing copy.
+ * A title left empty becomes `headline`, the deterministic title for the
+ * request kind: a title is a headline, never the ask, and the banner shows
+ * it, so a mechanics-only title must not survive either.
+ */
+export function stripReplyMechanicsFromCopy(
+  copy: RenderedChannelCopy,
+  {
+    strip,
+    ask,
+    headline,
+  }: {
+    strip: (text: string) => string;
+    ask: string | undefined;
+    headline: string;
+  },
+): RenderedChannelCopy {
+  const fallback = ask === undefined ? undefined : nonEmpty(ask);
+  const stripField = (text: string): string => {
+    const stripped = strip(text);
+    return stripped.length > 0 ? stripped : (fallback ?? text);
+  };
+  const strippedTitle = strip(copy.title);
+  return {
+    ...copy,
+    title: strippedTitle.length > 0 ? strippedTitle : headline,
+    body: stripField(copy.body),
+    deliveryText: copy.deliveryText
+      ? stripField(copy.deliveryText)
+      : copy.deliveryText,
+    conversationSeedMessage: copy.conversationSeedMessage
+      ? stripField(copy.conversationSeedMessage)
+      : copy.conversationSeedMessage,
+  };
+}

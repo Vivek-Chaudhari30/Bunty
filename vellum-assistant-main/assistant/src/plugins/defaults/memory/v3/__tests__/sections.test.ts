@@ -1,0 +1,411 @@
+import { describe, expect, test } from "bun:test";
+
+import { stripOrphanedSurrogates } from "../../../../../util/unicode.js";
+import {
+  buildSectionIndex,
+  leadSectionOfBody,
+  SECTION_CHUNK_CHARS,
+  sectionBody,
+  sectionHeadLine,
+} from "../sections.js";
+import { sectionKey, type Slug } from "../types.js";
+
+/** Build a page-body reader from a fixture map. */
+function reader(pages: Record<string, string>) {
+  return async (slug: Slug): Promise<string> => pages[slug] ?? "";
+}
+
+describe("buildSectionIndex", () => {
+  test("lead + two ## sections yield 3 ordered sections with titles", async () => {
+    const body = [
+      "Lead paragraph before any heading.",
+      "",
+      "## First Heading",
+      "first body line",
+      "",
+      "## Second Heading",
+      "second body line",
+    ].join("\n");
+
+    const index = await buildSectionIndex(
+      ["page-a"],
+      reader({ "page-a": body }),
+    );
+
+    expect(index.sections).toHaveLength(3);
+
+    expect(index.sections[0]!.ordinal).toBe(0);
+    expect(index.sections[0]!.title).toBe("");
+    expect(index.sections[0]!.text).toContain("page-a - ");
+    expect(index.sections[0]!.text).toContain("Lead paragraph");
+
+    expect(index.sections[1]!.ordinal).toBe(1);
+    expect(index.sections[1]!.title).toBe("First Heading");
+    expect(index.sections[1]!.text).toContain("page-a - First Heading");
+    expect(index.sections[1]!.text).toContain("first body line");
+
+    expect(index.sections[2]!.ordinal).toBe(2);
+    expect(index.sections[2]!.title).toBe("Second Heading");
+    expect(index.sections[2]!.text).toContain("second body line");
+  });
+
+  test("section over the chunk cap splits into ordered chunks", async () => {
+    const big = "x".repeat(SECTION_CHUNK_CHARS * 2 + 100);
+    const body = `## Big Section\n${big}`;
+
+    const index = await buildSectionIndex(
+      ["topic-x"],
+      reader({ "topic-x": body }),
+    );
+
+    // Lead (empty) + the chunked big section.
+    const bigChunks = index.sections.filter((s) => s.title === "Big Section");
+    expect(bigChunks.length).toBeGreaterThan(1);
+
+    // Every chunk fits the embedding window.
+    for (const section of index.sections) {
+      expect(section.text.length).toBeLessThanOrEqual(SECTION_CHUNK_CHARS);
+    }
+
+    // Ordinals are strictly increasing in array order (chunks ordered).
+    for (let i = 1; i < index.sections.length; i++) {
+      expect(index.sections[i]!.ordinal).toBe(
+        index.sections[i - 1]!.ordinal + 1,
+      );
+    }
+  });
+
+  test("a first body line longer than the window still leaves body text in every chunk", async () => {
+    // One unbroken line longer than the window under a heading, then a lead
+    // of the same shape: no chunk may be head-line-only, or the injection
+    // renderer (which strips the head line) would have nothing to show for
+    // the chunk a heading query or the unmatched fallback selects.
+    const unbroken = "y".repeat(SECTION_CHUNK_CHARS + 500);
+    const index = await buildSectionIndex(
+      ["page-a", "page-lead"],
+      reader({
+        "page-a": `lead\n\n## Big\n${unbroken}`,
+        "page-lead": unbroken,
+      }),
+    );
+
+    for (const section of index.sections) {
+      expect(section.text.length).toBeLessThanOrEqual(SECTION_CHUNK_CHARS);
+      expect(
+        section.text.startsWith(
+          `${sectionHeadLine(section.article, section.title)}\n`,
+        ),
+      ).toBe(true);
+    }
+    const big = index.sections.filter((s) => s.title === "Big");
+    expect(big.length).toBeGreaterThan(1);
+    expect(big.map(sectionBody).join("")).toBe(unbroken);
+    const leadChunks = index.sections.filter((s) => s.article === "page-lead");
+    expect(leadChunks.length).toBeGreaterThan(1);
+    expect(leadChunks.map(sectionBody).join("")).toBe(unbroken);
+    // Every chunk of both carries body text past its head line.
+    for (const chunk of [...big, ...leadChunks]) {
+      expect(sectionBody(chunk).length).toBeGreaterThan(0);
+    }
+  });
+
+  test("a hard split never lands inside a surrogate pair and loses no text", async () => {
+    // One unbroken line of emoji longer than the window, offset by one BMP
+    // character so the window boundary falls between a pair's halves.
+    const unbroken = `y${"😀".repeat(SECTION_CHUNK_CHARS)}`;
+    const index = await buildSectionIndex(
+      ["page-a"],
+      reader({ "page-a": `## Big\n${unbroken}` }),
+    );
+
+    const big = index.sections.filter((s) => s.title === "Big");
+    expect(big.length).toBeGreaterThan(1);
+    for (const chunk of big) {
+      expect(chunk.text.length).toBeLessThanOrEqual(SECTION_CHUNK_CHARS);
+      expect(stripOrphanedSurrogates(chunk.text)).toBe(chunk.text);
+    }
+    expect(big.map(sectionBody).join("")).toBe(unbroken);
+  });
+
+  test("a capped head-line title never ends in half an emoji", () => {
+    const title = `${"t".repeat(199)}🎉 more`;
+    const head = sectionHeadLine("page-a", title);
+    expect(stripOrphanedSurrogates(head)).toBe(head);
+    expect(head).toBe(`page-a - ${"t".repeat(199)}`);
+  });
+
+  test("a heading longer than the window still chunks by near-window bodies; the key keeps the full title", async () => {
+    const title = "H".repeat(SECTION_CHUNK_CHARS + 100);
+    const body = "b".repeat(SECTION_CHUNK_CHARS * 2);
+    const index = await buildSectionIndex(
+      ["page-a"],
+      reader({ "page-a": `lead\n\n## ${title}\n${body}` }),
+    );
+    const chunks = index.sections.filter((s) => s.title === title);
+    // The head line carries the capped title, so the body budget stays near
+    // the window: three chunks here, not thousands.
+    const budget =
+      SECTION_CHUNK_CHARS - sectionHeadLine("page-a", title).length - 1;
+    expect(budget).toBeGreaterThan(SECTION_CHUNK_CHARS - 300);
+    expect(chunks).toHaveLength(Math.ceil(body.length / budget));
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(SECTION_CHUNK_CHARS);
+      expect(
+        chunk.text.startsWith(`${sectionHeadLine("page-a", title)}\n`),
+      ).toBe(true);
+      expect(chunk.title).toBe(title);
+    }
+    expect(chunks.map(sectionBody).join("")).toBe(body);
+    expect(sectionKey(chunks[0]!)).toBe(title);
+    expect(sectionKey(chunks[1]!)).toBe(`${title}~1`);
+  });
+
+  test("a section that fits the window is one chunk carrying the head line and the whole body", async () => {
+    const body = "lead\n\n## Notes\nfirst line\nsecond line";
+    const index = await buildSectionIndex(
+      ["page-a"],
+      reader({ "page-a": body }),
+    );
+    const notes = index.sections.find((s) => s.title === "Notes")!;
+    expect(notes.text).toBe(
+      `${sectionHeadLine("page-a", "Notes")}\nfirst line\nsecond line`,
+    );
+    expect(notes.chunk).toBeUndefined();
+  });
+
+  test("byArticle maps each article to its section indices", async () => {
+    const index = await buildSectionIndex(
+      ["page-a", "topic-x"],
+      reader({
+        "page-a": "lead a\n\n## Sec A\nbody a",
+        "topic-x": "lead x",
+      }),
+    );
+
+    expect([...index.byArticle.keys()].sort()).toEqual(["page-a", "topic-x"]);
+
+    for (const [article, indices] of index.byArticle) {
+      for (const i of indices) {
+        expect(index.sections[i]!.article).toBe(article);
+      }
+    }
+
+    // page-a has lead + one heading section; topic-x is headingless (lead only).
+    expect(index.byArticle.get("page-a")).toHaveLength(2);
+    expect(index.byArticle.get("topic-x")).toHaveLength(1);
+  });
+
+  test("empty / headingless page yields a single ordinal-0 section", async () => {
+    const empty = await buildSectionIndex(["page-a"], reader({ "page-a": "" }));
+    expect(empty.sections).toHaveLength(1);
+    expect(empty.sections[0]!.ordinal).toBe(0);
+    expect(empty.sections[0]!.title).toBe("");
+
+    const headingless = await buildSectionIndex(
+      ["topic-x"],
+      reader({ "topic-x": "just a paragraph\nand another line" }),
+    );
+    expect(headingless.sections).toHaveLength(1);
+    expect(headingless.sections[0]!.ordinal).toBe(0);
+    expect(headingless.sections[0]!.text).toContain("just a paragraph");
+  });
+
+  test("sections are deterministic, sorted by (article, ordinal)", async () => {
+    const pages = {
+      "topic-x": "lead x\n\n## X1\nbody",
+      "page-a": "lead a\n\n## A1\nbody",
+    };
+    const first = await buildSectionIndex(["topic-x", "page-a"], reader(pages));
+    const second = await buildSectionIndex(
+      ["page-a", "topic-x"],
+      reader(pages),
+    );
+
+    const shape = (s: { article: Slug; ordinal: number }) =>
+      `${s.article}#${s.ordinal}`;
+    expect(first.sections.map(shape)).toEqual(second.sections.map(shape));
+    // page-a sorts before topic-x regardless of input order.
+    expect(first.sections[0]!.article).toBe("page-a");
+  });
+});
+
+describe("section keys", () => {
+  test('the lead keys as "", a heading as its title, and repeated headings count up', async () => {
+    const body = [
+      "# Title",
+      "lead",
+      "",
+      "## Notes",
+      "first notes",
+      "",
+      "## Design",
+      "design",
+      "",
+      "## Notes",
+      "second notes block under the same heading",
+    ].join("\n");
+    const index = await buildSectionIndex(
+      ["page-a"],
+      reader({ "page-a": body }),
+    );
+
+    expect(index.sections.map(sectionKey)).toEqual([
+      "",
+      "Notes",
+      "Design",
+      "Notes#1",
+    ]);
+    expect(index.sections[3]!.occurrence).toBe(1);
+    expect(index.sections[3]!.chunk).toBeUndefined();
+    expect(index.sections[1]!.occurrence).toBeUndefined();
+  });
+
+  test("re-chunking an earlier heading never renumbers a later repeat of it", async () => {
+    // Heading occurrence and chunk index are independent key dimensions.
+    // Under one shared counter, shrinking the first `## Topic` from several
+    // chunks to one would hand its second chunk's key to the later repeat.
+    const page = (firstTopicBody: string) =>
+      [
+        "lead",
+        "",
+        "## Topic",
+        firstTopicBody,
+        "",
+        "## Other",
+        "other body",
+        "",
+        "## Topic",
+        "the repeat",
+      ].join("\n");
+    const chunked = await buildSectionIndex(
+      ["p"],
+      reader({ p: page("x".repeat(SECTION_CHUNK_CHARS + 50)) }),
+    );
+    const compact = await buildSectionIndex(
+      ["p"],
+      reader({ p: page("short") }),
+    );
+
+    const chunkKeys = chunked.sections
+      .filter((s) => s.title === "Topic" && s.occurrence === undefined)
+      .map(sectionKey);
+    expect(chunkKeys.length).toBeGreaterThan(1);
+    expect(chunkKeys).toEqual(
+      chunkKeys.map((_, i) => (i === 0 ? "Topic" : `Topic~${i}`)),
+    );
+    expect(chunked.sections.map(sectionKey)).toEqual([
+      "",
+      ...chunkKeys,
+      "Other",
+      "Topic#1",
+    ]);
+    expect(compact.sections.map(sectionKey)).toEqual([
+      "",
+      "Topic",
+      "Other",
+      "Topic#1",
+    ]);
+    // The repeat keeps `Topic#1` whatever the earlier heading's chunk count,
+    // and no chunk of the earlier heading ever carried that key.
+    expect(chunkKeys).not.toContain("Topic#1");
+  });
+
+  test("a literal `## Topic#1` heading and a repeated `## Topic` get distinct keys", async () => {
+    const body = [
+      "lead",
+      "",
+      "## Topic#1",
+      "literal numbered heading",
+      "",
+      "## Topic",
+      "first plain",
+      "",
+      "## Topic",
+      "second plain",
+    ].join("\n");
+    const index = await buildSectionIndex(
+      ["page-a"],
+      reader({ "page-a": body }),
+    );
+
+    const keys = index.sections.map(sectionKey);
+    expect(keys).toEqual(["", "Topic##1", "Topic", "Topic#1"]);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  test("a split heading's later chunks key as title~<n> and stay stable when earlier sections move", async () => {
+    const longBody = "x".repeat(SECTION_CHUNK_CHARS * 2 + 50);
+    const page = (prefixSections: number) =>
+      [
+        "lead",
+        ...Array.from(
+          { length: prefixSections },
+          (_, i) => `\n## Extra ${i}\nbody`,
+        ),
+        "\n## Long",
+        longBody,
+      ].join("\n");
+
+    const before = await buildSectionIndex(["p"], reader({ p: page(0) }));
+    const after = await buildSectionIndex(["p"], reader({ p: page(2) }));
+    const longKeys = (index: typeof before) =>
+      index.sections.filter((s) => s.title === "Long").map(sectionKey);
+
+    const chunks = longKeys(before).length;
+    expect(chunks).toBeGreaterThan(2);
+    expect(longKeys(before)).toEqual(
+      Array.from({ length: chunks }, (_, i) =>
+        i === 0 ? "Long" : `Long~${i}`,
+      ),
+    );
+    // Two sections inserted above shift every ordinal but leave the keys.
+    expect(longKeys(after)).toEqual(longKeys(before));
+    expect(after.sections.find((s) => s.title === "Long")!.ordinal).not.toBe(
+      before.sections.find((s) => s.title === "Long")!.ordinal,
+    );
+  });
+
+  test("leadSectionOfBody is exactly the index's lead for that page", async () => {
+    const pages = {
+      "topics/page-a": "# Page A\nlead text\n\n## Notes\nnote body",
+      "page-empty": "",
+      "page-long": "x".repeat(SECTION_CHUNK_CHARS * 2),
+    };
+    const index = await buildSectionIndex(Object.keys(pages), reader(pages));
+    for (const [slug, body] of Object.entries(pages)) {
+      const indexed = index.sections[index.byArticle.get(slug)![0]!]!;
+      expect(leadSectionOfBody(slug, body)).toEqual(indexed);
+    }
+  });
+
+  test("sectionBody strips the synthetic head line only when present", async () => {
+    const index = await buildSectionIndex(
+      ["topics/page-a"],
+      reader({ "topics/page-a": "# Page A\nlead text\n\n## Notes\nnote body" }),
+    );
+    const [lead, notes] = index.sections;
+    expect(lead!.text.startsWith(sectionHeadLine("topics/page-a", ""))).toBe(
+      true,
+    );
+    expect(sectionBody(lead!)).toBe("# Page A\nlead text\n");
+    expect(sectionBody(notes!)).toBe("note body");
+    // A section carrying no head line (a later chunk, or a hand-built
+    // section) is returned as-is.
+    expect(
+      sectionBody({
+        article: "topics/page-a",
+        title: "Notes",
+        text: "raw",
+        ordinal: 9,
+      }),
+    ).toBe("raw");
+    expect(
+      sectionBody({
+        article: "topics/page-a",
+        title: "Notes",
+        text: sectionHeadLine("topics/page-a", "Notes"),
+        ordinal: 1,
+      }),
+    ).toBe("");
+  });
+});

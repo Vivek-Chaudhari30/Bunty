@@ -1,0 +1,224 @@
+import type { IpcRenderer, IpcRendererEvent } from "electron";
+
+import type {
+  BundleScanData,
+  DeepLink,
+  DownloadDoneEvent,
+  NotificationActionEvent,
+  ResolvedHotkey,
+  UpdateState,
+  VellumBridge,
+  WindowAttentionPayload,
+} from "@vellumai/ipc-contract";
+import {
+  PERMISSION_GUIDE_CANCEL,
+  PERMISSION_SETUP_BEGIN,
+  PERMISSION_GUIDE_GET,
+  PERMISSION_GUIDE_STATE,
+  PERMISSION_GUIDE_READY,
+  PERMISSION_GUIDE_DISMISS,
+  PERMISSION_GUIDE_DRAG,
+  PERMISSION_GUIDE_REVEAL,
+  COMPANION_SET_UNPLACED_DICTATION_OFFER,
+  DOWNLOADS_DONE_EVENT,
+  DOWNLOADS_REVEAL,
+  NOTIFICATIONS_ACTION,
+  NOTIFICATIONS_PREPARE_IDENTITY,
+  NOTIFICATIONS_REGISTER_IDENTITY_PUBLISHER,
+  NOTIFICATIONS_RESET_IDENTITIES,
+  NOTIFICATIONS_SHOW,
+  WINDOW_ATTENTION,
+} from "@vellumai/ipc-contract";
+
+type RendererIpc = Pick<IpcRenderer, "invoke" | "off" | "on" | "send">;
+
+export const createDictationOfferBridge = (
+  ipc: RendererIpc,
+): Pick<
+  NonNullable<VellumBridge["companion"]>,
+  "setUnplacedDictationOffer"
+> => ({
+  setUnplacedDictationOffer: (offer) => {
+    ipc.send(COMPANION_SET_UNPLACED_DICTATION_OFFER, offer);
+  },
+});
+
+const subscribe =
+  <Payload>(ipc: RendererIpc, channel: string) =>
+  (callback: (payload: Payload) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, payload: Payload): void => {
+      callback(payload);
+    };
+    ipc.on(channel, handler);
+    return () => {
+      ipc.off(channel, handler);
+    };
+  };
+
+/**
+ * Like {@link subscribe}, but the IPC listener is installed once when the
+ * factory runs and the latest payload is replayed to each callback as it
+ * registers.
+ *
+ * Push-only channels whose first payload arrives on page load need this: the
+ * preload evaluates ahead of every page script, so the listener below is in
+ * place for that payload, while the renderer callbacks are React effects and
+ * lazy routes that register afterwards. Without the replay such a callback
+ * holds its default until the next transition on the channel.
+ */
+const subscribeWithReplay = <Payload>(
+  ipc: RendererIpc,
+  channel: string,
+): ((callback: (payload: Payload) => void) => () => void) => {
+  const callbacks = new Set<(payload: Payload) => void>();
+  let latest: { payload: Payload } | null = null;
+  ipc.on(channel, (_event: IpcRendererEvent, payload: Payload): void => {
+    latest = { payload };
+    // Snapshot so a callback that subscribes mid-dispatch is served by its own
+    // replay instead of twice, and re-check membership so one that
+    // unsubscribes mid-dispatch is not called after the fact.
+    for (const callback of [...callbacks]) {
+      if (!callbacks.has(callback)) {
+        continue;
+      }
+      callback(payload);
+    }
+  });
+  return (callback) => {
+    callbacks.add(callback);
+    if (latest) {
+      // Synchronous, so the replay always lands before the caller holds the
+      // unsubscribe function and can never outlive it.
+      callback(latest.payload);
+    }
+    return () => {
+      callbacks.delete(callback);
+    };
+  };
+};
+
+export const createDeepLinksBridge = (
+  ipc: RendererIpc,
+): VellumBridge["deepLinks"] => ({
+  drain: () => ipc.invoke("vellum:deepLinks:drain") as Promise<DeepLink[]>,
+  onLink: (callback) => {
+    const handler = (_event: IpcRendererEvent, link: DeepLink): void => {
+      callback(link);
+    };
+    ipc.on("vellum:deepLinks:event", handler);
+    ipc.send("vellum:deepLinks:subscribe");
+    return () => {
+      ipc.off("vellum:deepLinks:event", handler);
+      ipc.send("vellum:deepLinks:unsubscribe");
+    };
+  },
+});
+
+export const createLaunchAtLoginBridge = (
+  ipc: RendererIpc,
+): VellumBridge["launchAtLogin"] => ({
+  get: () => ipc.invoke("vellum:launchAtLogin:get") as Promise<boolean>,
+  set: (enabled) =>
+    ipc.invoke("vellum:launchAtLogin:set", enabled) as Promise<void>,
+});
+
+/** Renderer side of `installHotkeysIpc`. */
+export const createHotkeysBridge = (
+  ipc: RendererIpc,
+): VellumBridge["hotkeys"] => ({
+  get: () => ipc.invoke("vellum:hotkeys:get") as Promise<ResolvedHotkey[]>,
+  set: (key, accelerator) =>
+    ipc.invoke("vellum:hotkeys:set", key, accelerator) as Promise<void>,
+  onChange: subscribe<ResolvedHotkey[]>(ipc, "vellum:hotkeys:changed"),
+});
+
+/** Renderer side of `installBundleConfirmation`. */
+export const createBundleConfirmBridge = (
+  ipc: RendererIpc,
+): VellumBridge["bundleConfirm"] => ({
+  getData: () =>
+    ipc.invoke(
+      "vellum:bundleConfirm:getData",
+    ) as Promise<BundleScanData | null>,
+  respond: (accepted) => {
+    ipc.send("vellum:bundleConfirm:respond", accepted);
+  },
+});
+
+/** Renderer side of `installDownloads`. */
+export const createDownloadsBridge = (
+  ipc: RendererIpc,
+): VellumBridge["downloads"] => ({
+  onDone: subscribe<DownloadDoneEvent>(ipc, DOWNLOADS_DONE_EVENT),
+  reveal: (id) => ipc.invoke(DOWNLOADS_REVEAL, id),
+});
+
+/** Renderer side of `installAutoUpdate`. */
+export const createUpdateBridge = (
+  ipc: RendererIpc,
+): VellumBridge["update"] => ({
+  getState: () => ipc.invoke("vellum:update:getState") as Promise<UpdateState>,
+  check: () => ipc.invoke("vellum:update:check") as Promise<void>,
+  install: () => ipc.invoke("vellum:update:install") as Promise<void>,
+  onState: subscribe<UpdateState>(ipc, "vellum:update:state"),
+});
+
+/** Renderer side of the notification presenter and identity-memory IPC. */
+export const createNotificationsBridge = (
+  ipc: RendererIpc,
+): VellumBridge["notifications"] => {
+  const publisherSessionId = globalThis.crypto.randomUUID();
+  const publisherRegistration = Promise.resolve(
+    ipc.invoke(NOTIFICATIONS_REGISTER_IDENTITY_PUBLISHER, {
+      publisherSessionId,
+    }),
+  ).then(
+    (registered) => registered === true,
+    () => false,
+  );
+  return {
+    show: (payload) =>
+      ipc.invoke(NOTIFICATIONS_SHOW, payload) as Promise<{
+        success: boolean;
+        errorMessage?: string;
+      }>,
+    registerIdentityPublisher: () => publisherRegistration,
+    prepareIdentity: async (payload) => {
+      await publisherRegistration;
+      await ipc.invoke(NOTIFICATIONS_PREPARE_IDENTITY, {
+        ...payload,
+        publisherSessionId,
+      });
+    },
+    resetIdentities: async (payload) => {
+      await publisherRegistration;
+      await ipc.invoke(NOTIFICATIONS_RESET_IDENTITIES, {
+        ...payload,
+        publisherSessionId,
+      });
+    },
+    onAction: subscribe<NotificationActionEvent>(ipc, NOTIFICATIONS_ACTION),
+    onWindowAttention: createWindowAttentionSubscriber(ipc),
+  };
+};
+
+/** Renderer side of `installWindowAttention`. */
+export function createWindowAttentionSubscriber(
+  ipc: RendererIpc,
+): VellumBridge["notifications"]["onWindowAttention"] {
+  return subscribeWithReplay<WindowAttentionPayload>(ipc, WINDOW_ATTENTION);
+}
+
+/** Optional macOS permission setup and native app drag bridge. */
+export const createPermissionSetupBridge = (
+  ipc: RendererIpc,
+): NonNullable<VellumBridge["permissions"]["setup"]> => ({
+  cancel: () => ipc.send(PERMISSION_GUIDE_CANCEL),
+  begin: (kind, source) => ipc.invoke(PERMISSION_SETUP_BEGIN, kind, source),
+  getGuide: () => ipc.invoke(PERMISSION_GUIDE_GET),
+  onGuide: subscribe(ipc, PERMISSION_GUIDE_STATE),
+  ready: (id, height) => ipc.send(PERMISSION_GUIDE_READY, id, height),
+  dismiss: (id) => ipc.send(PERMISSION_GUIDE_DISMISS, id),
+  startDrag: (id) => ipc.send(PERMISSION_GUIDE_DRAG, id),
+  revealApp: (id) => ipc.invoke(PERMISSION_GUIDE_REVEAL, id),
+});

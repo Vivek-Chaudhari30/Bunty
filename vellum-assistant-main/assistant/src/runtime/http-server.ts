@@ -1,0 +1,1271 @@
+/**
+ * Optional HTTP server that exposes the canonical runtime API.
+ *
+ * Runs in the same process as the daemon. Always started on the
+ * configured port (default: 7821).
+ */
+
+import type { ServerWebSocket } from "bun";
+
+import {
+  startAppPinReconcileSweep,
+  stopAppPinReconcileSweep,
+} from "../apps/app-pin-reconciler.js";
+import {
+  activeMediaStreamSessions,
+  MediaStreamCallSession,
+} from "../calls/media-stream-server.js";
+import {
+  handleStatusCallback,
+  handleVoiceWebhook,
+} from "../calls/twilio-routes.js";
+import {
+  getRuntimeHttpHost,
+  getRuntimeHttpPort,
+  isHttpAuthDisabled,
+} from "../config/env.js";
+import { getIsPlatform } from "../config/env-registry.js";
+import { getConfig } from "../config/loader.js";
+import {
+  getDbMigrationReadiness,
+  isDbMigrationGateBypassed,
+} from "../daemon/daemon-readiness.js";
+import { processMessage } from "../daemon/process-message.js";
+import { makeAddrInUseError } from "../daemon/startup-error.js";
+import {
+  DESKTOP_CLOSE,
+  destroyDesktopSessionManager,
+} from "../desktop/desktop-session-manager.js";
+import { DesktopStreamBridge } from "../desktop/desktop-stream-bridge.js";
+import { isVirtualDesktopEnabled } from "../desktop/virtual-desktop-feature.js";
+import {
+  createLiveVoiceConnection,
+  type LiveVoiceConnection,
+} from "../live-voice/live-voice-connection.js";
+import { getLiveVoiceSessionManager } from "../live-voice/live-voice-manager.js";
+import { resolveStreamingTranscriber } from "../providers/speech-to-text/resolve.js";
+import {
+  startPluginScheduleReconcileSweep,
+  stopPluginScheduleReconcileSweep,
+} from "../schedule/plugin-schedule-reconciler.js";
+import { sttCatalogKeyForRole } from "../stt/roles.js";
+import {
+  activeSttStreamSessions,
+  SttStreamSession,
+} from "../stt/stt-stream-session.js";
+import {
+  startTelegramWebhookHealthSweep,
+  stopTelegramWebhookHealthSweep,
+} from "../telegram/webhook-health.js";
+import { getLogger } from "../util/logger.js";
+import { authenticateRequest } from "./auth/middleware.js";
+import { parseSub } from "./auth/subject.js";
+import { verifyToken } from "./auth/token-service.js";
+import { sweepFailedEvents } from "./channel-retry-sweep.js";
+import type { HostCaptureTarget } from "./host-observe.js";
+import { httpError, type HttpErrorCode } from "./http-errors.js";
+import { HttpRouter } from "./http-router.js";
+import {
+  extractBearerToken,
+  isLoopbackHost,
+  isPrivateNetworkOrigin,
+  isPrivateNetworkPeer,
+} from "./middleware/auth.js";
+import {
+  extractClientIp,
+  ipRateLimiter,
+  isRateLimitExemptEndpoint,
+  rateLimitHeaders,
+  rateLimitResponse,
+  selectAuthenticatedRateLimiter,
+} from "./middleware/rate-limiter.js";
+import { withRequestLogging } from "./middleware/request-logger.js";
+import {
+  cloneRequestWithBody,
+  GATEWAY_ONLY_BLOCKED_SUBPATHS,
+  GATEWAY_SUBPATH_MAP,
+  TWILIO_GATEWAY_WEBHOOK_RE,
+  TWILIO_WEBHOOK_RE,
+  validateTwilioWebhook,
+} from "./middleware/twilio-validation.js";
+import { ROUTES as AUDIO_ROUTES } from "./routes/audio-routes.js";
+import { RouteError } from "./routes/errors.js";
+import {
+  startGuardianExpirySweep,
+  stopGuardianExpirySweep,
+} from "./routes/guardian-expiry-sweep.js";
+import {
+  dbMigrationUnavailableResponse,
+  handleHealth,
+  handleReadyz,
+} from "./routes/identity-routes.js";
+import {
+  startInferenceProfileSessionReaper,
+  stopInferenceProfileSessionReaper,
+} from "./routes/inference-profile-session-reaper.js";
+import {
+  activeWatchStreamSessions,
+  closeWatchIngress,
+  drainWatchRetros,
+  parseWatchCaptureTarget,
+  WatchStreamSession,
+} from "./routes/watch-routes.js";
+
+// Re-export for consumers
+export { isPrivateAddress } from "./middleware/auth.js";
+
+import { trackDaemonActivity } from "../daemon/activity-trail.js";
+import type { RuntimeHttpServerOptions } from "./http-types.js";
+
+const log = getLogger("runtime-http");
+
+const DEFAULT_PORT = 7821;
+const DEFAULT_HOSTNAME = "127.0.0.1";
+
+/** Global hard cap on request body size (512 MB — accommodates large .vbundle backup imports). */
+const MAX_REQUEST_BODY_BYTES = 512 * 1024 * 1024;
+
+function dbMigrationUnavailableForEndpoint(endpoint: string): Response | null {
+  if (isDbMigrationGateBypassed(endpoint)) {
+    return null;
+  }
+  return dbMigrationUnavailableResponse();
+}
+
+function dbMigrationUnavailableForPath(path: string): Response | null {
+  if (path.startsWith("/v1/")) {
+    const endpoint = path.slice("/v1/".length).replace(/\/$/, "");
+    return dbMigrationUnavailableForEndpoint(endpoint);
+  }
+
+  return dbMigrationUnavailableResponse();
+}
+
+/** Shareable app pages are the one route served outside the /v1/ namespace. */
+const PAGES_PATH_RE = /^\/pages\/[^/]+$/;
+
+/**
+ * Router endpoint for a request path, or null when the path names no route.
+ * Only /v1/ and the shareable-page path resolve, so a bare path can never
+ * reach a /v1 route.
+ */
+function routerEndpointForPath(path: string): string | null {
+  if (path.startsWith("/v1/")) {
+    // Strip trailing slashes so routes match regardless of whether the caller
+    // includes one (e.g. platform proxy paths use Django's trailing-slash
+    // convention, so the gateway may forward paths with a trailing /).
+    return path.slice("/v1/".length).replace(/\/$/, "");
+  }
+  return PAGES_PATH_RE.test(path) ? path.slice(1) : null;
+}
+
+/**
+ * WebSocket data attached to `/v1/calls/media-stream` connections.
+ * The `wsType` discriminator routes frames to the media-stream call
+ * session instead of the other WebSocket handlers.
+ */
+interface MediaStreamWebSocketData {
+  wsType: "media-stream";
+  callSessionId: string;
+  /** Bound at open time so the close handler tears down the exact session
+   *  that owns *this* socket, avoiding races with reconnects. */
+  session?: MediaStreamCallSession;
+}
+
+/**
+ * WebSocket data attached to `/v1/stt/stream` connections.
+ * The `wsType` discriminator routes frames to the STT streaming
+ * session orchestrator instead of the other WebSocket handlers.
+ *
+ * `provider` is optional compatibility metadata from the client/gateway.
+ * The runtime is config-authoritative — it always resolves the streaming
+ * transcriber from `services.stt.provider` in the assistant config.
+ */
+interface SttStreamWebSocketData {
+  wsType: "stt-stream";
+  /** Optional requested provider — metadata only; runtime uses config. */
+  provider?: string;
+  mimeType: string;
+  sampleRate?: number;
+  /** The session ID for tracking in the active sessions registry. */
+  sessionId: string;
+  /** Bound at open time so the close handler tears down the exact session. */
+  session?: SttStreamSession;
+}
+
+/**
+ * WebSocket data attached to `/v1/live-voice` connections. The `wsType`
+ * discriminator routes frames to the live voice protocol shell instead of
+ * the other WebSocket handlers.
+ */
+interface LiveVoiceWebSocketData {
+  wsType: "live-voice";
+  /**
+   * The guardian the gateway admitted this socket for, when it named one.
+   *
+   * The runtime cannot work this out for itself: the gateway dials with a
+   * service token, so every socket arrives as the same caller, and any
+   * identity resolved here would be a second reading of a binding that can
+   * change between the admission and the read. Absent when the gateway
+   * admitted nobody, which the session reads as a turn with no actor.
+   *
+   * Trusted because it arrives on this dial, which only the gateway can make
+   * (see {@link verifyGatewayServiceToken}), and never from a client header.
+   */
+  guardianPrincipalId?: string;
+}
+
+/**
+ * WebSocket data attached to `/v1/watch/stream` connections. The `wsType`
+ * discriminator routes frames to the watch session orchestrator instead of
+ * the other WebSocket handlers.
+ */
+interface WatchStreamWebSocketData {
+  wsType: "watch-stream";
+  mimeType: string;
+  sampleRate?: number;
+  /** Conversation the session's timeline is keyed on, when the client names one. */
+  conversationId?: string;
+  /** Desktop client to observe, when the actor has more than one connected. */
+  clientId?: string;
+  /** What the session reads, when the client picked one display or window. */
+  captureTarget?: HostCaptureTarget;
+  /** The session ID for tracking in the active sessions registry. */
+  sessionId: string;
+  /** Bound at open time so the close handler tears down the exact session. */
+  session?: WatchStreamSession;
+}
+
+/**
+ * WebSocket data for `/v1/desktop/stream`: raw RFB bytes to the assistant
+ * desktop.
+ */
+interface DesktopStreamWebSocketData {
+  wsType: "desktop-stream";
+  /** Bound at open time so message/close handlers reach this socket's pump. */
+  bridge?: DesktopStreamBridge;
+}
+
+type AllWebSocketData =
+  | MediaStreamWebSocketData
+  | SttStreamWebSocketData
+  | LiveVoiceWebSocketData
+  | WatchStreamWebSocketData
+  | DesktopStreamWebSocketData;
+
+function virtualDesktopEnabled(): boolean {
+  try {
+    return isVirtualDesktopEnabled();
+  } catch (err) {
+    log.warn({ err }, "Failed to check desktop stream gate");
+    return false;
+  }
+}
+
+export class RuntimeHttpServer {
+  private server: ReturnType<typeof Bun.serve> | null = null;
+  private port: number;
+  private hostname: string;
+
+  private retrySweepTimer: ReturnType<typeof setInterval> | null = null;
+  private sweepInProgress = false;
+  private sweepsStarted = false;
+
+  /**
+   * Live voice handlers, one per open `/v1/live-voice` socket, keyed by the
+   * socket. The server owns this registry (mirroring the media-stream / STT
+   * session maps) rather than parking the handler on `ws.data`; the manager's
+   * single-active-session lock still bounds how many can hold a session.
+   */
+  private readonly liveVoiceConnections = new Map<
+    ServerWebSocket<LiveVoiceWebSocketData>,
+    LiveVoiceConnection
+  >();
+
+  private router: HttpRouter;
+
+  constructor(options: RuntimeHttpServerOptions = {}) {
+    this.port = options.port ?? DEFAULT_PORT;
+    this.hostname = options.hostname ?? DEFAULT_HOSTNAME;
+
+    this.router = new HttpRouter();
+  }
+
+  /** The port the server is actually listening on (resolved after start). */
+  get actualPort(): number {
+    return this.server?.port ?? this.port;
+  }
+
+  async start(): Promise<void> {
+    this.server = Bun.serve<AllWebSocketData>({
+      port: this.port,
+      hostname: this.hostname,
+      idleTimeout: 0,
+      maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
+      fetch: (req, server) => this.handleRequest(req, server),
+      websocket: {
+        open: (ws) => {
+          const data = ws.data as AllWebSocketData;
+          if (data.wsType === "media-stream") {
+            const msData = data;
+            log.info(
+              { callSessionId: msData.callSessionId },
+              "Media-stream WebSocket opened",
+            );
+            const session = new MediaStreamCallSession(
+              ws,
+              msData.callSessionId,
+            );
+            activeMediaStreamSessions.set(msData.callSessionId, session);
+            // Bind the session instance to the websocket so the close
+            // handler tears down *this* session, not a replacement that
+            // a reconnect may have inserted under the same callSessionId.
+            msData.session = session;
+            return;
+          }
+          if (data.wsType === "stt-stream") {
+            const sttData = data;
+
+            // The runtime is config-authoritative: always resolve the
+            // provider from config regardless of what the client/gateway
+            // requested. Dictation's own role selects it, matching the dial
+            // below, so the session's label, its failure copy and the
+            // mismatch telemetry all name the provider this socket actually
+            // reaches.
+            //
+            // getConfig() can throw (e.g. after invalidateConfigCache()
+            // when config.json is temporarily invalid). Wrap in try/catch
+            // so the session still starts normally: resolveStreamingTranscriber
+            // reads config inside SttStreamSession.start()'s own guarded path.
+            let configuredProvider: string | undefined;
+            try {
+              configuredProvider = sttCatalogKeyForRole(
+                getConfig().services.stt,
+                "dictation",
+              );
+
+              // Mismatch telemetry: when the optional requested provider
+              // disagrees with the configured provider, log a warning so
+              // operators can detect stale client builds.
+              if (sttData.provider && sttData.provider !== configuredProvider) {
+                log.warn(
+                  {
+                    requestedProvider: sttData.provider,
+                    configuredProvider,
+                    sessionId: sttData.sessionId,
+                  },
+                  "STT stream provider mismatch — requested provider differs from configured provider; using configured provider",
+                );
+              }
+            } catch (err) {
+              log.warn(
+                {
+                  error: err instanceof Error ? err.message : String(err),
+                  sessionId: sttData.sessionId,
+                },
+                "Failed to read config for STT provider mismatch telemetry — proceeding without mismatch check",
+              );
+            }
+
+            // Fall back to the requested provider (or "unknown") when
+            // config reading failed, so the session constructor still
+            // gets a usable label for logging/error messages.
+            const effectiveProvider =
+              configuredProvider ?? sttData.provider ?? "unknown";
+
+            log.info(
+              {
+                requestedProvider: sttData.provider ?? "(none)",
+                configuredProvider: effectiveProvider,
+                mimeType: sttData.mimeType,
+                sessionId: sttData.sessionId,
+              },
+              "STT stream WebSocket opened",
+            );
+            const session = new SttStreamSession(
+              ws,
+              effectiveProvider,
+              sttData.mimeType,
+              { sampleRate: sttData.sampleRate },
+            );
+            sttData.session = session;
+            activeSttStreamSessions.set(sttData.sessionId, session);
+
+            // Start the session asynchronously — resolves the streaming
+            // transcriber and sends a `ready` event on success.
+            void session.start(() =>
+              resolveStreamingTranscriber({
+                role: "dictation",
+                sampleRate: sttData.sampleRate,
+              }),
+            );
+            return;
+          }
+          if (data.wsType === "live-voice") {
+            const liveVoiceWs = ws as ServerWebSocket<LiveVoiceWebSocketData>;
+            this.liveVoiceConnections.set(
+              liveVoiceWs,
+              createLiveVoiceConnection({
+                send: (frame) => {
+                  ws.send(JSON.stringify(frame));
+                },
+                ...(liveVoiceWs.data.guardianPrincipalId
+                  ? {
+                      guardianPrincipalId: liveVoiceWs.data.guardianPrincipalId,
+                    }
+                  : {}),
+                // Lets the daemon hang up on a client that stopped answering.
+                // A normal close (not a retryable one) so the client ends the
+                // call rather than reconnecting into a session that is gone.
+                close: () => {
+                  ws.close(1000, "Live voice session released");
+                },
+              }),
+            );
+            log.info("Live voice WebSocket opened");
+            return;
+          }
+          if (data.wsType === "watch-stream") {
+            const watchData = data;
+            log.info(
+              {
+                sessionId: watchData.sessionId,
+                mimeType: watchData.mimeType,
+              },
+              "Watch stream WebSocket opened",
+            );
+            const session = new WatchStreamSession(ws, {
+              mimeType: watchData.mimeType,
+              ...(watchData.sampleRate !== undefined
+                ? { sampleRate: watchData.sampleRate }
+                : {}),
+              ...(watchData.conversationId
+                ? { conversationId: watchData.conversationId }
+                : {}),
+              ...(watchData.clientId ? { clientId: watchData.clientId } : {}),
+              ...(watchData.captureTarget
+                ? { captureTarget: watchData.captureTarget }
+                : {}),
+            });
+            watchData.session = session;
+            activeWatchStreamSessions.set(watchData.sessionId, session);
+            void session.start();
+            return;
+          }
+          if (data.wsType === "desktop-stream") {
+            log.info("Desktop stream WebSocket opened");
+            if (!virtualDesktopEnabled()) {
+              ws.close(
+                DESKTOP_CLOSE.unavailable,
+                "Virtual desktop is available only on enabled platform-hosted assistants",
+              );
+              return;
+            }
+            const bridge = new DesktopStreamBridge(ws, {
+              isEnabled: virtualDesktopEnabled,
+            });
+            data.bridge = bridge;
+            void bridge.start();
+            return;
+          }
+          log.warn("WebSocket opened with unknown data type — closing");
+          ws.close(1008, "Unknown WebSocket type");
+        },
+        message: (ws, message) => {
+          const data = ws.data as AllWebSocketData;
+          if (data.wsType === "media-stream") {
+            const raw =
+              typeof message === "string"
+                ? message
+                : new TextDecoder().decode(message);
+            data.session?.handleMessage(raw);
+            return;
+          }
+          if (data.wsType === "stt-stream") {
+            const session = data.session;
+            if (!session) {
+              return;
+            }
+
+            if (typeof message === "string") {
+              session.handleMessage(message);
+            } else {
+              // Binary frame — raw audio bytes.
+              const buffer =
+                message instanceof ArrayBuffer
+                  ? Buffer.from(new Uint8Array(message))
+                  : Buffer.from(message);
+              session.handleBinaryAudio(buffer);
+            }
+            return;
+          }
+          if (data.wsType === "live-voice") {
+            const connection = this.liveVoiceConnections.get(
+              ws as ServerWebSocket<LiveVoiceWebSocketData>,
+            );
+            void connection?.handleMessage(message);
+            return;
+          }
+          if (data.wsType === "watch-stream") {
+            const session = data.session;
+            if (!session) {
+              return;
+            }
+            if (typeof message === "string") {
+              session.handleMessage(message);
+            } else {
+              session.handleBinaryAudio(message);
+            }
+            return;
+          }
+          if (data.wsType === "desktop-stream") {
+            data.bridge?.handleClientFrame(message);
+            return;
+          }
+          log.warn("WebSocket message on unknown data type — closing");
+          ws.close(1008, "Unknown WebSocket type");
+        },
+        close: (ws, code, reason) => {
+          const data = ws.data as AllWebSocketData;
+          if (data.wsType === "media-stream") {
+            const msData = data;
+            log.info(
+              {
+                callSessionId: msData.callSessionId,
+                code,
+                reason: reason?.toString(),
+              },
+              "Media-stream WebSocket closed",
+            );
+            // Use the session bound at open time so we tear down the
+            // exact session that owns *this* socket, not a replacement
+            // that a reconnect may have inserted under the same key.
+            const msSession = msData.session;
+            if (msSession) {
+              msSession.handleTransportClosed(code, reason?.toString());
+              msSession.destroy();
+              // Only delete from the map if *our* session is still the
+              // registered one — a reconnect may have already replaced it.
+              if (
+                activeMediaStreamSessions.get(msData.callSessionId) ===
+                msSession
+              ) {
+                activeMediaStreamSessions.delete(msData.callSessionId);
+              }
+            }
+            return;
+          }
+          if (data.wsType === "stt-stream") {
+            const sttData = data;
+            log.info(
+              {
+                provider: sttData.provider,
+                sessionId: sttData.sessionId,
+                code,
+                reason: reason?.toString(),
+              },
+              "STT stream WebSocket closed",
+            );
+            const session = sttData.session;
+            if (session) {
+              session.handleClose(code, reason?.toString());
+              // Only delete from the map if our session is still the
+              // registered one — avoids races with reconnects.
+              if (activeSttStreamSessions.get(sttData.sessionId) === session) {
+                activeSttStreamSessions.delete(sttData.sessionId);
+              }
+            }
+            return;
+          }
+          if (data.wsType === "live-voice") {
+            const liveVoiceWs = ws as ServerWebSocket<LiveVoiceWebSocketData>;
+            const connection = this.liveVoiceConnections.get(liveVoiceWs);
+            this.liveVoiceConnections.delete(liveVoiceWs);
+            log.info(
+              {
+                sessionId: connection?.sessionId,
+                code,
+                reason: reason?.toString(),
+              },
+              "Live voice WebSocket closed",
+            );
+            connection?.release();
+            return;
+          }
+          if (data.wsType === "watch-stream") {
+            const watchData = data;
+            log.info(
+              {
+                sessionId: watchData.sessionId,
+                code,
+                reason: reason?.toString(),
+              },
+              "Watch stream WebSocket closed",
+            );
+            const session = watchData.session;
+            if (session) {
+              session.handleClose(code, reason?.toString());
+              // Only drop our own session from the registry, since a
+              // reconnect may have already replaced it under a new id.
+              if (
+                activeWatchStreamSessions.get(watchData.sessionId) === session
+              ) {
+                activeWatchStreamSessions.delete(watchData.sessionId);
+              }
+            }
+            return;
+          }
+          if (data.wsType === "desktop-stream") {
+            log.info(
+              { code, reason: reason?.toString() },
+              "Desktop stream WebSocket closed",
+            );
+            data.bridge?.handleClose();
+            return;
+          }
+          log.warn(
+            { code, reason: reason?.toString() },
+            "WebSocket with unknown data type closed",
+          );
+        },
+      },
+    });
+
+    // Background sweeps are intentionally NOT started here. The HTTP server
+    // binds early in startup (so /healthz answers ASAP) — before DB migrations
+    // run. The sweeps touch the ORM (retry sweep → processMessage, guardian
+    // expiry, profile reaper), so starting them now would race async migrations
+    // and hit "no such table". The daemon calls
+    // startRuntimeHttpServerBackgroundSweeps() only after migrations settle
+    // (success or failed degraded mode). See daemon/lifecycle.ts.
+
+    log.info(
+      "Running in gateway-only ingress mode. Direct webhook routes disabled.",
+    );
+    if (!isLoopbackHost(this.hostname)) {
+      log.warn(
+        "RUNTIME_HTTP_HOST is not bound to loopback. This may expose the runtime to direct public access.",
+      );
+    }
+
+    if (isHttpAuthDisabled()) {
+      if (getIsPlatform()) {
+        log.info(
+          "DISABLE_HTTP_AUTH is set — HTTP auth disabled (expected: platform handles auth)",
+        );
+      } else {
+        log.warn(
+          "DISABLE_HTTP_AUTH is set — HTTP API authentication is DISABLED. All API endpoints are accessible without a bearer token.",
+        );
+      }
+    }
+
+    log.info(
+      {
+        port: this.actualPort,
+        hostname: this.hostname,
+      },
+      "Runtime HTTP server listening",
+    );
+  }
+
+  /**
+   * Start background sweep timers: retry sweep for failed channel events,
+   * the guardian-request expiry sweep, and the inference-profile session reaper.
+   *
+   * These all touch the ORM, so the daemon defers this until DB migrations
+   * have settled — successfully or in the failed degraded mode, where the DB
+   * is open and the expiry/reaper maintenance still applies (see
+   * daemon/lifecycle.ts). Idempotent — safe to call once per settle; repeat
+   * calls are no-ops.
+   */
+  startBackgroundSweeps(): void {
+    if (this.sweepsStarted) {
+      return;
+    }
+    this.sweepsStarted = true;
+    if (!this.retrySweepTimer) {
+      this.retrySweepTimer = setInterval(() => {
+        if (this.sweepInProgress) {
+          return;
+        }
+        // Replays route through processMessage, which refuses turns while
+        // migration readiness is unready — and each refused replay would count
+        // toward the event's dead-letter budget. Skip the cycle instead so
+        // events queued before a failed migration survive until a restart
+        // repairs the schema.
+        if (!getDbMigrationReadiness().ready) {
+          return;
+        }
+        this.sweepInProgress = true;
+        void trackDaemonActivity({ kind: "channel_retry_sweep" }, () =>
+          sweepFailedEvents(processMessage),
+        )
+          .catch((err) => {
+            log.error({ err }, "Failed channel event retry sweep failed");
+          })
+          .finally(() => {
+            this.sweepInProgress = false;
+          });
+      }, 30_000);
+    }
+
+    startGuardianExpirySweep();
+    log.info("Guardian request expiry sweep started");
+
+    startInferenceProfileSessionReaper();
+    log.info("Inference profile session reaper started");
+
+    startTelegramWebhookHealthSweep();
+    log.info("Telegram webhook health sweep started");
+
+    // Backstop for plugin enable/disable, which flips the `.disabled`
+    // sentinel without poking the plugin source reconcile. The readiness
+    // guard lives inside reconcilePluginSchedules, which no-ops while
+    // migrations are unready.
+    startPluginScheduleReconcileSweep();
+    log.info("Plugin schedule reconcile sweep started");
+
+    // Same backstop for sidebar pins: a disabled plugin's app stops existing,
+    // and its id returns intact when the plugin is re-enabled.
+    startAppPinReconcileSweep();
+    log.info("App pin reconcile sweep started");
+  }
+
+  async stop(): Promise<void> {
+    stopGuardianExpirySweep();
+    stopAppPinReconcileSweep();
+    stopInferenceProfileSessionReaper();
+    stopTelegramWebhookHealthSweep();
+    stopPluginScheduleReconcileSweep();
+    if (this.retrySweepTimer) {
+      clearInterval(this.retrySweepTimer);
+      this.retrySweepTimer = null;
+    }
+
+    // Deterministic teardown of active STT streaming sessions before
+    // stopping the HTTP server so provider sessions are cleaned up
+    // and clients receive proper close frames.
+    for (const [sessionId, session] of activeSttStreamSessions) {
+      session.destroy();
+      activeSttStreamSessions.delete(sessionId);
+    }
+
+    // Watch shuts down in order: refuse new sessions, tear down the open ones,
+    // then wait on the retrospectives they left running. Refusing first is what
+    // makes the wait meaningful, because the Bun server below keeps accepting
+    // connections until the very end and a session opened during the wait would
+    // register a retrospective after it had already taken its snapshot.
+    closeWatchIngress();
+    for (const [sessionId, session] of activeWatchStreamSessions) {
+      session.destroy();
+      activeWatchStreamSessions.delete(sessionId);
+    }
+    // Destroying a session starts no retrospective, so this waits only on one
+    // that a socket closing just before shutdown had already under way.
+    await drainWatchRetros();
+
+    // Bounded by the manager's kill grace, so shutdown never hangs on X.
+    await destroyDesktopSessionManager();
+
+    const liveVoiceManager = getLiveVoiceSessionManager();
+    const liveVoiceSessionId = liveVoiceManager.activeSessionId;
+    if (liveVoiceSessionId) {
+      await liveVoiceManager.releaseSession(
+        liveVoiceSessionId,
+        "manager_shutdown",
+      );
+    }
+
+    if (this.server) {
+      this.server.stop(true);
+      this.server = null;
+      log.info("Runtime HTTP server stopped");
+    }
+  }
+
+  private async handleRequest(
+    req: Request,
+    server: ReturnType<typeof Bun.serve>,
+  ): Promise<Response> {
+    server.timeout(req, 1800);
+    // Skip request logging entirely for the bare-bones liveness/readiness
+    // probes Bun's load balancer hits — these don't go through the
+    // declarative router and would just clutter logs unconditionally.
+    const url = new URL(req.url);
+    if (
+      (url.pathname === "/healthz" || url.pathname === "/readyz") &&
+      req.method === "GET"
+    ) {
+      return this.routeRequest(req, server);
+    }
+    // Ask the router for any per-route logging policy *before* dispatching,
+    // so the middleware can decide whether to suppress the success log
+    // line for noisy probes (e.g. macOS app polling /v1/health every few
+    // seconds). Only `/v1/*` paths are registered with the declarative
+    // router; for everything else `meta` stays undefined and the middleware
+    // falls back to its default log-every-request behavior.
+    let meta;
+    if (url.pathname.startsWith("/v1/")) {
+      const endpoint = url.pathname.slice("/v1/".length).replace(/\/$/, "");
+      meta = this.router.findLoggingMetadata(req.method, endpoint) ?? undefined;
+    }
+    return withRequestLogging(req, () => this.routeRequest(req, server), meta);
+  }
+
+  private async routeRequest(
+    req: Request,
+    server: ReturnType<typeof Bun.serve>,
+  ): Promise<Response> {
+    const url = new URL(req.url);
+    const path = url.pathname;
+
+    if (path === "/healthz" && req.method === "GET") {
+      return handleHealth();
+    }
+
+    if (path === "/readyz" && req.method === "GET") {
+      return handleReadyz();
+    }
+
+    const migrationResponse = dbMigrationUnavailableForPath(path);
+    if (migrationResponse) {
+      return migrationResponse;
+    }
+
+    // WebSocket upgrade for Twilio Media Streams — before auth check because
+    // Twilio WebSocket connections don't use bearer tokens; restricted to
+    // private-network peers with a gateway service token.
+    if (
+      path.startsWith("/v1/calls/media-stream") &&
+      req.headers.get("upgrade")?.toLowerCase() === "websocket"
+    ) {
+      return this.handleMediaStreamUpgrade(req, server);
+    }
+
+    // WebSocket upgrade for STT streaming — private-network restrictions
+    // and explicit gateway-service token verification before upgrade.
+    if (
+      path === "/v1/stt/stream" &&
+      req.headers.get("upgrade")?.toLowerCase() === "websocket"
+    ) {
+      return this.handleSttStreamUpgrade(req, server);
+    }
+
+    // WebSocket upgrade for live voice — same private-network restrictions
+    // and gateway-service token verification as STT streaming.
+    if (
+      path === "/v1/live-voice" &&
+      req.headers.get("upgrade")?.toLowerCase() === "websocket"
+    ) {
+      return this.handleLiveVoiceUpgrade(req, server);
+    }
+
+    // WebSocket upgrade for watch narration capture, under the same
+    // private-network restrictions and gateway-service token verification as
+    // STT streaming.
+    if (
+      path === "/v1/watch/stream" &&
+      req.headers.get("upgrade")?.toLowerCase() === "websocket"
+    ) {
+      return this.handleWatchStreamUpgrade(req, server);
+    }
+
+    // WebSocket upgrade for the assistant desktop RFB stream, under the same
+    // private-network restrictions and gateway-service token verification.
+    if (
+      path === "/v1/desktop/stream" &&
+      req.headers.get("upgrade")?.toLowerCase() === "websocket"
+    ) {
+      return this.handleDesktopStreamUpgrade(req, server);
+    }
+
+    // Twilio webhook endpoints — before auth check because Twilio
+    // webhook POSTs don't include bearer tokens.
+    const twilioResponse = await this.handleTwilioWebhook(req, path);
+    if (twilioResponse) {
+      return twilioResponse;
+    }
+
+    // Audio serving endpoint — before auth check because Twilio
+    // fetches these URLs directly (isPublic route, ATL-314).
+    const audioMatch = path.match(/^\/v1\/audio\/([^/]+)$/);
+    if (audioMatch && req.method === "GET") {
+      const audioDef = AUDIO_ROUTES.find((r) => r.operationId === "audio_get")!;
+      const args = { pathParams: { audioId: audioMatch[1] } };
+      try {
+        const result = await audioDef.handler(args);
+        const headers =
+          typeof audioDef.responseHeaders === "function"
+            ? audioDef.responseHeaders(args)
+            : audioDef.responseHeaders;
+        if (result instanceof ReadableStream) {
+          return new Response(result as ReadableStream<Uint8Array>, {
+            headers,
+          });
+        }
+        return new Response(result as BodyInit, { headers });
+      } catch (err) {
+        if (err instanceof RouteError) {
+          return httpError(
+            err.code as HttpErrorCode,
+            err.message,
+            err.statusCode,
+            err.details,
+          );
+        }
+        throw err;
+      }
+    }
+
+    // JWT bearer authentication — replaces the old shared-secret comparison.
+    // authenticateRequest handles dev bypass (DISABLE_HTTP_AUTH) internally.
+    const authResult = authenticateRequest(req);
+    if (!authResult.ok) {
+      return authResult.response;
+    }
+    const authContext = authResult.context;
+
+    // Every remaining path dispatches through the router, so a route's policy
+    // is enforced wherever it is served from.
+    const endpoint = routerEndpointForPath(path);
+    if (endpoint === null) {
+      return httpError("NOT_FOUND", "Not found", 404);
+    }
+
+    // Per-client-IP rate limiting for /v1/* endpoints. Authenticated requests
+    // get a higher limit; unauthenticated requests get a lower limit to reduce
+    // abuse surface. We key on IP rather than bearer token because the gateway
+    // uses a single shared token for all proxied requests, which would collapse
+    // all users into one bucket.
+    // Shareable app pages are outside the limiter, as is local Docker dev with
+    // HTTP auth disabled.
+    if (path.startsWith("/v1/") && !isHttpAuthDisabled()) {
+      const clientIp = extractClientIp(req, server);
+      const token = extractBearerToken(req);
+      // Authenticated loopback clients (desktop app, CLI — anything on the
+      // daemon's own host) get a higher budget than remote clients.
+      const limiter = token
+        ? selectAuthenticatedRateLimiter(clientIp)
+        : ipRateLimiter;
+      const limiterKind = token ? "authenticated" : "unauthenticated";
+      // Streaming (SSE) and liveness endpoints bypass the per-minute request
+      // limiter — see isRateLimitExemptEndpoint. `result` stays null for them,
+      // so no 429 is returned and no rate-limit headers are attached.
+      const result = isRateLimitExemptEndpoint(endpoint)
+        ? null
+        : limiter.check(clientIp, path);
+      if (result && !result.allowed) {
+        return rateLimitResponse(result, {
+          clientIp,
+          deniedPath: path,
+          limiterKind: limiterKind as "authenticated" | "unauthenticated",
+          pathCounts: limiter.getRecentPathCounts(clientIp),
+        });
+      }
+      const routerResponse = await this.router.dispatch(
+        endpoint,
+        req,
+        url,
+        server,
+        authContext,
+      );
+      const response =
+        routerResponse ?? httpError("NOT_FOUND", "Not found", 404);
+      const headers = new Headers(response.headers);
+      if (result) {
+        for (const [k, v] of Object.entries(rateLimitHeaders(result))) {
+          headers.set(k, v);
+        }
+      }
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    }
+
+    const routerResponse = await this.router.dispatch(
+      endpoint,
+      req,
+      url,
+      server,
+      authContext,
+    );
+    return routerResponse ?? httpError("NOT_FOUND", "Not found", 404);
+  }
+
+  private verifyGatewayServiceToken(req: Request): Response | null {
+    if (isHttpAuthDisabled()) {
+      return null;
+    }
+
+    const wsUrl = new URL(req.url);
+    const token = wsUrl.searchParams.get("token");
+    if (!token) {
+      return httpError("UNAUTHORIZED", "Unauthorized", 401);
+    }
+
+    const jwtResult = verifyToken(token, "vellum-daemon");
+    if (!jwtResult.ok) {
+      return httpError("UNAUTHORIZED", "Unauthorized", 401);
+    }
+
+    const subResult = parseSub(jwtResult.claims.sub);
+    if (!subResult.ok || subResult.principalType !== "svc_gateway") {
+      return httpError("UNAUTHORIZED", "Unauthorized", 401);
+    }
+
+    return null;
+  }
+
+  /**
+   * Shared path for gateway-proxied WebSocket upgrades: private network peers
+   * and origins only, then a gateway service token, then `parse` builds the
+   * socket data (or a 4xx Response) and the upgrade happens. The gateway owns
+   * downstream client auth and dials these upstreams on the client's behalf.
+   * Returns a Response on failure. On success Bun has consumed the request and
+   * nothing is returned; the type is `Response` only to fit the router.
+   */
+  private upgradeRuntimeStream(
+    req: Request,
+    server: ReturnType<typeof Bun.serve>,
+    label: string,
+    parse: (query: URLSearchParams) => AllWebSocketData | Response,
+  ): Response {
+    if (!isPrivateNetworkPeer(server, req) || !isPrivateNetworkOrigin(req)) {
+      return httpError(
+        "FORBIDDEN",
+        `Direct ${label} access disabled: only private network peers allowed`,
+        403,
+      );
+    }
+    const tokenError = this.verifyGatewayServiceToken(req);
+    if (tokenError) {
+      return tokenError;
+    }
+    const data = parse(new URL(req.url).searchParams);
+    if (data instanceof Response) {
+      return data;
+    }
+    if (!server.upgrade(req, { data })) {
+      return new Response("WebSocket upgrade failed", { status: 500 });
+    }
+    return undefined!;
+  }
+
+  private handleMediaStreamUpgrade(
+    req: Request,
+    server: ReturnType<typeof Bun.serve>,
+  ): Response {
+    return this.upgradeRuntimeStream(req, server, "media-stream", (query) => {
+      const callSessionId = query.get("callSessionId");
+      if (!callSessionId) {
+        return new Response("Missing callSessionId", { status: 400 });
+      }
+      // A distinct wsType routes these to MediaStreamCallSession.
+      return {
+        wsType: "media-stream",
+        callSessionId,
+      } satisfies MediaStreamWebSocketData;
+    });
+  }
+
+  /** Handle WebSocket upgrade for `/v1/stt/stream`. */
+  private handleSttStreamUpgrade(
+    req: Request,
+    server: ReturnType<typeof Bun.serve>,
+  ): Response {
+    return this.upgradeRuntimeStream(req, server, "STT stream", (query) => {
+      // provider is optional compatibility metadata; the runtime resolves
+      // the streaming transcriber from config (`services.stt.provider`).
+      const provider = query.get("provider") ?? undefined;
+      const mimeType = query.get("mimeType");
+      if (!mimeType) {
+        return new Response("Missing required query parameter: mimeType", {
+          status: 400,
+        });
+      }
+      const sampleRateRaw = query.get("sampleRate");
+      return {
+        wsType: "stt-stream",
+        provider,
+        mimeType,
+        sampleRate: sampleRateRaw ? parseInt(sampleRateRaw, 10) : undefined,
+        sessionId: crypto.randomUUID(),
+      } satisfies SttStreamWebSocketData;
+    });
+  }
+
+  /** Handle WebSocket upgrade for `/v1/live-voice`. */
+  private handleLiveVoiceUpgrade(
+    req: Request,
+    server: ReturnType<typeof Bun.serve>,
+  ): Response {
+    return this.upgradeRuntimeStream(req, server, "live voice", (query) => {
+      const guardianPrincipalId = query.get("guardianPrincipalId")?.trim();
+      return {
+        wsType: "live-voice",
+        ...(guardianPrincipalId ? { guardianPrincipalId } : {}),
+      } satisfies LiveVoiceWebSocketData;
+    });
+  }
+
+  /** Handle WebSocket upgrade for `/v1/watch/stream`. */
+  private handleWatchStreamUpgrade(
+    req: Request,
+    server: ReturnType<typeof Bun.serve>,
+  ): Response {
+    return this.upgradeRuntimeStream(req, server, "watch stream", (query) => {
+      const mimeType = query.get("mimeType");
+      if (!mimeType) {
+        return new Response("Missing required query parameter: mimeType", {
+          status: 400,
+        });
+      }
+      const sampleRateRaw = query.get("sampleRate");
+      const parsedTarget = parseWatchCaptureTarget(query);
+      if ("error" in parsedTarget) {
+        return new Response(parsedTarget.error, { status: 400 });
+      }
+      return {
+        wsType: "watch-stream",
+        mimeType,
+        sampleRate: sampleRateRaw ? parseInt(sampleRateRaw, 10) : undefined,
+        conversationId: query.get("conversationId")?.trim() || undefined,
+        clientId: query.get("clientId")?.trim() || undefined,
+        captureTarget: parsedTarget.captureTarget,
+        sessionId: crypto.randomUUID(),
+      } satisfies WatchStreamWebSocketData;
+    });
+  }
+
+  /**
+   * Handle WebSocket upgrade for `/v1/desktop/stream`. The feature gate runs
+   * in the open handler, as close code 4008.
+   */
+  private handleDesktopStreamUpgrade(
+    req: Request,
+    server: ReturnType<typeof Bun.serve>,
+  ): Response {
+    return this.upgradeRuntimeStream(
+      req,
+      server,
+      "desktop stream",
+      () => ({ wsType: "desktop-stream" }) satisfies DesktopStreamWebSocketData,
+    );
+  }
+
+  private async handleTwilioWebhook(
+    req: Request,
+    path: string,
+  ): Promise<Response | null> {
+    const twilioMatch = path.match(TWILIO_WEBHOOK_RE);
+    const gatewayTwilioMatch = !twilioMatch
+      ? path.match(TWILIO_GATEWAY_WEBHOOK_RE)
+      : null;
+    const resolvedTwilioSubpath = twilioMatch
+      ? twilioMatch[1]
+      : gatewayTwilioMatch
+        ? GATEWAY_SUBPATH_MAP[gatewayTwilioMatch[1]]
+        : null;
+    if (!resolvedTwilioSubpath || req.method !== "POST") {
+      return null;
+    }
+
+    const twilioSubpath = resolvedTwilioSubpath;
+
+    if (GATEWAY_ONLY_BLOCKED_SUBPATHS.has(twilioSubpath)) {
+      return httpError(
+        "GONE",
+        "Direct webhook access disabled. Use the gateway.",
+        410,
+      );
+    }
+
+    const validation = await validateTwilioWebhook(req);
+    if (validation instanceof Response) {
+      return validation;
+    }
+
+    const validatedReq = cloneRequestWithBody(req, validation.body);
+
+    if (twilioSubpath === "voice-webhook") {
+      return await handleVoiceWebhook(validatedReq);
+    }
+    if (twilioSubpath === "status") {
+      return await handleStatusCallback(validatedReq);
+    }
+
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Singleton
+// ---------------------------------------------------------------------------
+
+let instance: RuntimeHttpServer | null = null;
+
+/**
+ * Start the runtime HTTP server singleton early in daemon startup so /healthz
+ * answers ASAP.
+ *
+ * An occupied address (`EADDRINUSE`) aborts startup: whatever holds the port
+ * owns every HTTP client of this workspace, including the gateway proxy that
+ * fronts `/v1/*`. Continuing would leave a daemon that answers IPC (so `vellum
+ * ps` and platform status read healthy) while every proxied HTTP route 502s
+ * against a foreign listener. Any other bind failure (permission denied, fd
+ * exhaustion) is non-fatal, logged with the singleton left unset.
+ */
+export async function startRuntimeHttpServer(): Promise<void> {
+  const port = getRuntimeHttpPort();
+  const hostname = getRuntimeHttpHost();
+  log.info({ port }, "Daemon startup: starting runtime HTTP server");
+  const server = new RuntimeHttpServer({ port, hostname });
+  try {
+    await server.start();
+    instance = server;
+    log.info(
+      { port, hostname },
+      "Daemon startup: runtime HTTP server listening",
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") {
+      log.error(
+        { err, port, hostname },
+        "Runtime HTTP port already in use, aborting startup to avoid an HTTP-blind daemon",
+      );
+      throw makeAddrInUseError(
+        `Runtime HTTP port ${hostname}:${port} is already in use by another process. Stop it, or set RUNTIME_HTTP_PORT to a free port.`,
+        err,
+      );
+    }
+    log.warn(
+      { err, port },
+      "Failed to start runtime HTTP server, continuing without it",
+    );
+  }
+}
+
+/**
+ * Start the runtime HTTP server's ORM-touching background sweeps. Called by the
+ * daemon once DB migrations have settled — on success, or in the failed
+ * degraded mode where the DB opened and maintenance (guardian approval/action
+ * expiry, profile reaping) must still run; the retry sweep additionally skips
+ * its cycles while readiness is unready. Never called before migrations settle,
+ * so the sweeps can't race a schema mid-migration. No-op if the HTTP server
+ * isn't running or sweeps already started.
+ */
+export function startRuntimeHttpServerBackgroundSweeps(): void {
+  instance?.startBackgroundSweeps();
+}
+
+/** Stop the runtime HTTP server singleton if one is running; no-op otherwise. */
+export async function stopRuntimeHttpServer(): Promise<void> {
+  if (!instance) {
+    return;
+  }
+  await instance.stop();
+  instance = null;
+}

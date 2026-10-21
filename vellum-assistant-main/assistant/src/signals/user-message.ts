@@ -1,0 +1,409 @@
+/**
+ * Handle user-message signals delivered via signal files from the CLI.
+ *
+ * Each invocation writes JSON to a unique `signals/user-message.<requestId>`
+ * file. ConfigWatcher detects the new file and invokes
+ * {@link handleUserMessageSignal}, which reads the payload, dispatches
+ * the message through the daemon's send pipeline, and writes the result
+ * to `signals/user-message.<requestId>.result` for the CLI to pick up.
+ *
+ * Per-request filenames avoid dropped messages when overlapping invocations
+ * race on the same signal file.
+ */
+
+import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { v7 as uuidv7 } from "uuid";
+
+import { getConfig } from "../config/loader.js";
+import { resolveTurnCommitWaitMs } from "../daemon/abort-watchdog.js";
+import {
+  classifyInterruptEligibility,
+  interruptRunningTurn,
+} from "../daemon/conversation-interrupt.js";
+import { isConversationBusyError } from "../daemon/conversation-messaging.js";
+import { getOrCreateConversation } from "../daemon/conversation-store.js";
+import { supersedePendingInteractionsOnEnqueue } from "../daemon/handlers/conversations.js";
+import type { UserMessageAttachment } from "../daemon/message-types/shared.js";
+import {
+  processMessageInBackground,
+  resolveTurnChannel,
+  resolveTurnInterface,
+} from "../daemon/process-message.js";
+import { startAfterTurnFinalization } from "../daemon/turn-finalization.js";
+import {
+  uploadFileBackedAttachment,
+  validateAttachmentUpload,
+} from "../persistence/attachments-store.js";
+import { getOrCreateConversation as getOrCreateConversationKey } from "../persistence/conversation-key-store.js";
+import { checkIngressForSecrets } from "../security/secret-ingress.js";
+import { getLogger } from "../util/logger.js";
+import { getSignalsDir } from "../util/platform.js";
+
+const log = getLogger("signal:user-message");
+
+/** A file-backed attachment included in a signal payload. */
+export interface SignalAttachment {
+  /** Absolute path to the file on disk. */
+  path: string;
+  /** Display filename (e.g. "f_0001.jpg"). */
+  filename: string;
+  /** MIME type (e.g. "image/jpeg"). */
+  mimeType: string;
+}
+
+async function dispatchUserMessage(params: {
+  conversationKey: string;
+  content: string;
+  sourceChannel: string;
+  sourceInterface: string;
+  bypassSecretCheck?: boolean;
+  attachments?: SignalAttachment[];
+}): Promise<{ accepted: boolean; error?: string; message?: string }> {
+  if (!params.bypassSecretCheck) {
+    const ingressResult = checkIngressForSecrets(params.content);
+    if (ingressResult.blocked) {
+      return {
+        accepted: false,
+        error: "secret_blocked" as const,
+        message: ingressResult.userNotice,
+      };
+    }
+  }
+
+  const { conversationId } = getOrCreateConversationKey(params.conversationKey);
+  const conversation = await getOrCreateConversation(conversationId);
+
+  const attachmentIds: string[] = [];
+  const resolvedAttachments: UserMessageAttachment[] = [];
+  if (params.attachments && params.attachments.length > 0) {
+    for (const a of params.attachments) {
+      try {
+        const validation = validateAttachmentUpload(a.filename, a.mimeType);
+        if (!validation.ok) {
+          log.warn(
+            { error: validation.error, path: a.path },
+            "Signal attachment rejected by validation",
+          );
+          continue;
+        }
+        const size = statSync(a.path).size;
+        const stored = uploadFileBackedAttachment(
+          a.filename,
+          a.mimeType,
+          a.path,
+          size,
+        );
+        attachmentIds.push(stored.id);
+        resolvedAttachments.push({
+          id: stored.id,
+          filename: a.filename,
+          // The stored MIME, not the declared one: the store corrects a
+          // declared type that disagrees with the file's magic bytes, and the
+          // queued turn must send what the persisted row says.
+          mimeType: stored.mimeType,
+          data: "",
+          filePath: a.path,
+        });
+      } catch (err) {
+        log.warn({ err, path: a.path }, "Failed to register signal attachment");
+      }
+    }
+  }
+
+  /**
+   * Put the message on the queue and make sure something will drain it.
+   *
+   * Reached whenever this send cannot run now: any outcome but `released`, and
+   * also a `released` that loses the conversation again before the dispatch
+   * below can take it.
+   */
+  const queueSignalMessage = (): { accepted: boolean } => {
+    for (let i = resolvedAttachments.length - 1; i >= 0; i--) {
+      const att = resolvedAttachments[i];
+      if (att.filePath && !att.data) {
+        try {
+          att.data = readFileSync(att.filePath).toString("base64");
+        } catch (err) {
+          log.warn(
+            { err, path: att.filePath },
+            "Failed to read queued signal attachment, skipping",
+          );
+          resolvedAttachments.splice(i, 1);
+        }
+      }
+    }
+    const requestId = uuidv7();
+    const resolvedChannel = resolveTurnChannel(params.sourceChannel);
+    const resolvedInterface = resolveTurnInterface(params.sourceInterface);
+    const result = conversation.enqueueMessage({
+      content: params.content,
+      attachments: resolvedAttachments,
+      requestId,
+      metadata: {
+        userMessageChannel: resolvedChannel,
+        assistantMessageChannel: resolvedChannel,
+        userMessageInterface: resolvedInterface,
+        assistantMessageInterface: resolvedInterface,
+      },
+      // This branch has already decided the message cannot run now, so the
+      // enqueue's idle fast path (which stores nothing) would drop it. The
+      // conversation is routinely idle here: the interrupt fallback is reached
+      // after the turn it stopped has ended. The kick below is what runs it.
+      queueWhenIdle: true,
+    });
+    if (!result.rejected) {
+      // Mirror the HTTP send path: a follow-up enqueued while the turn is busy
+      // auto-denies pending confirmations and supersedes a parked ask_question
+      // so it isn't stranded behind the prompt until the response backstop.
+      // Best-effort — the message is already queued, so a cleanup failure must
+      // not surface as an error that makes the CLI retry and enqueue a duplicate.
+      try {
+        supersedePendingInteractionsOnEnqueue(conversationId, requestId);
+      } catch (err) {
+        log.warn(
+          { err, conversationId },
+          "Post-enqueue supersession failed — queued message unaffected",
+        );
+      }
+      // Same reason the HTTP send path kicks one: a message that lands on a
+      // conversation which is already idle has no running turn whose `finally`
+      // would drain it. Behind the finalization barrier for the same reason
+      // too: the interrupt's `busy` fallback is reached when the turn-boundary
+      // commit outran its budget, and a drain that started while it is still
+      // staging would have the drained turn's writes swept into it.
+      if (!conversation.isProcessing()) {
+        startAfterTurnFinalization(
+          conversationId,
+          resolveTurnCommitWaitMs(
+            getConfig().workspaceGit?.turnCommitMaxWaitMs,
+          ),
+          () => {
+            void conversation.kickDrainQueue(
+              "loop_complete",
+              "signal_send_idle",
+            );
+          },
+        );
+      }
+    }
+    return { accepted: !result.rejected };
+  };
+
+  /**
+   * Hand the message to the turn dispatch, queueing instead if the
+   * conversation is claimed again before it can take it.
+   */
+  const dispatchSignalMessage = async (): Promise<void> => {
+    try {
+      await processMessageInBackground(conversationId, params.content, {
+        attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined,
+        sourceChannel: params.sourceChannel,
+        sourceInterface: params.sourceInterface,
+      });
+    } catch (err) {
+      if (isConversationBusyError(err)) {
+        // `released` proves the interrupted turn let go, not that this send got
+        // the conversation: an idle waiter registered earlier (channel
+        // admission, an agent wake) can take it on the same transition. The
+        // dispatch then refuses, and without this the CLI's message would be
+        // lost to an internal error. Queue it, exactly as the HTTP route does
+        // when it loses the same race.
+        log.info(
+          { conversationId },
+          "Conversation was claimed again before the released send could dispatch; queueing instead",
+        );
+        queueSignalMessage();
+        return;
+      }
+      throw err;
+    }
+  };
+
+  if (conversation.isProcessing()) {
+    // Under `interrupt-on-send` this message stops the turn in flight and takes
+    // its place. The CLI carries no actor principal, so it is the guardian by
+    // the routes layer's convention and always allowed to interrupt.
+    //
+    // Decided synchronously so the acceptance can be written before any of the
+    // handover happens. The CLI stops waiting for the result file after 10 s,
+    // and the handover alone can spend the abort budget plus the turn-boundary
+    // commit wait, so awaiting it here made the CLI report a failure for a send
+    // that went on to land.
+    const interruptOptions = { origin: "signals/user-message" };
+    if (
+      classifyInterruptEligibility(conversation, interruptOptions) !==
+      "eligible"
+    ) {
+      // Anything not eligible queues, exactly as the flag-off path does.
+      return queueSignalMessage();
+    }
+    void interruptRunningTurn(conversation, interruptOptions)
+      .then(async (outcome) => {
+        // Every outcome but `released` queues. A `busy` that comes back after
+        // the interrupted turn has already ended is the case this must not
+        // treat as idle: its history carries a durable `tool_use` the repair
+        // could not answer, and running the message there would persist a user
+        // row after it.
+        if (outcome !== "released") {
+          queueSignalMessage();
+          return;
+        }
+        await dispatchSignalMessage();
+      })
+      .catch((err) => {
+        // Already accepted, so the message is this handler's responsibility and
+        // has to land somewhere. The queue is what survives.
+        log.error(
+          { err, conversationId },
+          "Interrupting signal send failed after acceptance; falling back to the queue",
+        );
+        try {
+          queueSignalMessage();
+        } catch (queueErr) {
+          log.error(
+            { err: queueErr, conversationId },
+            "Queue fallback for a failed interrupting signal send also failed",
+          );
+        }
+      });
+    return { accepted: true };
+  }
+
+  await dispatchSignalMessage();
+  return { accepted: true };
+}
+
+/**
+ * Read a `signals/user-message.<requestId>` file and dispatch the message
+ * through the daemon's send pipeline. Writes
+ * `signals/user-message.<requestId>.result` with the outcome so the CLI
+ * can display feedback. Called by ConfigWatcher when a matching signal
+ * file is created or modified.
+ */
+export async function handleUserMessageSignal(filename: string): Promise<void> {
+  const signalsDir = getSignalsDir();
+  const signalPath = join(signalsDir, filename);
+  const resultPath = join(signalsDir, `${filename}.result`);
+
+  const writeResult = (
+    data:
+      | {
+          ok: true;
+          accepted: boolean;
+          requestId: string;
+          error?: string;
+          message?: string;
+        }
+      | { ok: false; error: string; requestId: string | null },
+  ): void => {
+    try {
+      writeFileSync(resultPath, JSON.stringify(data));
+    } catch {
+      // Best-effort — filesystem may be broken.
+    }
+  };
+
+  let raw: string;
+  try {
+    raw = readFileSync(signalPath, "utf-8");
+  } catch {
+    // File may already be deleted (e.g. re-trigger from our own unlinkSync).
+    return;
+  }
+
+  try {
+    unlinkSync(signalPath);
+  } catch {
+    // Best-effort cleanup; the file may already be gone.
+  }
+
+  let parsedRequestId: string | undefined;
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      conversationKey?: string;
+      content?: string;
+      sourceChannel?: string;
+      interface?: string;
+      requestId?: string;
+      bypassSecretCheck?: boolean;
+      attachments?: Array<{
+        path?: string;
+        filename?: string;
+        mimeType?: string;
+      }>;
+    };
+    const { requestId } = parsed;
+    parsedRequestId = requestId;
+
+    if (!requestId || typeof requestId !== "string") {
+      log.warn("User-message signal missing requestId");
+      writeResult({ ok: false, error: "Missing requestId", requestId: null });
+      return;
+    }
+
+    if (!parsed.conversationKey || typeof parsed.conversationKey !== "string") {
+      log.warn("User-message signal missing conversationKey");
+      writeResult({
+        ok: false,
+        error: "Missing conversationKey",
+        requestId,
+      });
+      return;
+    }
+
+    if (!parsed.content || typeof parsed.content !== "string") {
+      log.warn("User-message signal missing content");
+      writeResult({ ok: false, error: "Missing content", requestId });
+      return;
+    }
+
+    // Validate and normalize attachments
+    const attachments: SignalAttachment[] = [];
+    if (Array.isArray(parsed.attachments)) {
+      for (const a of parsed.attachments) {
+        if (
+          typeof a.path === "string" &&
+          typeof a.filename === "string" &&
+          typeof a.mimeType === "string"
+        ) {
+          attachments.push({
+            path: a.path,
+            filename: a.filename,
+            mimeType: a.mimeType,
+          });
+        }
+      }
+    }
+
+    const result = await dispatchUserMessage({
+      conversationKey: parsed.conversationKey,
+      content: parsed.content,
+      sourceChannel: parsed.sourceChannel ?? "vellum",
+      sourceInterface: parsed.interface ?? "cli",
+      bypassSecretCheck: parsed.bypassSecretCheck === true,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    });
+
+    log.info(
+      { accepted: result.accepted },
+      "User message dispatched via signal file",
+    );
+    writeResult({
+      ok: true,
+      accepted: result.accepted,
+      requestId,
+      ...(result.error ? { error: result.error } : {}),
+      ...(result.message ? { message: result.message } : {}),
+    });
+  } catch (err) {
+    log.error({ err }, "Failed to handle user-message signal");
+    writeResult({
+      ok: false,
+      error: "Internal error",
+      requestId: parsedRequestId ?? null,
+    });
+  }
+}

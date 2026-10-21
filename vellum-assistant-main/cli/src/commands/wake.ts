@@ -1,0 +1,485 @@
+import {
+  SigningKeyContinuityError,
+  resolveExistingLocalSigningKey,
+} from "@vellumai/local-mode";
+import { writeFileSync } from "fs";
+import { join } from "path";
+
+import {
+  getDaemonPidPath,
+  resolveTargetAssistant,
+  saveAssistantEntry,
+} from "../lib/assistant-config.js";
+import { dockerResourceNames, wakeContainers } from "../lib/docker.js";
+import {
+  leaseGuardianToken,
+  resetGuardianBootstrap,
+  seedGuardianTokenFromSiblingEnv,
+} from "../lib/guardian-token.js";
+import {
+  probeDaemonReadinessWithRetry,
+  waitForDaemonMigrationsReady,
+} from "../lib/http-client.js";
+import { findOpenPort } from "../lib/port-allocator.js";
+import {
+  DAEMON_STOP_TIMEOUT_MS,
+  isProcessAlive,
+  resolveProcessState,
+  stopProcessByPidFile,
+} from "../lib/process";
+import {
+  generateLocalSigningKey,
+  isAssistantWatchModeAvailable,
+  isGatewayWatchModeAvailable,
+  startCes,
+  startLocalDaemon,
+  startGateway,
+} from "../lib/local";
+import {
+  DOCKER_GATEWAY_READY_TIMEOUT_MS,
+  restoreContainerTunnelEdge,
+  restoreTunnelEdgeAndAutoTunnel,
+} from "../lib/tunnel-edge.js";
+
+export async function wake(): Promise<void> {
+  const args = process.argv.slice(3);
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log("Usage: vellum wake [<name>] [options]");
+    console.log("");
+    console.log("Start the assistant and gateway processes.");
+    console.log("");
+    console.log("Arguments:");
+    console.log(
+      "  <name>    Name of the assistant to start (default: active or only local)",
+    );
+    console.log("");
+    console.log("Options:");
+    console.log(
+      "  --watch        Run assistant and gateway in watch mode (hot reload on source changes)",
+    );
+    console.log(
+      "  --foreground   Run assistant in foreground with logs printed to terminal",
+    );
+    console.log(
+      "  --repair-guardian  Force-re-provision the guardian token (resets the\n" +
+        "                     gateway bootstrap and re-leases — REVOKES other device-bound\n" +
+        "                     tokens; replaces an unrecoverable signing key and restarts services only then.\n" +
+        "                     Clients may need to authenticate again. Use deliberately.)",
+    );
+    process.exit(0);
+  }
+
+  const watch = args.includes("--watch");
+  const foreground = args.includes("--foreground");
+  // Re-leasing the guardian token calls guardian/init, which revokes every
+  // other device-bound token (other tabs, other local clients on this machine).
+  // Gate it behind an explicit flag so the automatic connect-repair path
+  // (`runWake` spawns `wake <id>` with no flags) can never revoke a live session
+  // — it only ever restarts + sibling-seeds. A genuine spent-bootstrap brick is
+  // recovered deliberately via `vellum wake <id> --repair-guardian`.
+  const repairGuardian = args.includes("--repair-guardian");
+  const nameArg = args.find((a) => !a.startsWith("-"));
+  const entry = resolveTargetAssistant(nameArg);
+
+  if (entry.cloud === "docker") {
+    if (watch || foreground) {
+      const ignored = [watch && "--watch", foreground && "--foreground"]
+        .filter(Boolean)
+        .join(" and ");
+      console.warn(
+        `Warning: ${ignored} ignored for Docker instances (not supported).`,
+      );
+    }
+    const res = dockerResourceNames(entry.assistantId);
+    await wakeContainers(res);
+    console.log("Docker containers started.");
+    await restoreContainerTunnelEdge(entry, DOCKER_GATEWAY_READY_TIMEOUT_MS);
+    console.log("Wake complete.");
+    return;
+  }
+
+  if (entry.cloud === "apple-container") {
+    console.error(
+      `Error: '${entry.assistantId}' uses the Apple Containers runtime. Its lifecycle is managed by the macOS app — use the app to start it.`,
+    );
+    process.exit(1);
+  }
+
+  if (entry.cloud === "paired") {
+    console.error(
+      `Error: '${entry.assistantId}' is a remote assistant paired from another machine — its lifecycle is managed on its host machine, not here. Use \`vellum client ${entry.assistantId}\` to chat with it.`,
+    );
+    process.exit(1);
+  }
+
+  if (entry.cloud && entry.cloud !== "local") {
+    console.error(
+      `Error: 'vellum wake' only works with local and docker assistants. '${entry.assistantId}' is a ${entry.cloud} instance.`,
+    );
+    process.exit(1);
+  }
+
+  if (!entry.resources) {
+    console.error(
+      `Error: Local assistant '${entry.assistantId}' is missing resource configuration. Re-hatch to fix.`,
+    );
+    process.exit(1);
+  }
+  const resources = entry.resources;
+  let signingKey: string;
+  let replacingSigningKey = false;
+  try {
+    signingKey = resolveExistingLocalSigningKey(resources);
+  } catch (error) {
+    if (!(error instanceof SigningKeyContinuityError)) {
+      throw error;
+    }
+    if (!repairGuardian) {
+      error.message += ` Run vellum wake ${JSON.stringify(entry.assistantId)} --repair-guardian to recover access. Repair may replace the signing key and require all clients to authenticate again.`;
+      throw error;
+    }
+    console.warn(
+      `Repairing authentication for ${entry.assistantId}: signing key ${error.code}. Replacing the signing key; all clients must authenticate again.`,
+    );
+    signingKey = generateLocalSigningKey();
+    replacingSigningKey = true;
+  }
+
+  // A replacement must reach both processes. Stop them before saving it so
+  // retries cannot attach to a surviving process that still uses the old key.
+  if (replacingSigningKey) {
+    for (const [file, label, port] of [
+      [
+        join(resources.instanceDir, ".vellum", "gateway.pid"),
+        "gateway",
+        resources.gatewayPort,
+      ],
+      [getDaemonPidPath(resources), "assistant", resources.daemonPort],
+    ] as const) {
+      const stopped = await stopProcessByPidFile(
+        file,
+        label,
+        undefined,
+        DAEMON_STOP_TIMEOUT_MS,
+      );
+      if (!stopped && isProcessAlive(file).alive) {
+        throw new Error(
+          `Cannot repair authentication: ${label} could not be stopped. Stop it and retry the same repair command; no replacement key was saved.`,
+        );
+      }
+      // A missing PID file does not prove the service has released its port.
+      try {
+        await findOpenPort(port, { maxAttempts: 1, host: "127.0.0.1" });
+      } catch {
+        throw new Error(
+          `Cannot repair authentication: could not confirm that ${label} port ${port} is free. Stop any process using it, then retry the same repair command; no replacement key was saved.`,
+        );
+      }
+    }
+  }
+  if (replacingSigningKey || signingKey !== resources.signingKey) {
+    resources.signingKey = signingKey;
+    saveAssistantEntry(entry);
+  }
+
+  const pidFile = getDaemonPidPath(resources);
+
+  // Budget anchor for the migration-coordination wait below: the host
+  // wrapper (packages/local-mode/src/wake.ts WAKE_TIMEOUT_MS) SIGTERMs wake
+  // after 180s, and the hung-daemon health wait + post-spawn wait + gateway
+  // start can already consume most of that.
+  const wakeStartedAt = Date.now();
+
+  let daemonRunning = false;
+  let daemonUnready = false;
+  let daemonMigrationsFailed = false;
+  const daemonState = await resolveProcessState(
+    pidFile,
+    resources.daemonPort,
+    "Assistant",
+    60_000,
+    "readyz",
+  );
+  if (daemonState.status !== "needs_start") {
+    if (daemonState.status === "stuck") {
+      daemonRunning = true;
+      daemonUnready = true;
+      console.log(
+        `Assistant running (pid ${daemonState.pid}) but is not responding and could not be stopped.`,
+      );
+    } else if (watch && isAssistantWatchModeAvailable()) {
+      console.log(
+        `Assistant running (pid ${daemonState.pid}) — restarting in watch mode...`,
+      );
+      const stopped = await stopProcessByPidFile(
+        pidFile,
+        "assistant",
+        undefined,
+        DAEMON_STOP_TIMEOUT_MS,
+      );
+      if (!stopped && isProcessAlive(pidFile).alive) {
+        daemonRunning = true;
+        daemonUnready = true;
+        console.log(
+          `Assistant running (pid ${daemonState.pid}) but could not be stopped for watch mode.`,
+        );
+      }
+    } else {
+      daemonRunning = true;
+      daemonUnready = daemonState.status !== "healthy";
+      daemonMigrationsFailed = daemonState.status === "migration_failed";
+      if (watch) {
+        console.log(
+          `Assistant running (pid ${daemonState.pid}) — watch mode not available (no source files). Keeping existing process.`,
+        );
+      } else if (daemonMigrationsFailed) {
+        console.log(
+          `Assistant running (pid ${daemonState.pid}) but its database migrations failed.`,
+        );
+      } else if (daemonUnready) {
+        console.log(
+          `Assistant running (pid ${daemonState.pid}) — database migrations still running.`,
+        );
+      } else {
+        console.log(`Assistant already running (pid ${daemonState.pid}).`);
+      }
+    }
+  }
+
+  let bootstrapSecret = entry.guardianBootstrapSecret;
+  let bootstrapSecretBackfilled = false;
+  if (!bootstrapSecret) {
+    bootstrapSecret = generateLocalSigningKey();
+    entry.guardianBootstrapSecret = bootstrapSecret;
+    saveAssistantEntry(entry);
+    bootstrapSecretBackfilled = true;
+  }
+
+  if (!daemonRunning) {
+    // Spin up CES and the daemon in parallel, the way the Docker topology
+    // brings its sibling containers up together — the assistant polls for the
+    // CES socket during startup (discoverCesWithRetry), so it tolerates CES
+    // still binding. CES's lifecycle tracks the daemon (its only consumer):
+    // restarting it under a live daemon would sever the daemon's open
+    // connection, so it is only (re)started alongside the daemon. startCes
+    // always launches the CES sibling unconditionally.
+    await Promise.all([
+      startCes(watch, resources),
+      startLocalDaemon(watch, resources, { foreground, signingKey }),
+    ]);
+    // A daemon that aborts during startup (an occupied runtime HTTP port, a
+    // fatal subsystem failure) leaves no process behind, and readiness alone
+    // cannot see that: whatever foreign listener holds the port answers the
+    // probe in its place. Liveness is the authoritative signal, so check it
+    // first and fail the command instead of reporting a successful wake for
+    // an assistant that is not running.
+    if (!isProcessAlive(pidFile).alive) {
+      console.error(
+        `Error: the assistant exited during startup and is not running. Its runtime HTTP port ${resources.daemonPort} may be held by another process (check \`lsof -i :${resources.daemonPort}\`); the daemon log records the startup error it reported.`,
+      );
+      process.exit(1);
+    }
+    // startLocalDaemon's post-spawn wait is bounded (60s), and a longer
+    // migration outlives it. Classify the fresh spawn the same way the
+    // attach path does, so the gateway-coordination wait below applies to
+    // both paths and wake's closing summary stays honest.
+    const readiness = await probeDaemonReadinessWithRetry(resources.daemonPort);
+    daemonUnready = readiness === "migrating";
+    daemonMigrationsFailed = readiness === "failed";
+  } else {
+    // Self-heal: the daemon is already healthy, but the CES sibling may have
+    // died independently (crash, OOM kill). A dead ces.pid under a live daemon
+    // means credential operations will fail until the next wake. Relaunch the
+    // sibling so the daemon's lazy reconnect (secure-keys.ts) picks it up on
+    // the next credential read. startCes always launches the sibling.
+    const vellumDir = join(resources.instanceDir, ".vellum");
+    const cesPidFile = join(vellumDir, "ces.pid");
+    const cesAlive = isProcessAlive(cesPidFile).alive;
+    if (!cesAlive) {
+      console.log("CES sibling not running — relaunching...");
+      await startCes(watch, resources);
+    }
+  }
+
+  // Start gateway
+  let gatewayStarted = false;
+  {
+    const vellumDir = join(resources.instanceDir, ".vellum");
+    const gatewayPidFile = join(vellumDir, "gateway.pid");
+    const gatewayState = await resolveProcessState(
+      gatewayPidFile,
+      resources.gatewayPort,
+      "Gateway",
+    );
+    const gatewayAlive = gatewayState.status === "healthy";
+    const gatewayStuck = gatewayState.status === "stuck";
+    const restartGateway = async (
+      restartWithWatch: boolean,
+    ): Promise<boolean> => {
+      const stopped = await stopProcessByPidFile(gatewayPidFile, "gateway");
+      if (!stopped && isProcessAlive(gatewayPidFile).alive) {
+        console.log(
+          `Gateway running (pid ${gatewayState.pid}) but could not be stopped.`,
+        );
+        return false;
+      }
+      await startGateway(restartWithWatch, resources, {
+        signingKey,
+        bootstrapSecret,
+      });
+      return true;
+    };
+    const needsRestart = bootstrapSecretBackfilled && gatewayAlive;
+    if (gatewayStuck) {
+      console.log(
+        `Gateway running (pid ${gatewayState.pid}) but is not responding and could not be stopped.`,
+      );
+    } else if (needsRestart) {
+      const restartWithWatch = watch && isGatewayWatchModeAvailable();
+      if (restartWithWatch) {
+        console.log(
+          `Gateway running (pid ${gatewayState.pid}) — restarting to apply bootstrap secret...`,
+        );
+      } else {
+        console.log(
+          `Gateway running (pid ${gatewayState.pid}) — restarting without watch mode to apply bootstrap secret...`,
+        );
+      }
+      gatewayStarted = await restartGateway(restartWithWatch);
+    } else if (gatewayAlive) {
+      if (watch && isGatewayWatchModeAvailable()) {
+        console.log(
+          `Gateway running (pid ${gatewayState.pid}) — restarting in watch mode...`,
+        );
+        gatewayStarted = await restartGateway(watch);
+      } else {
+        if (watch) {
+          console.log(
+            `Gateway running (pid ${gatewayState.pid}) — watch mode not available (no source files). Keeping existing process.`,
+          );
+        } else {
+          console.log(`Gateway already running (pid ${gatewayState.pid}).`);
+        }
+      }
+    } else {
+      await startGateway(watch, resources, { signingKey, bootstrapSecret });
+      gatewayStarted = true;
+    }
+  }
+
+  // A freshly-(re)started gateway refuses all non-probe traffic until the
+  // daemon reports migration readiness, so consumers that act right after
+  // wake (the web connect-repair retry, the guardian re-provision below)
+  // would hit its closed gate. When the daemon is migrating AND the gateway
+  // was just started (or a guardian repair was requested), wait out the
+  // migration — capped at 60s and at whatever budget remains before the
+  // 180s host-wrapper SIGTERM (30s headroom kept), since earlier bounded
+  // waits may already have consumed most of it. Fast path (gateway already
+  // serving, no repair) stays ~1s.
+  if (
+    daemonUnready &&
+    !daemonMigrationsFailed &&
+    (gatewayStarted || repairGuardian)
+  ) {
+    const waitBudgetMs = Math.min(60_000, wakeStartedAt + 150_000 - Date.now());
+    if (waitBudgetMs > 0) {
+      const readiness = await waitForDaemonMigrationsReady(
+        resources.daemonPort,
+        Date.now() + waitBudgetMs,
+      );
+      daemonUnready = readiness !== "ready";
+      daemonMigrationsFailed = readiness === "failed";
+    }
+  }
+
+  // Self-heal the guardian token when the current environment's config dir
+  // is missing it. Hatch cross-writes the lockfile across env dirs but the
+  // guardian token is only persisted under the hatch-time env, so a desktop
+  // app built under a different VELLUM_ENVIRONMENT can't find a bearer and
+  // cascades into 401 → auth-rate-limit → 429. A sibling env copy is cheap
+  // and strictly additive.
+  if (seedGuardianTokenFromSiblingEnv(entry.assistantId)) {
+    console.log("   Seeded guardian token from sibling environment.");
+  }
+
+  // Last-resort recovery (explicit `--repair-guardian` only): force a
+  // re-provision. Token health can't be judged locally — a connect can 401
+  // off a token whose local expiry looks fine (revoked, mis-seeded, wrong
+  // principal) — and the user explicitly confirmed the destructive repair,
+  // so guessing "looks healthy, skip" just recreates the no-op loop. The
+  // single-use bootstrap secret may already be spent — a prior connect can
+  // lease a token that's then lost, or the gateway marks the secret consumed
+  // before the client persists it — which otherwise bricks connect into a
+  // 401 → auth-rate-limit → 429 cascade with no path back short of retire+hatch.
+  // Reset the gateway's bootstrap lock+consumed state (loopback-only, authorized
+  // by the lockfile secret — mirrors the macOS client's forceReBootstrap), then
+  // re-lease. Gated behind the flag because the re-lease revokes other
+  // device-bound tokens; it must never run from the automatic repair path.
+  if (repairGuardian) {
+    const loopbackUrl = `http://127.0.0.1:${resources.gatewayPort}`;
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await resetGuardianBootstrap(loopbackUrl, bootstrapSecret);
+        await leaseGuardianToken(
+          loopbackUrl,
+          entry.assistantId,
+          bootstrapSecret,
+        );
+        console.log("   Re-provisioned guardian token.");
+        break;
+      } catch (err) {
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 2000 * 2 ** (attempt - 1)));
+        } else {
+          console.warn(
+            `   Guardian token re-provision failed after ${maxAttempts} attempts: ${err}`,
+          );
+          // The user explicitly confirmed this destructive repair — a
+          // success exit here would make callers (the web recovery flow)
+          // treat a repair that never ran as done and drop their cached
+          // gateway token. Surface the failure through the exit code.
+          process.exitCode = 1;
+        }
+      }
+    }
+  }
+
+  // Restore the nginx edge and point the webhook auto-tunnel at it. Non-fatal:
+  // a down edge is a degraded remote-web/webhook path, not a broken assistant.
+  const workspaceDir = join(resources.instanceDir, ".vellum", "workspace");
+  const ngrokChild = await restoreTunnelEdgeAndAutoTunnel(
+    entry.assistantId,
+    resources.gatewayPort,
+    workspaceDir,
+  );
+  if (ngrokChild?.pid) {
+    const ngrokPidFile = join(resources.instanceDir, ".vellum", "ngrok.pid");
+    writeFileSync(ngrokPidFile, String(ngrokChild.pid));
+  }
+
+  if (daemonMigrationsFailed) {
+    console.log(
+      "Assistant database migrations FAILED — DB-backed routes will return 503 until the assistant is restarted. Check the daemon logs.",
+    );
+  } else if (daemonUnready) {
+    console.log(
+      "Assistant is still running database migrations; DB-backed routes return 503 until they finish.",
+    );
+  }
+  console.log("Wake complete.");
+
+  if (foreground) {
+    console.log("Running in foreground (Ctrl+C to stop)...\n");
+    // Block forever — the daemon is running with inherited stdio so its
+    // output streams to this terminal. When the user hits Ctrl+C, SIGINT
+    // propagates to the daemon child and both exit.
+    await new Promise<void>((resolve) => {
+      process.on("SIGINT", () => {
+        console.log("\nShutting down...");
+        resolve();
+      });
+      process.on("SIGTERM", () => resolve());
+    });
+  }
+}

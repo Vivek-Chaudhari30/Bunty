@@ -1,0 +1,2543 @@
+import type {
+  WebSearchMetadata,
+  WebSearchResultItem,
+} from "../../api/events/tool-result.js";
+import { getConfig } from "../../config/loader.js";
+import { RiskLevel } from "../../permissions/types.js";
+import { getProviderKeyAsync } from "../../security/secure-keys.js";
+import { wrapUntrustedContent } from "../../security/untrusted-content.js";
+import { isAbortReason } from "../../util/abort-reasons.js";
+import { faviconUrlForDomain } from "../../util/favicon.js";
+import { getLogger } from "../../util/logger.js";
+import {
+  DEFAULT_BASE_DELAY_MS,
+  DEFAULT_MAX_RETRIES,
+  getHttpRetryDelay,
+  sleep,
+} from "../../util/retry.js";
+import { safeStringSlice } from "../../util/unicode.js";
+import type {
+  ToolContext,
+  ToolDefinition,
+  ToolExecutionResult,
+} from "../types.js";
+import { extractDomain } from "./domain-normalize.js";
+import {
+  extractFirecrawlCompatSearchResults,
+  FASTCRW_DEFAULT_API_BASE,
+  type FirecrawlCompatSearchResult,
+  resolveProviderApiUrl,
+  searchResultSnippet,
+} from "./firecrawl-compat.js";
+import type { ManagedSearchProxyResult } from "./managed-search-proxy.js";
+import {
+  classifyWebSearchFailure,
+  logWebSearchBackendFailure,
+  WEB_SEARCH_BACKEND_FAILURE_MESSAGE,
+} from "./web-search-error.js";
+
+const log = getLogger("web-search");
+
+const BRAVE_SEARCH_PATH = "/res/v1/web/search";
+const BRAVE_API_URL = `https://api.search.brave.com${BRAVE_SEARCH_PATH}`;
+const PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions";
+const TAVILY_API_URL = "https://api.tavily.com/search";
+const FIRECRAWL_API_URL = "https://api.firecrawl.dev/v2/search";
+const FASTCRW_SEARCH_PATH = "/v1/search";
+const TINYFISH_DEFAULT_SEARCH_API_BASE = "https://api.search.tinyfish.ai";
+const EXA_API_URL = "https://api.exa.ai/search";
+const SERPLY_API_URL = "https://api.serply.io/v1/search";
+// Serply returns at most 10 organic results per call; larger counts are
+// clamped on request and trimmed on response.
+const SERPLY_MAX_RESULTS = 10;
+// Keenable is keyless by default: the public path needs no key (rate-limited);
+// a key switches to the authenticated path and lifts the cap.
+const KEENABLE_API_BASE_URL = "https://api.keenable.ai";
+const KEENABLE_PUBLIC_SEARCH_PATH = "/v1/search/public";
+const KEENABLE_KEYED_SEARCH_PATH = "/v1/search";
+
+type WebSearchProvider =
+  | "perplexity"
+  | "brave"
+  | "tavily"
+  | "firecrawl"
+  | "keenable"
+  | "fastcrw"
+  | "searxng"
+  | "tinyfish"
+  | "exa"
+  | "serply";
+
+/**
+ * Arguments passed to every {@link WebSearchAdapter}. The full superset is
+ * always supplied; individual adapters ignore the fields they don't use
+ * (e.g. Perplexity ignores `count`, `offset`, and `freshness`).
+ */
+interface WebSearchAdapterArgs {
+  query: string;
+  count: number;
+  offset: number;
+  freshness: string | undefined;
+  apiKey: string;
+  signal?: AbortSignal;
+}
+
+/**
+ * One built-in web-search provider. Each adapter owns its HTTP shape,
+ * freshness mapping, retry behaviour, and result formatter. Registering a
+ * new provider becomes a single entry in {@link WEB_SEARCH_ADAPTERS}.
+ */
+interface WebSearchAdapter {
+  /** Stable provider identifier (matches config + secret-catalog values). */
+  readonly id: WebSearchProvider;
+  /** Secret-catalog key used to look up the API key via `getProviderKeyAsync`. */
+  readonly providerKeyName: string;
+  /**
+   * Position in the fallback chain (lower = earlier). Used when the
+   * configured provider has no key and we try other BYOK providers.
+   */
+  readonly fallbackOrder: number;
+  /**
+   * Provider that runs without a stored key (keyless by default; an optional
+   * key only lifts rate limits). When true, the dispatcher executes it even
+   * with an empty API key instead of erroring on a missing key.
+   */
+  readonly keyless?: boolean;
+  /** Execute one search against the provider's API. */
+  execute(args: WebSearchAdapterArgs): Promise<ToolExecutionResult>;
+}
+
+interface BraveSearchResult {
+  title: string;
+  url: string;
+  description: string;
+  age?: string;
+  extra_snippets?: string[];
+}
+
+interface BraveSearchResponse {
+  query?: { original: string; more_results_available?: boolean };
+  web?: { results?: BraveSearchResult[] };
+}
+
+interface PerplexityChoice {
+  message?: { content?: string };
+}
+
+interface PerplexityResponse {
+  choices?: PerplexityChoice[];
+  citations?: string[];
+}
+
+interface TavilySearchResult {
+  title?: string;
+  url?: string;
+  content?: string;
+  score?: number;
+  raw_content?: string | null;
+  favicon?: string;
+}
+
+interface TavilySearchResponse {
+  query?: string;
+  results?: TavilySearchResult[];
+}
+
+/**
+ * Firecrawl `/v2/search` and fastCRW `/v1/search` payloads. Result rows are
+ * read via {@link extractFirecrawlCompatSearchResults} (grouped `data.web`,
+ * self-hosted `data.results.web`, flat `data.results`, or array `data`).
+ */
+interface FirecrawlCompatSearchResponse {
+  success?: boolean;
+  data?:
+    | FirecrawlCompatSearchResult[]
+    | {
+        web?: FirecrawlCompatSearchResult[];
+        results?: FirecrawlCompatSearchResult[];
+        news?: FirecrawlCompatSearchResult[];
+        images?: unknown[];
+      };
+  warning?: string | null;
+}
+
+interface KeenableSearchResult {
+  title?: string;
+  url?: string;
+  /** The page's meta description. Empty for most pages; see keenableSnippet. */
+  description?: string;
+  /** The page text. This is what carries content on a Keenable result. */
+  snippet?: string;
+  published_at?: string;
+  acquired_at?: string;
+}
+
+interface KeenableSearchResponse {
+  query?: string;
+  results?: KeenableSearchResult[];
+}
+
+interface SearxngSearchResult {
+  title?: string;
+  url?: string;
+  content?: string;
+}
+
+interface SearxngSearchResponse {
+  query?: string;
+  results?: SearxngSearchResult[];
+}
+
+interface TinyfishSearchResult {
+  position?: number;
+  site_name?: string;
+  title?: string;
+  snippet?: string;
+  url?: string;
+  date?: string;
+}
+
+interface TinyfishSearchResponse {
+  query?: string;
+  results?: TinyfishSearchResult[];
+  total_results?: number;
+  page?: number;
+}
+
+interface ExaSearchResult {
+  id?: string;
+  title?: string | null;
+  url?: string;
+  publishedDate?: string | null;
+  author?: string | null;
+  highlights?: string[];
+}
+
+interface ExaSearchResponse {
+  requestId?: string;
+  results?: ExaSearchResult[];
+}
+
+interface SerplySearchResult {
+  title?: string | null;
+  link?: string;
+  description?: string | null;
+  position?: number;
+}
+
+interface SerplySearchResponse {
+  query?: string;
+  total?: number;
+  results?: SerplySearchResult[];
+}
+
+const SEARXNG_MISSING_INSTANCE_MESSAGE =
+  "SearXNG needs an instance URL. Set API Base in Settings under Web Search.";
+const SEARXNG_JSON_DISABLED_MESSAGE =
+  "This SearXNG instance did not return JSON. Enable the JSON format on the instance, or point API Base at an instance that allows it.";
+
+function getWebSearchProvider(): WebSearchProvider {
+  const config = getConfig();
+  const configured = config.services["web-search"].provider ?? "perplexity";
+  // In Your Own mode, `inference-provider-native` is only executable when the
+  // inference provider swaps this tool for a native hosted-search definition.
+  // If this app-executed tool is still invoked, fall back to the existing BYOK
+  // provider chain. `vellum` short-circuits into the managed branch before
+  // this function runs, so its coercion here only satisfies the return type
+  // and keeps an undefined WEB_SEARCH_ADAPTERS lookup unreachable.
+  if (configured === "inference-provider-native" || configured === "vellum") {
+    return "perplexity";
+  }
+  return configured as WebSearchProvider;
+}
+
+async function getApiKey(
+  provider: WebSearchProvider,
+): Promise<string | undefined> {
+  return (
+    (await getProviderKeyAsync(
+      WEB_SEARCH_ADAPTERS[provider].providerKeyName,
+    )) ?? undefined
+  );
+}
+
+function fallbackProvidersFor(
+  provider: WebSearchProvider,
+): readonly WebSearchProvider[] {
+  return WEB_SEARCH_FALLBACK_ORDER.filter(
+    (candidate) => candidate !== provider,
+  );
+}
+
+const CITATION_INSTRUCTION =
+  "\n\nWhen presenting these results, cite sources as inline markdown hyperlinks next to the claims they support (e.g., 'according to [Source Title](url)'). Do not list references separately at the end.";
+
+function formatBraveResults(
+  results: BraveSearchResult[],
+  query: string,
+): string {
+  if (results.length === 0) {
+    return `No results found for "${query}".`;
+  }
+
+  const lines: string[] = [`Web search results for "${query}":\n`];
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    lines.push(`${i + 1}. ${r.title}`);
+    lines.push(`   URL: ${r.url}`);
+    if (r.description) {
+      lines.push(`   ${r.description}`);
+    }
+    if (r.age) {
+      lines.push(`   Age: ${r.age}`);
+    }
+    if (r.extra_snippets && r.extra_snippets.length > 0) {
+      for (const snippet of r.extra_snippets) {
+        lines.push(`   > ${snippet}`);
+      }
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function formatPerplexityResults(
+  data: PerplexityResponse,
+  query: string,
+): string {
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    return `No results found for "${query}".`;
+  }
+
+  const lines: string[] = [`Web search results for "${query}":\n`];
+  lines.push(content);
+
+  if (data.citations && data.citations.length > 0) {
+    lines.push("\nSources:");
+    for (let i = 0; i < data.citations.length; i++) {
+      lines.push(`  [${i + 1}] ${data.citations[i]}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function formatTavilyResults(
+  data: TavilySearchResponse,
+  query: string,
+): string {
+  const results = data.results ?? [];
+
+  if (results.length === 0) {
+    return `No results found for "${query}".`;
+  }
+
+  const lines: string[] = [`Web search results for "${query}":\n`];
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const title = r.title?.trim() || r.url?.trim() || "Untitled result";
+    lines.push(`${i + 1}. ${title}`);
+    if (r.url) {
+      lines.push(`   URL: ${r.url}`);
+    }
+    if (r.content) {
+      lines.push(`   ${r.content}`);
+    }
+    if (typeof r.score === "number") {
+      lines.push(`   Score: ${r.score.toFixed(3)}`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function formatFirecrawlCompatResults(
+  data: FirecrawlCompatSearchResponse,
+  query: string,
+): string {
+  const results = extractFirecrawlCompatSearchResults(data);
+
+  if (results.length === 0) {
+    return `No results found for "${query}".`;
+  }
+
+  const lines: string[] = [`Web search results for "${query}":\n`];
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const title = r.title?.trim() || r.url?.trim() || "Untitled result";
+    lines.push(`${i + 1}. ${title}`);
+    if (r.url) {
+      lines.push(`   URL: ${r.url}`);
+    }
+    const snippet = searchResultSnippet(r);
+    if (snippet) {
+      lines.push(`   ${snippet}`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function buildBraveMetadata(
+  results: BraveSearchResult[],
+  query: string,
+  durationMs: number,
+): WebSearchMetadata {
+  const items: WebSearchResultItem[] = results.map((r, i) => {
+    const domain = extractDomain(r.url);
+    return {
+      rank: i + 1,
+      title: r.title,
+      url: r.url,
+      domain,
+      faviconUrl: faviconUrlForDomain(domain),
+      snippet: r.description,
+      age: r.age,
+    };
+  });
+  return {
+    query,
+    provider: "brave",
+    resultCount: items.length,
+    durationMs,
+    results: items,
+  };
+}
+
+function braveQueryParams(
+  query: string,
+  count: number,
+  offset: number,
+  freshness: string | undefined,
+): Record<string, string> {
+  const params: Record<string, string> = {
+    q: query,
+    count: String(count),
+    offset: String(offset),
+  };
+
+  const validFreshness = ["pd", "pw", "pm", "py"];
+  if (freshness && validFreshness.includes(freshness)) {
+    params.freshness = freshness;
+  }
+
+  return params;
+}
+
+function successfulBraveResult(
+  data: BraveSearchResponse,
+  query: string,
+  startedAt: number,
+): ToolExecutionResult {
+  const results = data.web?.results ?? [];
+  const durationMs = Date.now() - startedAt;
+  return {
+    content:
+      wrapUntrustedContent(formatBraveResults(results, query), {
+        source: "search",
+        sourceDetail: "brave",
+      }) + CITATION_INSTRUCTION,
+    isError: false,
+    activityMetadata: {
+      webSearch: buildBraveMetadata(results, query, durationMs),
+    },
+  };
+}
+
+function buildPerplexityMetadata(
+  data: PerplexityResponse,
+  query: string,
+  durationMs: number,
+): WebSearchMetadata {
+  const citations = data.citations ?? [];
+  const items: WebSearchResultItem[] = citations.map((url, i) => {
+    const domain = extractDomain(url);
+    return {
+      rank: i + 1,
+      title: "",
+      url,
+      domain,
+      faviconUrl: faviconUrlForDomain(domain),
+    };
+  });
+  return {
+    query,
+    provider: "perplexity",
+    resultCount: items.length,
+    durationMs,
+    results: items,
+  };
+}
+
+function buildTavilyMetadata(
+  data: TavilySearchResponse,
+  query: string,
+  durationMs: number,
+): WebSearchMetadata {
+  const results = data.results ?? [];
+  const items: WebSearchResultItem[] = results.map((r, i) => {
+    const url = r.url ?? "";
+    const domain = extractDomain(url);
+    return {
+      rank: i + 1,
+      title: r.title?.trim() || url.trim() || "Untitled result",
+      url,
+      domain,
+      faviconUrl: r.favicon ?? faviconUrlForDomain(domain),
+      snippet: r.content,
+      score: r.score,
+    };
+  });
+  return {
+    query,
+    provider: "tavily",
+    resultCount: items.length,
+    durationMs,
+    results: items,
+  };
+}
+
+function tavilyTimeRangeForFreshness(
+  freshness: string | undefined,
+): "day" | "week" | "month" | "year" | undefined {
+  switch (freshness) {
+    case "pd":
+      return "day";
+    case "pw":
+      return "week";
+    case "pm":
+      return "month";
+    case "py":
+      return "year";
+    default:
+      return undefined;
+  }
+}
+
+function buildFirecrawlCompatMetadata(
+  data: FirecrawlCompatSearchResponse,
+  query: string,
+  durationMs: number,
+  provider: "firecrawl" | "fastcrw",
+): WebSearchMetadata {
+  const results = extractFirecrawlCompatSearchResults(data);
+  const items: WebSearchResultItem[] = results.map((r, i) => {
+    const url = r.url ?? "";
+    const domain = extractDomain(url);
+    return {
+      rank: i + 1,
+      title: r.title?.trim() || url.trim() || "Untitled result",
+      url,
+      domain,
+      faviconUrl: faviconUrlForDomain(domain),
+      snippet: searchResultSnippet(r),
+    };
+  });
+  return {
+    query,
+    provider,
+    resultCount: items.length,
+    durationMs,
+    results: items,
+  };
+}
+
+/**
+ * Map the tool's `freshness` window onto Firecrawl's `tbs` time filter
+ * (`qdr:d` / `qdr:w` / `qdr:m` / `qdr:y`). Returns `undefined` for an
+ * unrecognized value so the request omits `tbs` entirely.
+ */
+function firecrawlTbsForFreshness(
+  freshness: string | undefined,
+): "qdr:d" | "qdr:w" | "qdr:m" | "qdr:y" | undefined {
+  switch (freshness) {
+    case "pd":
+      return "qdr:d";
+    case "pw":
+      return "qdr:w";
+    case "pm":
+      return "qdr:m";
+    case "py":
+      return "qdr:y";
+    default:
+      return undefined;
+  }
+}
+
+/** Characters of page text kept per result. Keenable returns the whole page on
+ * every search result, an order of magnitude more than the other providers here
+ * return, so it is capped to keep one search from filling the context. */
+const KEENABLE_SNIPPET_MAX_LENGTH = 500;
+
+/** Keenable sends both `snippet` and `description` on every result: `snippet`
+ * carries the page text and `description` is the page's meta description, which
+ * is empty for most pages. `||` rather than `??`, since the empty description is
+ * present rather than nullish. */
+function keenableSnippet(result: KeenableSearchResult): string {
+  const text = result.snippet || result.description || "";
+  return safeStringSlice(
+    text.replace(/\s+/g, " ").trim(),
+    0,
+    KEENABLE_SNIPPET_MAX_LENGTH,
+  );
+}
+
+function formatKeenableResults(
+  data: KeenableSearchResponse,
+  query: string,
+): string {
+  const results = data.results ?? [];
+  if (results.length === 0) {
+    return `No results found for "${query}".`;
+  }
+
+  const lines: string[] = [`Web search results for "${query}":\n`];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const title = r.title?.trim() || r.url?.trim() || "Untitled result";
+    lines.push(`${i + 1}. ${title}`);
+    if (r.url) {
+      lines.push(`   URL: ${r.url}`);
+    }
+    const snippet = keenableSnippet(r);
+    if (snippet) {
+      lines.push(`   ${snippet}`);
+    }
+    if (r.published_at) {
+      lines.push(`   Published: ${r.published_at}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+function buildKeenableMetadata(
+  data: KeenableSearchResponse,
+  query: string,
+  durationMs: number,
+): WebSearchMetadata {
+  const results = data.results ?? [];
+  const items: WebSearchResultItem[] = results.map((r, i) => {
+    const url = r.url ?? "";
+    const domain = extractDomain(url);
+    return {
+      rank: i + 1,
+      title: r.title?.trim() || url.trim() || "Untitled result",
+      url,
+      domain,
+      faviconUrl: faviconUrlForDomain(domain),
+      snippet: keenableSnippet(r),
+    };
+  });
+  return {
+    query,
+    provider: "keenable",
+    resultCount: items.length,
+    durationMs,
+    results: items,
+  };
+}
+
+function formatSearxngResults(
+  data: SearxngSearchResponse,
+  query: string,
+): string {
+  const results = data.results ?? [];
+  if (results.length === 0) {
+    return `No results found for "${query}".`;
+  }
+
+  const lines: string[] = [`Web search results for "${query}":\n`];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const title = r.title?.trim() || r.url?.trim() || "Untitled result";
+    lines.push(`${i + 1}. ${title}`);
+    if (r.url) {
+      lines.push(`   URL: ${r.url}`);
+    }
+    if (r.content) {
+      lines.push(`   ${r.content}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+function buildSearxngMetadata(
+  data: SearxngSearchResponse,
+  query: string,
+  durationMs: number,
+): WebSearchMetadata {
+  const results = data.results ?? [];
+  const items: WebSearchResultItem[] = results.map((r, i) => {
+    const url = r.url ?? "";
+    const domain = extractDomain(url);
+    return {
+      rank: i + 1,
+      title: r.title?.trim() || url.trim() || "Untitled result",
+      url,
+      domain,
+      faviconUrl: faviconUrlForDomain(domain),
+      snippet: r.content?.trim() || undefined,
+    };
+  });
+  return {
+    query,
+    provider: "searxng",
+    resultCount: items.length,
+    durationMs,
+    results: items,
+  };
+}
+
+function formatTinyfishResults(
+  data: TinyfishSearchResponse,
+  query: string,
+): string {
+  const results = data.results ?? [];
+  if (results.length === 0) {
+    return `No results found for "${query}".`;
+  }
+
+  const lines: string[] = [`Web search results for "${query}":\n`];
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    const title =
+      result.title?.trim() || result.url?.trim() || "Untitled result";
+    lines.push(`${i + 1}. ${title}`);
+    if (result.url) {
+      lines.push(`   URL: ${result.url}`);
+    }
+    if (result.snippet) {
+      lines.push(`   ${result.snippet}`);
+    }
+    if (result.date) {
+      lines.push(`   Published: ${result.date}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+function buildTinyfishMetadata(
+  data: TinyfishSearchResponse,
+  query: string,
+  durationMs: number,
+): WebSearchMetadata {
+  const results = data.results ?? [];
+  const items: WebSearchResultItem[] = results.map((result, index) => {
+    const url = result.url ?? "";
+    const domain = extractDomain(url);
+    return {
+      rank: index + 1,
+      title: result.title?.trim() || url.trim() || "Untitled result",
+      url,
+      domain,
+      faviconUrl: faviconUrlForDomain(domain),
+      snippet: result.snippet?.trim() || undefined,
+    };
+  });
+  return {
+    query,
+    provider: "tinyfish",
+    resultCount: items.length,
+    durationMs,
+    results: items,
+  };
+}
+
+function formatExaResults(data: ExaSearchResponse, query: string): string {
+  const results = data.results ?? [];
+  if (results.length === 0) {
+    return `No results found for "${query}".`;
+  }
+
+  const lines: string[] = [`Web search results for "${query}":\n`];
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    const title =
+      result.title?.trim() || result.url?.trim() || "Untitled result";
+    lines.push(`${i + 1}. ${title}`);
+    if (result.url) {
+      lines.push(`   URL: ${result.url}`);
+    }
+    const snippet = result.highlights?.join(" ").trim();
+    if (snippet) {
+      lines.push(`   ${snippet}`);
+    }
+    if (result.publishedDate) {
+      lines.push(`   Published: ${result.publishedDate}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+function buildExaMetadata(
+  data: ExaSearchResponse,
+  query: string,
+  durationMs: number,
+): WebSearchMetadata {
+  const results = data.results ?? [];
+  const items: WebSearchResultItem[] = results.map((result, index) => {
+    const url = result.url ?? "";
+    const domain = extractDomain(url);
+    return {
+      rank: index + 1,
+      title: result.title?.trim() || url.trim() || "Untitled result",
+      url,
+      domain,
+      faviconUrl: faviconUrlForDomain(domain),
+      snippet: result.highlights?.join(" ").trim() || undefined,
+    };
+  });
+  return {
+    query,
+    provider: "exa",
+    resultCount: items.length,
+    durationMs,
+    results: items,
+  };
+}
+
+function exaStartPublishedDateForFreshness(
+  freshness: string | undefined,
+  now: number = Date.now(),
+): string | undefined {
+  let days: number;
+  switch (freshness) {
+    case "pd":
+      days = 1;
+      break;
+    case "pw":
+      days = 7;
+      break;
+    case "pm":
+      days = 30;
+      break;
+    case "py":
+      days = 365;
+      break;
+    default:
+      return undefined;
+  }
+  return new Date(now - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function formatSerplyResults(
+  data: SerplySearchResponse,
+  query: string,
+): string {
+  const results = data.results ?? [];
+  if (results.length === 0) {
+    return `No results found for "${query}".`;
+  }
+
+  const lines: string[] = [`Web search results for "${query}":\n`];
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    const title =
+      result.title?.trim() || result.link?.trim() || "Untitled result";
+    lines.push(`${i + 1}. ${title}`);
+    if (result.link) {
+      lines.push(`   URL: ${result.link}`);
+    }
+    const snippet = result.description?.trim();
+    if (snippet) {
+      lines.push(`   ${snippet}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+function buildSerplyMetadata(
+  data: SerplySearchResponse,
+  query: string,
+  durationMs: number,
+): WebSearchMetadata {
+  const results = data.results ?? [];
+  const items: WebSearchResultItem[] = results.map((result, index) => {
+    const url = result.link ?? "";
+    const domain = extractDomain(url);
+    return {
+      rank: index + 1,
+      title: result.title?.trim() || url.trim() || "Untitled result",
+      url,
+      domain,
+      faviconUrl: faviconUrlForDomain(domain),
+      snippet: result.description?.trim() || undefined,
+    };
+  });
+  return {
+    query,
+    provider: "serply",
+    resultCount: items.length,
+    durationMs,
+    results: items,
+  };
+}
+
+/**
+ * Serply passes Google's `tbs` time filter through unchanged, so the tool's
+ * freshness buckets map onto the `qdr:` values Google understands.
+ */
+function serplyTbsForFreshness(
+  freshness: string | undefined,
+): string | undefined {
+  switch (freshness) {
+    case "pd":
+      return "qdr:d";
+    case "pw":
+      return "qdr:w";
+    case "pm":
+      return "qdr:m";
+    case "py":
+      return "qdr:y";
+    default:
+      return undefined;
+  }
+}
+
+function tinyfishRecencyMinutesForFreshness(
+  freshness: string | undefined,
+): number | undefined {
+  switch (freshness) {
+    case "pd":
+      return 24 * 60;
+    case "pw":
+      return 7 * 24 * 60;
+    case "pm":
+      return 30 * 24 * 60;
+    case "py":
+      return 365 * 24 * 60;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Map the tool's `freshness` window onto SearXNG's `time_range`
+ * (`day` / `month` / `year`). SearXNG has no week filter, so `pw` is omitted.
+ */
+function searxngTimeRangeForFreshness(
+  freshness: string | undefined,
+): "day" | "month" | "year" | undefined {
+  switch (freshness) {
+    case "pd":
+      return "day";
+    case "pm":
+      return "month";
+    case "py":
+      return "year";
+    default:
+      return undefined;
+  }
+}
+
+function isNonJsonSearchBody(contentType: string, bodyText: string): boolean {
+  const type = contentType.toLowerCase();
+  if (type.includes("text/html") || type.includes("application/xhtml")) {
+    return true;
+  }
+  const trimmed = bodyText.trimStart();
+  return trimmed.startsWith("<");
+}
+
+/**
+ * Map the tool's `freshness` window onto a Keenable `published_after` date
+ * (YYYY-MM-DD). Keenable filters by absolute publication date rather than a
+ * relative window, so we subtract the window from `now`. Returns `undefined`
+ * for an unrecognized value so the request omits the filter.
+ */
+function keenablePublishedAfterForFreshness(
+  freshness: string | undefined,
+): string | undefined {
+  const days: Record<string, number> = { pd: 1, pw: 7, pm: 30, py: 365 };
+  const window = freshness ? days[freshness] : undefined;
+  if (window === undefined) {
+    return undefined;
+  }
+  const since = new Date(Date.now() - window * 24 * 60 * 60 * 1000);
+  return since.toISOString().slice(0, 10);
+}
+
+function errorResult(
+  query: string,
+  provider: WebSearchProvider,
+  startedAt: number,
+  errorMessage: string,
+): ToolExecutionResult {
+  return {
+    content: `Error: ${errorMessage}`,
+    isError: true,
+    activityMetadata: {
+      webSearch: {
+        query,
+        provider,
+        resultCount: 0,
+        durationMs: Date.now() - startedAt,
+        results: [],
+        errorMessage,
+      },
+    },
+  };
+}
+
+/**
+ * Wrap an already-read provider response body so {@link backendFailureResult}
+ * forwards it into the classifier's internal-only `rawDetail` (telemetry). The
+ * classifier reads `error.message`; `buildRawDetail` truncates to ≤500 chars.
+ * Returns `undefined` for an empty body so we don't pad `rawDetail` with noise.
+ * The body must NEVER reach user-facing `content`/`errorMessage`.
+ */
+function rawBodyDetail(body: unknown): { message: string } | undefined {
+  if (body == null) {
+    return undefined;
+  }
+  const text = typeof body === "string" ? body : safeStringifyBody(body);
+  const trimmed = text.trim();
+  return trimmed ? { message: trimmed } : undefined;
+}
+
+function safeStringifyBody(body: unknown): string {
+  try {
+    return JSON.stringify(body);
+  } catch {
+    return String(body);
+  }
+}
+
+/**
+ * Build a {@link ToolExecutionResult} for a genuine backend/transport failure
+ * (5xx, post-retry rate-limit, thrown network/timeout error). Routes the raw
+ * detail through {@link classifyWebSearchFailure}: when it is a backend failure
+ * we surface the friendly recoverable copy (the bare sentence so the model
+ * reads it as guidance — retry / continue-without-search / paste-details —
+ * rather than fabricating) in both the model-facing `content` and the client
+ * `errorMessage`, and log the raw detail via telemetry. Non-backend categories
+ * (e.g. an unexpected 4xx) fall back to {@link errorResult} with `fallback`.
+ *
+ * Raw provider JSON / status text must never reach `content` or `errorMessage`;
+ * only `rawDetail` (internal-only) captures it for the log.
+ */
+function backendFailureResult(
+  query: string,
+  provider: WebSearchProvider,
+  startedAt: number,
+  raw: { error?: unknown; statusCode?: number; errorCode?: string },
+  fallback: string,
+): ToolExecutionResult {
+  const classification = classifyWebSearchFailure({
+    isError: true,
+    error: raw.error,
+    statusCode: raw.statusCode,
+    errorCode: raw.errorCode,
+  });
+
+  if (!classification.isBackendFailure) {
+    return errorResult(query, provider, startedAt, fallback);
+  }
+
+  logWebSearchBackendFailure(log, {
+    provider,
+    errorCategory: classification.category,
+    rawDetail: classification.rawDetail,
+    fallbackShown: true,
+    queryLength: query.length,
+  });
+
+  return {
+    content: WEB_SEARCH_BACKEND_FAILURE_MESSAGE,
+    isError: true,
+    activityMetadata: {
+      webSearch: {
+        query,
+        provider,
+        resultCount: 0,
+        durationMs: Date.now() - startedAt,
+        results: [],
+        errorMessage: WEB_SEARCH_BACKEND_FAILURE_MESSAGE,
+      },
+    },
+  };
+}
+
+/**
+ * Route a thrown fetch error (network/timeout) through {@link backendFailureResult}
+ * as a `backend_unavailable` candidate, falling back to a `Web search failed: …`
+ * error for non-backend throws (e.g. a JSON parse error).
+ *
+ * If the caller aborted the request (`signal.aborted` — the user hit Stop/Esc,
+ * or an external caller cancelled), the thrown error is re-thrown so the
+ * executor's existing cancellation handling takes over. A user-cancel must NOT
+ * surface the friendly backend copy or emit `web_search_backend_failure`
+ * telemetry. Internal fetch timeouts (where the caller's signal is not aborted)
+ * still route to the friendly backend result.
+ */
+function networkFailureResult(
+  query: string,
+  provider: WebSearchProvider,
+  startedAt: number,
+  err: unknown,
+  signal?: AbortSignal,
+): ToolExecutionResult {
+  if (signal?.aborted || isAbortReason((err as { reason?: unknown })?.reason)) {
+    throw err;
+  }
+  return backendFailureResult(
+    query,
+    provider,
+    startedAt,
+    { error: err },
+    `Web search failed: ${err instanceof Error ? err.message : String(err)}`,
+  );
+}
+
+async function executeBraveSearch(
+  query: string,
+  count: number,
+  offset: number,
+  freshness: string | undefined,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResult> {
+  const params = new URLSearchParams(
+    braveQueryParams(query, count, offset, freshness),
+  );
+  const url = `${BRAVE_API_URL}?${params.toString()}`;
+  const startedAt = Date.now();
+
+  for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        headers: {
+          Accept: "application/json",
+          "Accept-Encoding": "gzip",
+          "X-Subscription-Token": apiKey,
+        },
+        signal,
+      });
+    } catch (err) {
+      return networkFailureResult(query, "brave", startedAt, err, signal);
+    }
+
+    if (response.ok) {
+      const data = (await response.json()) as BraveSearchResponse;
+      return successfulBraveResult(data, query, startedAt);
+    }
+
+    const bodyText = await response.text();
+
+    if (response.status === 401 || response.status === 403) {
+      return errorResult(
+        query,
+        "brave",
+        startedAt,
+        "Invalid or expired Brave Search API key",
+      );
+    }
+
+    if (response.status === 429 && attempt < DEFAULT_MAX_RETRIES) {
+      const delayMs = getHttpRetryDelay(
+        response,
+        attempt,
+        DEFAULT_BASE_DELAY_MS,
+      );
+      log.warn(
+        { attempt: attempt + 1, delayMs },
+        "Brave Search rate limited, retrying",
+      );
+      await sleep(delayMs);
+      continue;
+    }
+
+    log.warn({ status: response.status }, "Brave Search API error");
+    return backendFailureResult(
+      query,
+      "brave",
+      startedAt,
+      { statusCode: response.status, error: rawBodyDetail(bodyText) },
+      response.status === 429
+        ? "Brave Search rate limit exceeded after retries. Try again shortly."
+        : `Brave Search API returned status ${response.status}`,
+    );
+  }
+
+  return backendFailureResult(
+    query,
+    "brave",
+    startedAt,
+    { statusCode: 429 },
+    "Brave Search rate limit exceeded after retries. Try again shortly.",
+  );
+}
+
+async function executeManagedBraveSearch(
+  query: string,
+  count: number,
+  offset: number,
+  freshness: string | undefined,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResult> {
+  const { callManagedSearchProxy } = await import("./managed-search-proxy.js");
+  const startedAt = Date.now();
+  const proxyResult = await callManagedSearchProxy(
+    "brave",
+    {
+      method: "GET",
+      path: BRAVE_SEARCH_PATH,
+      query: braveQueryParams(query, count, offset, freshness),
+      headers: {
+        Accept: "application/json",
+      },
+      body: null,
+    },
+    signal,
+  );
+
+  if (!proxyResult.ok) {
+    // Keep billing/auth/unavailable mapping as specific copy; route genuine
+    // platform 5xx (transport-level failures) to the friendly backend helper.
+    if (proxyResult.kind === "platform-error" && proxyResult.status >= 500) {
+      return backendFailureResult(
+        query,
+        "brave",
+        startedAt,
+        {
+          statusCode: proxyResult.status,
+          error: rawBodyDetail(proxyResult.body),
+        },
+        managedSearchProxyErrorMessage(proxyResult),
+      );
+    }
+    return errorResult(
+      query,
+      "brave",
+      startedAt,
+      managedSearchProxyErrorMessage(proxyResult),
+    );
+  }
+
+  if (proxyResult.status >= 200 && proxyResult.status < 300) {
+    return successfulBraveResult(
+      proxyResult.body as BraveSearchResponse,
+      query,
+      startedAt,
+    );
+  }
+
+  if (proxyResult.status === 401 || proxyResult.status === 403) {
+    return errorResult(
+      query,
+      "brave",
+      startedAt,
+      "Managed Brave Search is not authenticated correctly. This is a Vellum platform configuration issue.",
+    );
+  }
+
+  if (proxyResult.status === 429 || proxyResult.status >= 500) {
+    return backendFailureResult(
+      query,
+      "brave",
+      startedAt,
+      {
+        statusCode: proxyResult.status,
+        error: rawBodyDetail(proxyResult.body),
+      },
+      proxyResult.status === 429
+        ? "Managed Brave Search rate limit exceeded. Try again shortly."
+        : `Managed Brave Search provider returned status ${proxyResult.status}`,
+    );
+  }
+
+  return errorResult(
+    query,
+    "brave",
+    startedAt,
+    `Managed Brave Search provider returned status ${proxyResult.status}`,
+  );
+}
+
+function managedSearchProxyErrorMessage(
+  result: Exclude<ManagedSearchProxyResult, { ok: true }>,
+): string {
+  if (result.kind === "unavailable") {
+    return `${result.message} Log in to Vellum or choose a different web search provider in Settings.`;
+  }
+
+  if (result.kind === "platform-error" && result.status === 402) {
+    return "Managed web search is unavailable because your Vellum account balance is too low. Add funds or choose a different web search provider in Settings.";
+  }
+
+  if (result.kind === "platform-error") {
+    return `Managed web search platform request failed: ${result.message}`;
+  }
+
+  return result.message;
+}
+
+async function executePerplexitySearch(
+  query: string,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResult> {
+  const startedAt = Date.now();
+  for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(PERPLEXITY_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "sonar",
+          messages: [{ role: "user", content: query }],
+        }),
+        signal,
+      });
+    } catch (err) {
+      return networkFailureResult(query, "perplexity", startedAt, err, signal);
+    }
+
+    if (response.ok) {
+      const data = (await response.json()) as PerplexityResponse;
+      const durationMs = Date.now() - startedAt;
+      return {
+        content:
+          wrapUntrustedContent(formatPerplexityResults(data, query), {
+            source: "search",
+            sourceDetail: "perplexity",
+          }) + CITATION_INSTRUCTION,
+        isError: false,
+        activityMetadata: {
+          webSearch: buildPerplexityMetadata(data, query, durationMs),
+        },
+      };
+    }
+
+    const bodyText = await response.text();
+
+    if (response.status === 401 || response.status === 403) {
+      return errorResult(
+        query,
+        "perplexity",
+        startedAt,
+        "Invalid or expired Perplexity API key",
+      );
+    }
+
+    if (response.status === 429 && attempt < DEFAULT_MAX_RETRIES) {
+      const delayMs = getHttpRetryDelay(
+        response,
+        attempt,
+        DEFAULT_BASE_DELAY_MS,
+      );
+      log.warn(
+        { attempt: attempt + 1, delayMs },
+        "Perplexity rate limited, retrying",
+      );
+      await sleep(delayMs);
+      continue;
+    }
+
+    log.warn({ status: response.status }, "Perplexity API error");
+    return backendFailureResult(
+      query,
+      "perplexity",
+      startedAt,
+      { statusCode: response.status, error: rawBodyDetail(bodyText) },
+      response.status === 429
+        ? "Perplexity rate limit exceeded after retries. Try again shortly."
+        : `Perplexity API returned status ${response.status}`,
+    );
+  }
+
+  return backendFailureResult(
+    query,
+    "perplexity",
+    startedAt,
+    { statusCode: 429 },
+    "Perplexity rate limit exceeded after retries. Try again shortly.",
+  );
+}
+
+async function executeTavilySearch(
+  query: string,
+  count: number,
+  freshness: string | undefined,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResult> {
+  const timeRange = tavilyTimeRangeForFreshness(freshness);
+  const body: Record<string, unknown> = {
+    query,
+    search_depth: "advanced",
+    max_results: count,
+  };
+  if (timeRange) {
+    body.time_range = timeRange;
+  }
+
+  const startedAt = Date.now();
+
+  for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(TAVILY_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          "X-Client-Name": "vellum-assistant",
+        },
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (err) {
+      return networkFailureResult(query, "tavily", startedAt, err, signal);
+    }
+
+    if (response.ok) {
+      const data = (await response.json()) as TavilySearchResponse;
+      const durationMs = Date.now() - startedAt;
+      return {
+        content:
+          wrapUntrustedContent(formatTavilyResults(data, query), {
+            source: "search",
+            sourceDetail: "tavily",
+          }) + CITATION_INSTRUCTION,
+        isError: false,
+        activityMetadata: {
+          webSearch: buildTavilyMetadata(data, query, durationMs),
+        },
+      };
+    }
+
+    const bodyText = await response.text();
+
+    if (response.status === 401 || response.status === 403) {
+      return errorResult(
+        query,
+        "tavily",
+        startedAt,
+        "Invalid or expired Tavily API key",
+      );
+    }
+
+    if (response.status === 429 && attempt < DEFAULT_MAX_RETRIES) {
+      const delayMs = getHttpRetryDelay(
+        response,
+        attempt,
+        DEFAULT_BASE_DELAY_MS,
+      );
+      log.warn(
+        { attempt: attempt + 1, delayMs },
+        "Tavily Search rate limited, retrying",
+      );
+      await sleep(delayMs);
+      continue;
+    }
+
+    log.warn({ status: response.status }, "Tavily Search API error");
+    return backendFailureResult(
+      query,
+      "tavily",
+      startedAt,
+      { statusCode: response.status, error: rawBodyDetail(bodyText) },
+      response.status === 429
+        ? "Tavily Search rate limit exceeded after retries. Try again shortly."
+        : `Tavily Search API returned status ${response.status}`,
+    );
+  }
+
+  return backendFailureResult(
+    query,
+    "tavily",
+    startedAt,
+    { statusCode: 429 },
+    "Tavily Search rate limit exceeded after retries. Try again shortly.",
+  );
+}
+
+async function executeFirecrawlCompatSearch(
+  query: string,
+  count: number,
+  freshness: string | undefined,
+  apiKey: string,
+  options: {
+    endpoint: string;
+    provider: "firecrawl" | "fastcrw";
+    displayName: string;
+    signal?: AbortSignal;
+  },
+): Promise<ToolExecutionResult> {
+  const tbs = firecrawlTbsForFreshness(freshness);
+  const body: Record<string, unknown> = {
+    query,
+    limit: count,
+    sources: ["web"],
+  };
+  if (tbs) {
+    body.tbs = tbs;
+  }
+
+  const startedAt = Date.now();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-Client-Source": "vellum-assistant",
+  };
+  const trimmedKey = apiKey.trim();
+  if (trimmedKey.length > 0) {
+    headers.Authorization = `Bearer ${trimmedKey}`;
+  }
+
+  for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(options.endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: options.signal,
+      });
+    } catch (err) {
+      return networkFailureResult(
+        query,
+        options.provider,
+        startedAt,
+        err,
+        options.signal,
+      );
+    }
+
+    if (response.ok) {
+      const data = (await response.json()) as FirecrawlCompatSearchResponse;
+      const durationMs = Date.now() - startedAt;
+      return {
+        content:
+          wrapUntrustedContent(formatFirecrawlCompatResults(data, query), {
+            source: "search",
+            sourceDetail: options.provider,
+          }) + CITATION_INSTRUCTION,
+        isError: false,
+        activityMetadata: {
+          webSearch: buildFirecrawlCompatMetadata(
+            data,
+            query,
+            durationMs,
+            options.provider,
+          ),
+        },
+      };
+    }
+
+    const bodyText = await response.text();
+
+    if (response.status === 401 || response.status === 403) {
+      return errorResult(
+        query,
+        options.provider,
+        startedAt,
+        `Invalid or expired ${options.displayName} API key`,
+      );
+    }
+
+    if (response.status === 429 && attempt < DEFAULT_MAX_RETRIES) {
+      const delayMs = getHttpRetryDelay(
+        response,
+        attempt,
+        DEFAULT_BASE_DELAY_MS,
+      );
+      log.warn(
+        { attempt: attempt + 1, delayMs, provider: options.provider },
+        `${options.displayName} Search rate limited, retrying`,
+      );
+      await sleep(delayMs);
+      continue;
+    }
+
+    log.warn(
+      { status: response.status, provider: options.provider },
+      `${options.displayName} Search API error`,
+    );
+    return backendFailureResult(
+      query,
+      options.provider,
+      startedAt,
+      { statusCode: response.status, error: rawBodyDetail(bodyText) },
+      response.status === 429
+        ? `${options.displayName} Search rate limit exceeded after retries. Try again shortly.`
+        : `${options.displayName} Search API returned status ${response.status}`,
+    );
+  }
+
+  return backendFailureResult(
+    query,
+    options.provider,
+    startedAt,
+    { statusCode: 429 },
+    `${options.displayName} Search rate limit exceeded after retries. Try again shortly.`,
+  );
+}
+
+function executeFirecrawlSearch(
+  query: string,
+  count: number,
+  freshness: string | undefined,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResult> {
+  return executeFirecrawlCompatSearch(query, count, freshness, apiKey, {
+    endpoint: FIRECRAWL_API_URL,
+    provider: "firecrawl",
+    displayName: "Firecrawl",
+    signal,
+  });
+}
+
+function executeFastcrwSearch(
+  query: string,
+  count: number,
+  freshness: string | undefined,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResult> {
+  const endpoint = resolveProviderApiUrl(
+    getConfig().services["web-search"]?.apiBase,
+    FASTCRW_SEARCH_PATH,
+    FASTCRW_DEFAULT_API_BASE,
+  );
+  return executeFirecrawlCompatSearch(query, count, freshness, apiKey, {
+    endpoint,
+    provider: "fastcrw",
+    displayName: "fastCRW",
+    signal,
+  });
+}
+
+async function executeKeenableSearch(
+  query: string,
+  count: number,
+  freshness: string | undefined,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResult> {
+  // Keyless by default; a configured key switches to the authenticated path.
+  const trimmedKey = apiKey.trim();
+  const path = trimmedKey
+    ? KEENABLE_KEYED_SEARCH_PATH
+    : KEENABLE_PUBLIC_SEARCH_PATH;
+  const url = `${KEENABLE_API_BASE_URL}${path}`;
+
+  const body: Record<string, unknown> = { query, mode: "pro" };
+  const publishedAfter = keenablePublishedAfterForFreshness(freshness);
+  if (publishedAfter) {
+    body.published_after = publishedAfter;
+  }
+
+  const startedAt = Date.now();
+
+  for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
+    let response: Response;
+    try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-Keenable-Title": "Vellum Assistant",
+      };
+      if (trimmedKey) {
+        headers["X-API-Key"] = trimmedKey;
+      }
+      response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (err) {
+      return networkFailureResult(query, "keenable", startedAt, err, signal);
+    }
+
+    if (response.ok) {
+      const data = (await response.json()) as KeenableSearchResponse;
+      // Honor the requested result count client-side (the API returns a fixed set).
+      if (data.results && data.results.length > count) {
+        data.results = data.results.slice(0, count);
+      }
+      const durationMs = Date.now() - startedAt;
+      return {
+        content:
+          wrapUntrustedContent(formatKeenableResults(data, query), {
+            source: "search",
+            sourceDetail: "keenable",
+          }) + CITATION_INSTRUCTION,
+        isError: false,
+        activityMetadata: {
+          webSearch: buildKeenableMetadata(data, query, durationMs),
+        },
+      };
+    }
+
+    const bodyText = await response.text();
+
+    if (response.status === 401 || response.status === 403) {
+      return errorResult(
+        query,
+        "keenable",
+        startedAt,
+        "Invalid or expired Keenable API key",
+      );
+    }
+
+    if (response.status === 429 && attempt < DEFAULT_MAX_RETRIES) {
+      const delayMs = getHttpRetryDelay(
+        response,
+        attempt,
+        DEFAULT_BASE_DELAY_MS,
+      );
+      log.warn(
+        { attempt: attempt + 1, delayMs },
+        "Keenable Search rate limited, retrying",
+      );
+      await sleep(delayMs);
+      continue;
+    }
+
+    log.warn({ status: response.status }, "Keenable Search API error");
+    return backendFailureResult(
+      query,
+      "keenable",
+      startedAt,
+      { statusCode: response.status, error: rawBodyDetail(bodyText) },
+      response.status === 429
+        ? "Keenable Search rate limit exceeded after retries. Try again shortly."
+        : `Keenable Search API returned status ${response.status}`,
+    );
+  }
+
+  return backendFailureResult(
+    query,
+    "keenable",
+    startedAt,
+    { statusCode: 429 },
+    "Keenable Search rate limit exceeded after retries. Try again shortly.",
+  );
+}
+
+async function executeSearxngSearch(
+  query: string,
+  count: number,
+  freshness: string | undefined,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResult> {
+  const startedAt = Date.now();
+  const apiBase = getConfig().services["web-search"]?.apiBase?.trim() ?? "";
+  if (apiBase.length === 0) {
+    return errorResult(
+      query,
+      "searxng",
+      startedAt,
+      SEARXNG_MISSING_INSTANCE_MESSAGE,
+    );
+  }
+
+  const params = new URLSearchParams({
+    q: query,
+    format: "json",
+  });
+  const timeRange = searxngTimeRangeForFreshness(freshness);
+  if (timeRange) {
+    params.set("time_range", timeRange);
+  }
+  const url = `${resolveProviderApiUrl(apiBase, "/search", apiBase)}?${params.toString()}`;
+
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  };
+  const trimmedKey = apiKey.trim();
+  if (trimmedKey.length > 0) {
+    headers.Authorization = `Bearer ${trimmedKey}`;
+  }
+
+  for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        headers,
+        signal,
+      });
+    } catch (err) {
+      return networkFailureResult(query, "searxng", startedAt, err, signal);
+    }
+
+    const bodyText = await response.text();
+    const contentType = response.headers.get("content-type") ?? "";
+    if (isNonJsonSearchBody(contentType, bodyText)) {
+      return errorResult(
+        query,
+        "searxng",
+        startedAt,
+        SEARXNG_JSON_DISABLED_MESSAGE,
+      );
+    }
+
+    if (response.ok) {
+      let data: SearxngSearchResponse;
+      try {
+        data = JSON.parse(bodyText) as SearxngSearchResponse;
+      } catch {
+        return errorResult(
+          query,
+          "searxng",
+          startedAt,
+          SEARXNG_JSON_DISABLED_MESSAGE,
+        );
+      }
+      if (data.results && data.results.length > count) {
+        data.results = data.results.slice(0, count);
+      }
+      const durationMs = Date.now() - startedAt;
+      return {
+        content:
+          wrapUntrustedContent(formatSearxngResults(data, query), {
+            source: "search",
+            sourceDetail: "searxng",
+          }) + CITATION_INSTRUCTION,
+        isError: false,
+        activityMetadata: {
+          webSearch: buildSearxngMetadata(data, query, durationMs),
+        },
+      };
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      return errorResult(
+        query,
+        "searxng",
+        startedAt,
+        "SearXNG rejected the request. Check the instance URL, optional token, and that JSON search is enabled.",
+      );
+    }
+
+    if (response.status === 429 && attempt < DEFAULT_MAX_RETRIES) {
+      const delayMs = getHttpRetryDelay(
+        response,
+        attempt,
+        DEFAULT_BASE_DELAY_MS,
+      );
+      log.warn(
+        { attempt: attempt + 1, delayMs },
+        "SearXNG Search rate limited, retrying",
+      );
+      await sleep(delayMs);
+      continue;
+    }
+
+    log.warn({ status: response.status }, "SearXNG Search API error");
+    return backendFailureResult(
+      query,
+      "searxng",
+      startedAt,
+      { statusCode: response.status, error: rawBodyDetail(bodyText) },
+      response.status === 429
+        ? "SearXNG Search rate limit exceeded after retries. Try again shortly."
+        : `SearXNG Search API returned status ${response.status}`,
+    );
+  }
+
+  return backendFailureResult(
+    query,
+    "searxng",
+    startedAt,
+    { statusCode: 429 },
+    "SearXNG Search rate limit exceeded after retries. Try again shortly.",
+  );
+}
+
+async function executeTinyfishSearch(
+  query: string,
+  count: number,
+  freshness: string | undefined,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResult> {
+  const startedAt = Date.now();
+  const endpoint = resolveProviderApiUrl(
+    getConfig().services["web-search"]?.apiBase,
+    "/",
+    TINYFISH_DEFAULT_SEARCH_API_BASE,
+  );
+  const url = new URL(endpoint);
+  url.searchParams.set("query", query);
+  const recencyMinutes = tinyfishRecencyMinutesForFreshness(freshness);
+  if (recencyMinutes !== undefined) {
+    url.searchParams.set("recency_minutes", String(recencyMinutes));
+  }
+
+  const headers = {
+    Accept: "application/json",
+    "X-API-Key": apiKey.trim(),
+  };
+
+  for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url.toString(), { headers, signal });
+    } catch (err) {
+      return networkFailureResult(query, "tinyfish", startedAt, err, signal);
+    }
+
+    const bodyText = await response.text();
+    if (response.ok) {
+      let data: TinyfishSearchResponse;
+      try {
+        data = JSON.parse(bodyText) as TinyfishSearchResponse;
+      } catch {
+        return errorResult(
+          query,
+          "tinyfish",
+          startedAt,
+          "TinyFish Search returned an invalid JSON payload.",
+        );
+      }
+      if (data.results && data.results.length > count) {
+        data.results = data.results.slice(0, count);
+      }
+      const durationMs = Date.now() - startedAt;
+      return {
+        content:
+          wrapUntrustedContent(formatTinyfishResults(data, query), {
+            source: "search",
+            sourceDetail: "tinyfish",
+          }) + CITATION_INSTRUCTION,
+        isError: false,
+        activityMetadata: {
+          webSearch: buildTinyfishMetadata(data, query, durationMs),
+        },
+      };
+    }
+
+    if (response.status === 401) {
+      return errorResult(
+        query,
+        "tinyfish",
+        startedAt,
+        "Invalid or expired TinyFish API key",
+      );
+    }
+    if (response.status === 402) {
+      return errorResult(
+        query,
+        "tinyfish",
+        startedAt,
+        "TinyFish Search API access is not enabled for this account.",
+      );
+    }
+    if (response.status === 403) {
+      return errorResult(
+        query,
+        "tinyfish",
+        startedAt,
+        "TinyFish Search request was forbidden by the upstream service.",
+      );
+    }
+
+    if (response.status === 429 && attempt < DEFAULT_MAX_RETRIES) {
+      const delayMs = getHttpRetryDelay(
+        response,
+        attempt,
+        DEFAULT_BASE_DELAY_MS,
+      );
+      log.warn(
+        { attempt: attempt + 1, delayMs },
+        "TinyFish Search rate limited, retrying",
+      );
+      await sleep(delayMs);
+      continue;
+    }
+
+    log.warn({ status: response.status }, "TinyFish Search API error");
+    return backendFailureResult(
+      query,
+      "tinyfish",
+      startedAt,
+      { statusCode: response.status, error: rawBodyDetail(bodyText) },
+      response.status === 429
+        ? "TinyFish Search rate limit exceeded after retries. Try again shortly."
+        : `TinyFish Search API returned status ${response.status}`,
+    );
+  }
+
+  return backendFailureResult(
+    query,
+    "tinyfish",
+    startedAt,
+    { statusCode: 429 },
+    "TinyFish Search rate limit exceeded after retries. Try again shortly.",
+  );
+}
+
+async function executeExaSearch(
+  query: string,
+  count: number,
+  freshness: string | undefined,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResult> {
+  const startedAt = Date.now();
+  const requestBody: Record<string, unknown> = {
+    query,
+    type: "auto",
+    numResults: count,
+    contents: { highlights: true },
+  };
+  const startPublishedDate = exaStartPublishedDateForFreshness(freshness);
+  if (startPublishedDate !== undefined) {
+    requestBody.startPublishedDate = startPublishedDate;
+  }
+
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "x-api-key": apiKey.trim(),
+  };
+
+  for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(EXA_API_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(requestBody),
+        signal,
+      });
+    } catch (err) {
+      return networkFailureResult(query, "exa", startedAt, err, signal);
+    }
+
+    const bodyText = await response.text();
+    if (response.ok) {
+      let data: ExaSearchResponse;
+      try {
+        data = JSON.parse(bodyText) as ExaSearchResponse;
+      } catch {
+        return errorResult(
+          query,
+          "exa",
+          startedAt,
+          "Exa Search returned an invalid JSON payload.",
+        );
+      }
+      if (data.results && data.results.length > count) {
+        data.results = data.results.slice(0, count);
+      }
+      const durationMs = Date.now() - startedAt;
+      return {
+        content:
+          wrapUntrustedContent(formatExaResults(data, query), {
+            source: "search",
+            sourceDetail: "exa",
+          }) + CITATION_INSTRUCTION,
+        isError: false,
+        activityMetadata: {
+          webSearch: buildExaMetadata(data, query, durationMs),
+        },
+      };
+    }
+
+    if (response.status === 401) {
+      return errorResult(
+        query,
+        "exa",
+        startedAt,
+        "Invalid or expired Exa API key",
+      );
+    }
+    if (response.status === 402) {
+      return errorResult(
+        query,
+        "exa",
+        startedAt,
+        "Exa account has no remaining credits.",
+      );
+    }
+    if (response.status === 403) {
+      return errorResult(
+        query,
+        "exa",
+        startedAt,
+        "Exa Search request was forbidden by the upstream service.",
+      );
+    }
+
+    if (response.status === 429 && attempt < DEFAULT_MAX_RETRIES) {
+      const delayMs = getHttpRetryDelay(
+        response,
+        attempt,
+        DEFAULT_BASE_DELAY_MS,
+      );
+      log.warn(
+        { attempt: attempt + 1, delayMs },
+        "Exa Search rate limited, retrying",
+      );
+      await sleep(delayMs);
+      continue;
+    }
+
+    log.warn({ status: response.status }, "Exa Search API error");
+    return backendFailureResult(
+      query,
+      "exa",
+      startedAt,
+      { statusCode: response.status, error: rawBodyDetail(bodyText) },
+      response.status === 429
+        ? "Exa Search rate limit exceeded after retries. Try again shortly."
+        : `Exa Search API returned status ${response.status}`,
+    );
+  }
+
+  return backendFailureResult(
+    query,
+    "exa",
+    startedAt,
+    { statusCode: 429 },
+    "Exa Search rate limit exceeded after retries. Try again shortly.",
+  );
+}
+
+async function executeSerplySearch(
+  query: string,
+  count: number,
+  freshness: string | undefined,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResult> {
+  const startedAt = Date.now();
+  const params = new URLSearchParams({
+    q: query,
+    num: String(Math.min(count, SERPLY_MAX_RESULTS)),
+  });
+  const tbs = serplyTbsForFreshness(freshness);
+  if (tbs !== undefined) {
+    params.set("tbs", tbs);
+  }
+  const url = `${SERPLY_API_URL}?${params.toString()}`;
+
+  const headers = {
+    Accept: "application/json",
+    "X-Api-Key": apiKey.trim(),
+    "User-Agent": "vellum-assistant",
+  };
+
+  for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "GET", headers, signal });
+    } catch (err) {
+      return networkFailureResult(query, "serply", startedAt, err, signal);
+    }
+
+    const bodyText = await response.text();
+    if (response.ok) {
+      let data: SerplySearchResponse;
+      try {
+        data = JSON.parse(bodyText) as SerplySearchResponse;
+      } catch {
+        return errorResult(
+          query,
+          "serply",
+          startedAt,
+          "Serply Search returned an invalid JSON payload.",
+        );
+      }
+      if (data.results && data.results.length > count) {
+        data.results = data.results.slice(0, count);
+      }
+      const durationMs = Date.now() - startedAt;
+      return {
+        content:
+          wrapUntrustedContent(formatSerplyResults(data, query), {
+            source: "search",
+            sourceDetail: "serply",
+          }) + CITATION_INSTRUCTION,
+        isError: false,
+        activityMetadata: {
+          webSearch: buildSerplyMetadata(data, query, durationMs),
+        },
+      };
+    }
+
+    if (response.status === 401) {
+      return errorResult(
+        query,
+        "serply",
+        startedAt,
+        "Invalid or expired Serply API key",
+      );
+    }
+    if (response.status === 402) {
+      return errorResult(
+        query,
+        "serply",
+        startedAt,
+        "Serply account has no remaining credits.",
+      );
+    }
+    if (response.status === 403) {
+      return errorResult(
+        query,
+        "serply",
+        startedAt,
+        "Serply Search request was forbidden by the upstream service.",
+      );
+    }
+
+    if (response.status === 429 && attempt < DEFAULT_MAX_RETRIES) {
+      const delayMs = getHttpRetryDelay(
+        response,
+        attempt,
+        DEFAULT_BASE_DELAY_MS,
+      );
+      log.warn(
+        { attempt: attempt + 1, delayMs },
+        "Serply Search rate limited, retrying",
+      );
+      await sleep(delayMs);
+      continue;
+    }
+
+    log.warn({ status: response.status }, "Serply Search API error");
+    return backendFailureResult(
+      query,
+      "serply",
+      startedAt,
+      { statusCode: response.status, error: rawBodyDetail(bodyText) },
+      response.status === 429
+        ? "Serply Search rate limit exceeded after retries. Try again shortly."
+        : `Serply Search API returned status ${response.status}`,
+    );
+  }
+
+  return backendFailureResult(
+    query,
+    "serply",
+    startedAt,
+    { statusCode: 429 },
+    "Serply Search rate limit exceeded after retries. Try again shortly.",
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Adapter registry
+//
+// Each built-in provider exposes a {@link WebSearchAdapter} wrapping its
+// existing execute function. Adding a new provider means adding one adapter
+// const and one entry to `WEB_SEARCH_ADAPTERS` — the dispatcher, fallback
+// chain, and api-key lookup all derive from this table.
+// ----------------------------------------------------------------------------
+
+const perplexitySearchAdapter: WebSearchAdapter = {
+  id: "perplexity",
+  providerKeyName: "perplexity",
+  fallbackOrder: 1,
+  execute: ({ query, apiKey, signal }) =>
+    executePerplexitySearch(query, apiKey, signal),
+};
+
+const braveSearchAdapter: WebSearchAdapter = {
+  id: "brave",
+  providerKeyName: "brave",
+  fallbackOrder: 2,
+  execute: ({ query, count, offset, freshness, apiKey, signal }) =>
+    executeBraveSearch(query, count, offset, freshness, apiKey, signal),
+};
+
+const managedBraveSearchAdapter: WebSearchAdapter = {
+  id: "brave",
+  providerKeyName: "brave",
+  fallbackOrder: 2,
+  execute: ({ query, count, offset, freshness, signal }) =>
+    executeManagedBraveSearch(query, count, offset, freshness, signal),
+};
+
+const tavilySearchAdapter: WebSearchAdapter = {
+  id: "tavily",
+  providerKeyName: "tavily",
+  fallbackOrder: 3,
+  execute: ({ query, count, freshness, apiKey, signal }) =>
+    executeTavilySearch(query, count, freshness, apiKey, signal),
+};
+
+const firecrawlSearchAdapter: WebSearchAdapter = {
+  id: "firecrawl",
+  providerKeyName: "firecrawl",
+  fallbackOrder: 4,
+  execute: ({ query, count, freshness, apiKey, signal }) =>
+    executeFirecrawlSearch(query, count, freshness, apiKey, signal),
+};
+
+const keenableSearchAdapter: WebSearchAdapter = {
+  id: "keenable",
+  providerKeyName: "keenable",
+  fallbackOrder: 5,
+  keyless: true,
+  execute: ({ query, count, freshness, apiKey, signal }) =>
+    executeKeenableSearch(query, count, freshness, apiKey, signal),
+};
+
+const fastcrwSearchAdapter: WebSearchAdapter = {
+  id: "fastcrw",
+  providerKeyName: "fastcrw",
+  fallbackOrder: 6,
+  execute: ({ query, count, freshness, apiKey, signal }) =>
+    executeFastcrwSearch(query, count, freshness, apiKey, signal),
+};
+
+const searxngSearchAdapter: WebSearchAdapter = {
+  id: "searxng",
+  providerKeyName: "searxng",
+  fallbackOrder: 7,
+  keyless: true,
+  execute: ({ query, count, freshness, apiKey, signal }) =>
+    executeSearxngSearch(query, count, freshness, apiKey, signal),
+};
+
+const tinyfishSearchAdapter: WebSearchAdapter = {
+  id: "tinyfish",
+  providerKeyName: "tinyfish",
+  fallbackOrder: 8,
+  execute: ({ query, count, freshness, apiKey, signal }) =>
+    executeTinyfishSearch(query, count, freshness, apiKey, signal),
+};
+
+const exaSearchAdapter: WebSearchAdapter = {
+  id: "exa",
+  providerKeyName: "exa",
+  fallbackOrder: 9,
+  execute: ({ query, count, freshness, apiKey, signal }) =>
+    executeExaSearch(query, count, freshness, apiKey, signal),
+};
+
+const serplySearchAdapter: WebSearchAdapter = {
+  id: "serply",
+  providerKeyName: "serply",
+  fallbackOrder: 10,
+  execute: ({ query, count, freshness, apiKey, signal }) =>
+    executeSerplySearch(query, count, freshness, apiKey, signal),
+};
+
+/**
+ * All built-in web-search adapters keyed by provider id. The
+ * `Record<WebSearchProvider, ...>` shape forces TypeScript to flag any
+ * provider added to the union without a corresponding adapter.
+ */
+const WEB_SEARCH_ADAPTERS: Record<WebSearchProvider, WebSearchAdapter> = {
+  perplexity: perplexitySearchAdapter,
+  brave: braveSearchAdapter,
+  tavily: tavilySearchAdapter,
+  firecrawl: firecrawlSearchAdapter,
+  keenable: keenableSearchAdapter,
+  fastcrw: fastcrwSearchAdapter,
+  searxng: searxngSearchAdapter,
+  tinyfish: tinyfishSearchAdapter,
+  exa: exaSearchAdapter,
+  serply: serplySearchAdapter,
+};
+
+/**
+ * Fallback chain derived from {@link WEB_SEARCH_ADAPTERS}. Sorted by each
+ * adapter's `fallbackOrder` (lower first). Used when the configured provider
+ * has no API key and we try other BYOK providers before giving up.
+ */
+const WEB_SEARCH_FALLBACK_ORDER: readonly WebSearchProvider[] = Object.values(
+  WEB_SEARCH_ADAPTERS,
+)
+  .slice()
+  .sort((a, b) => a.fallbackOrder - b.fallbackOrder)
+  .map((adapter) => adapter.id);
+
+export const webSearchTool = {
+  name: "web_search",
+  description:
+    "Search the web and return results. Useful for looking up current information, documentation, or anything the assistant doesn't know.",
+  category: "network",
+  executionTarget: "sandbox",
+  defaultRiskLevel: RiskLevel.Low,
+  input_schema: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "The search query string",
+      },
+      count: {
+        type: "number",
+        description:
+          "Number of results to return (1-20, default 10). Used with Brave, Tavily, Firecrawl, Keenable, fastCRW, SearXNG, TinyFish, Exa, and Serply providers.",
+      },
+      offset: {
+        type: "number",
+        description:
+          "Pagination offset (0-9, default 0). Only used with Brave provider.",
+      },
+      freshness: {
+        type: "string",
+        description:
+          'Filter by recency: "pd" (past day), "pw" (past week), "pm" (past month), "py" (past year). Used with Brave, Tavily, Firecrawl, Keenable, fastCRW, SearXNG, TinyFish, Exa, and Serply providers. SearXNG maps day/month/year and omits week.',
+      },
+    },
+    required: ["query"],
+  },
+
+  async execute(
+    input: Record<string, unknown>,
+    context: ToolContext,
+  ): Promise<ToolExecutionResult> {
+    const query = input.query;
+    if (!query || typeof query !== "string") {
+      return {
+        content: "Error: query is required and must be a string",
+        isError: true,
+      };
+    }
+
+    const startedAt = Date.now();
+    // An explicit vellum choice is unconditionally managed: proxy errors
+    // (including 402) surface to the user and never fall back to BYOK keys.
+    const managedSearch =
+      getConfig().services["web-search"].provider === "vellum";
+
+    const count =
+      typeof input.count === "number"
+        ? Math.min(20, Math.max(1, Math.round(input.count)))
+        : 10;
+    const offset =
+      typeof input.offset === "number"
+        ? Math.min(9, Math.max(0, Math.round(input.offset)))
+        : 0;
+    const freshness =
+      typeof input.freshness === "string" ? input.freshness : undefined;
+
+    const executeManagedSearch = async (): Promise<ToolExecutionResult> => {
+      try {
+        log.debug({ query, provider: "brave" }, "Executing managed web search");
+        return await managedBraveSearchAdapter.execute({
+          query,
+          count,
+          offset,
+          freshness,
+          apiKey: "",
+          signal: context.signal,
+        });
+      } catch (err) {
+        log.error({ err }, "Managed web search failed");
+        return networkFailureResult(
+          query,
+          "brave",
+          startedAt,
+          err,
+          context.signal,
+        );
+      }
+    };
+
+    if (managedSearch) {
+      return executeManagedSearch();
+    }
+
+    let provider = getWebSearchProvider();
+    let apiKey = await getApiKey(provider);
+
+    const webSearchApiBase = getConfig().services["web-search"]?.apiBase;
+    const fastcrwAllowsKeylessSelfHost =
+      provider === "fastcrw" &&
+      typeof webSearchApiBase === "string" &&
+      webSearchApiBase.trim().length > 0;
+
+    // A keyless provider (e.g. Keenable) runs without a stored key, so skip the
+    // missing-key fallback/error entirely and execute it as configured.
+    // fastCRW with a custom API Base may also run without a key (self-hosted).
+    // Fallback: if a key-based provider has no key, try other BYOK search
+    // providers in a stable order. This preserves existing installs that only
+    // configured one search-provider key while still allowing new providers to
+    // be selected explicitly.
+    if (
+      !apiKey &&
+      !WEB_SEARCH_ADAPTERS[provider].keyless &&
+      !fastcrwAllowsKeylessSelfHost
+    ) {
+      for (const fallback of fallbackProvidersFor(provider)) {
+        const fallbackKey = await getApiKey(fallback);
+        if (!fallbackKey) {
+          continue;
+        }
+        log.info(
+          { from: provider, to: fallback },
+          "Configured web search provider has no API key, falling back",
+        );
+        provider = fallback;
+        apiKey = fallbackKey;
+        break;
+      }
+
+      if (!apiKey) {
+        // Provider Native reaches this app-executed path only when the
+        // inference model had no hosted search of its own. The user's own keys
+        // win above; the platform proxy is the last resort, which is what
+        // `mode: "managed"` did for installs that never configured a search
+        // key. Read the configured provider off config — the local `provider`
+        // has already been coerced to "perplexity".
+        if (
+          getConfig().services["web-search"].provider ===
+          "inference-provider-native"
+        ) {
+          const { managedSearchAvailable } =
+            await import("./managed-search-proxy.js");
+          if (await managedSearchAvailable()) {
+            return executeManagedSearch();
+          }
+        }
+        return errorResult(
+          query,
+          provider,
+          startedAt,
+          "No web search API key configured. Set it via `keys set perplexity <key>`, `keys set brave <key>`, `keys set tavily <key>`, `keys set firecrawl <key>`, or `keys set fastcrw <key>`, or `keys set tinyfish <key>`, or `keys set exa <key>`, or `keys set serply <key>`, or configure it from the Settings page under API Keys. Or switch the web-search provider to Keenable, which works without a key, or SearXNG with your instance URL.",
+        );
+      }
+    }
+
+    try {
+      log.debug({ query, provider }, "Executing web search");
+
+      return await WEB_SEARCH_ADAPTERS[provider].execute({
+        query,
+        count,
+        offset,
+        freshness,
+        apiKey: apiKey ?? "",
+        signal: context.signal,
+      });
+    } catch (err) {
+      log.error({ err }, "Web search failed");
+      return networkFailureResult(
+        query,
+        provider,
+        startedAt,
+        err,
+        context.signal,
+      );
+    }
+  },
+} satisfies ToolDefinition;

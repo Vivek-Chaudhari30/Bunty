@@ -1,0 +1,522 @@
+/**
+ * Resolve a single plugin's detail view: tracked metadata plus its README.
+ *
+ * Powers the daemon's `GET /v1/plugins/:name` route and, through it, the web
+ * plugin detail page. The detail view unions three sources, preferring the
+ * most authoritative for each field:
+ *   1. The locally installed copy under `<workspacePluginsDir>/<name>/`, when
+ *      present — its `package.json` and `README.md` are read straight off disk.
+ *   2. The catalog metadata for external ecosystem plugins (description /
+ *      homepage / license / pinned source). At the default ref, the gated
+ *      plugin catalog (platform-first, bundled offline) — the same source
+ *      `assistant plugins search` and install-by-name resolve. At an explicit
+ *      historical `ref`, the GitHub `plugins/marketplace.json` at that revision,
+ *      so a reviewed/rolled-back marketplace entry is inspected at the ref
+ *      requested (inherently a git operation, matching pin history / inspect).
+ *   3. The plugin's own external repository at the pinned `owner/repo[/path]`,
+ *      fetched via the GitHub Contents API for the README and any
+ *      `package.json` fields the manifest doesn't carry.
+ *
+ * The `source` field is the catalog entry's pinned origin when one claims the
+ * name, otherwise `null` — an installed copy with no catalog entry has no
+ * advertised origin. Name-collision precedence matches {@link ./search-plugins}
+ * and {@link ./install-from-github}: a catalog entry owns its name, so the
+ * detail page advertises the external source the catalog and installer use. A
+ * same-named `plugins/<name>/` directory is that plugin's adapter stub, not a
+ * standalone plugin, so it does not override the claim.
+ *
+ * Designed for direct programmatic use with an injected `fetch`, mirroring the
+ * sibling plugin libraries.
+ */
+
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { z } from "zod";
+
+import { getWorkspacePluginsDir } from "../../util/platform.js";
+import { readPluginManifest } from "../../util/plugin-manifest.js";
+import { readBundledPluginFile } from "./bundled-plugin-packages.js";
+import type { FetchLike } from "./fetch-like.js";
+import { sanitizePluginName } from "./install-from-github.js";
+import {
+  type PluginArtifact,
+  PluginPackageJsonSchema,
+} from "./plugin-artifact.js";
+import {
+  findCatalogEntry,
+  resolveSourceFromMatch,
+} from "./plugin-catalog-resolve.js";
+import { isPluginCatalogEntryVisible } from "./plugin-catalog-visibility.js";
+import { DEFAULT_PLUGIN_REF } from "./plugin-constants.js";
+import { readValidatedPluginIcon } from "./plugin-icon-file.js";
+import { fetchMarketplaceEntries } from "./plugin-marketplace.js";
+import {
+  marketplaceMatch,
+  PluginCatalogUnavailableError,
+  type PluginMatchSource,
+  type PluginSearchMatch,
+} from "./search-plugins.js";
+
+/** Recognised README filenames, matched case-insensitively against a listing. */
+const README_RE = /^readme(\.md|\.markdown)?$/i;
+
+/** Entry shape returned by the GitHub Contents API for a directory listing. */
+const GitHubContentEntrySchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  type: z.enum(["file", "dir", "symlink", "submodule"]),
+  download_url: z.string().nullable(),
+});
+
+const GitHubContentListingSchema = z.array(GitHubContentEntrySchema);
+
+type GitHubContentEntry = z.infer<typeof GitHubContentEntrySchema>;
+
+/** The subset of `package.json` fields the detail view surfaces. */
+interface PluginManifestFields {
+  readonly version: string | null;
+  readonly description: string | null;
+  readonly homepage: string | null;
+  readonly license: string | null;
+  readonly artifact: PluginArtifact | null;
+  readonly icon: string | null;
+}
+
+/** Options that control which plugin to resolve and at what ref. */
+export interface PluginDetailsOptions {
+  /** Install name (kebab-case directory name). */
+  readonly name: string;
+  /** Git ref to read catalog metadata / README from. Defaults to {@link DEFAULT_PLUGIN_REF}. */
+  readonly ref?: string;
+}
+
+/** Dependencies injected by the caller. */
+export interface PluginDetailsDeps {
+  /** HTTP client. Production callers pass `globalThis.fetch.bind(globalThis)`. */
+  readonly fetch: FetchLike;
+  /** Override the workspace plugins directory. Falls back to {@link getWorkspacePluginsDir}. */
+  readonly workspacePluginsDir?: string;
+}
+
+/** Resolved detail view for a single plugin. */
+export interface PluginDetails {
+  /** Install name. Matches `assistant plugins install <name>`. */
+  readonly name: string;
+  /** Whether a copy is materialized under the workspace plugins directory. */
+  readonly installed: boolean;
+  /** Short description, best-effort across the three sources; `null` when unknown. */
+  readonly description: string | null;
+  /** Project homepage URL, when known; `null` otherwise. */
+  readonly homepage: string | null;
+  /** SPDX license expression, when known; `null` otherwise. */
+  readonly license: string | null;
+  /** Resolved version (installed copy first, then repo `package.json`); `null` when unknown. */
+  readonly version: string | null;
+  /**
+   * Pinned origin, mirroring the catalog's {@link PluginMatchSource}; `null`
+   * when an installed copy has no catalog entry to advertise an origin.
+   */
+  readonly source: PluginMatchSource | null;
+  /** README markdown, or `null` when the plugin ships none. */
+  readonly readme: string | null;
+  /** Git ref the catalog metadata / README were resolved at. */
+  readonly ref: string;
+  /**
+   * Prebuilt client artifact (download URL + sha256) declared in the
+   * plugin's `package.json` `vellum.artifact`, resolved from the installed
+   * copy first then the repo; `null` when the plugin ships none or its
+   * descriptor is incomplete (e.g. a placeholder `sha256`).
+   */
+  readonly artifact: PluginArtifact | null;
+  /**
+   * Author-declared emoji icon from the plugin's `package.json` `vellum.icon`,
+   * resolved from the installed copy first then the repo; `null` when none.
+   */
+  readonly icon: string | null;
+  /**
+   * Whether the locally installed copy ships a valid author-bundled `icon.png`
+   * (validated for PNG magic, dimensions, and size). `false` when the plugin is
+   * not installed or ships no valid icon.
+   */
+  readonly hasIcon: boolean;
+  /**
+   * Content hash of the validated `icon.png`; `null` when {@link hasIcon} is
+   * false. A cache-buster for the bundled-icon endpoint.
+   */
+  readonly iconVersion: string | null;
+}
+
+/** No installed copy and no catalog/source entry claims the name. */
+export class PluginDetailsNotFoundError extends Error {
+  constructor(
+    readonly pluginName: string,
+    readonly ref: string,
+  ) {
+    super(`Plugin "${pluginName}" not found in the catalog (ref ${ref}).`);
+    this.name = "PluginDetailsNotFoundError";
+  }
+}
+
+/**
+ * Resolve the detail view for {@link opts.name}.
+ *
+ * Throws {@link PluginDetailsNotFoundError} when the name is neither installed
+ * locally nor present in the visibility-gated catalog at either the default
+ * or an explicit historical ref. A gated-catalog outage
+ * ({@link PluginCatalogUnavailableError}) degrades to the on-disk fields only
+ * when a local copy exists; with nothing installed to render it propagates so
+ * the caller can map the transient failure to a retryable 503 rather than a
+ * misleading 404. Network failures while enriching from GitHub always degrade —
+ * a detail page that renders metadata without a README beats a hard error.
+ */
+export async function getPluginDetails(
+  opts: PluginDetailsOptions,
+  deps: PluginDetailsDeps,
+): Promise<PluginDetails> {
+  const name = sanitizePluginName(opts.name);
+  const ref = opts.ref ?? DEFAULT_PLUGIN_REF;
+  const { fetch: fetchFn } = deps;
+
+  const pluginsDir = deps.workspacePluginsDir ?? getWorkspacePluginsDir();
+  const local = readLocalPlugin(pluginsDir, name);
+  // Validate the installed copy's bundled icon.png (fail-closed: a missing or
+  // invalid icon — including a not-installed plugin — resolves to no icon).
+  const localIcon = readValidatedPluginIcon(join(pluginsDir, name));
+
+  const catalogMatch = await resolveCatalogEntry(
+    name,
+    ref,
+    fetchFn,
+    local.installed,
+  );
+
+  if (!local.installed && !catalogMatch) {
+    throw new PluginDetailsNotFoundError(name, ref);
+  }
+
+  const source: PluginMatchSource | null = catalogMatch?.source ?? null;
+
+  const remote = source
+    ? await readRemotePlugin(source, fetchFn)
+    : { manifest: emptyManifest(), readme: null };
+
+  const readme = local.readme ?? remote.readme;
+
+  return {
+    name,
+    installed: local.installed,
+    description:
+      local.manifest.description ??
+      catalogMatch?.description ??
+      remote.manifest.description ??
+      null,
+    homepage:
+      local.manifest.homepage ??
+      catalogMatch?.homepage ??
+      remote.manifest.homepage ??
+      null,
+    license:
+      local.manifest.license ??
+      catalogMatch?.license ??
+      remote.manifest.license ??
+      null,
+    version: local.manifest.version ?? remote.manifest.version ?? null,
+    source,
+    readme,
+    ref,
+    artifact: local.manifest.artifact ?? remote.manifest.artifact,
+    icon: local.manifest.icon ?? remote.manifest.icon,
+    hasIcon: localIcon.hasIcon,
+    iconVersion: localIcon.iconVersion ?? null,
+  };
+}
+
+interface LocalPlugin {
+  readonly installed: boolean;
+  readonly manifest: PluginManifestFields;
+  readonly readme: string | null;
+}
+
+/** Read an installed copy's selected manifest and README off disk, if present. */
+function readLocalPlugin(pluginsDir: string, name: string): LocalPlugin {
+  const target = join(pluginsDir, name);
+  if (!existsSync(target)) {
+    return { installed: false, manifest: emptyManifest(), readme: null };
+  }
+
+  let manifest = emptyManifest();
+  try {
+    const packagePath = join(target, "package.json");
+    if (existsSync(packagePath)) {
+      // Detail metadata is intentionally lenient. An installed legacy package
+      // may omit the loader-required name while still carrying useful fields.
+      manifest = parseManifest(readFileSync(packagePath, "utf8"));
+    } else {
+      const selected = readPluginManifest(target);
+      const parsedPackageJson = PluginPackageJsonSchema.safeParse(selected.raw);
+      manifest = {
+        version: selected.version ?? null,
+        description: selected.description ?? null,
+        homepage: selected.homepage ?? null,
+        license: parsedPackageJson.success
+          ? (parsedPackageJson.data.license ?? null)
+          : null,
+        artifact: null,
+        icon: null,
+      };
+    }
+  } catch {
+    // A malformed local manifest degrades to empty fields. The entry is still
+    // installed, but it has no manifest metadata to surface.
+  }
+
+  return { installed: true, manifest, readme: readLocalReadme(target) };
+}
+
+/** Find a README file in a directory listing and read it, if any. */
+function readLocalReadme(dir: string): string | null {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const readme = names.find((n) => README_RE.test(n));
+  if (!readme) {
+    return null;
+  }
+  try {
+    return readFileSync(join(dir, readme), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+interface RemotePlugin {
+  readonly manifest: PluginManifestFields;
+  readonly readme: string | null;
+}
+
+/**
+ * Fetch README + `package.json` from the plugin's external repository.
+ *
+ * Lists the plugin's `owner/repo[/path]` directory fresh at its own pinned
+ * `source.ref` — the detail page must describe the same artifact the installer
+ * resolves from `source.ref`, even when that differs from the catalog ref
+ * (`main`).
+ */
+async function readRemotePlugin(
+  source: PluginMatchSource,
+  fetchFn: FetchLike,
+): Promise<RemotePlugin> {
+  if (source.kind === "local") {
+    const manifest = readBundledPluginFile(
+      source.path,
+      source.version,
+      "plugin.json",
+    );
+    return {
+      manifest: manifest ? safeParseManifest(manifest) : emptyManifest(),
+      readme: null,
+    };
+  }
+  const [owner, repo] = source.repo.split("/", 2) as [string, string];
+  const entries = await listDirSafe(
+    owner,
+    repo,
+    source.path ?? "",
+    source.ref,
+    fetchFn,
+  );
+
+  if (!entries) {
+    return { manifest: emptyManifest(), readme: null };
+  }
+
+  const readmeEntry = entries.find(
+    (e) => e.type === "file" && README_RE.test(e.name),
+  );
+  const pkgEntry = entries.find(
+    (e) => e.type === "file" && e.name === "package.json",
+  );
+
+  const [readme, manifest] = await Promise.all([
+    readmeEntry ? fetchRawFile(readmeEntry, fetchFn) : Promise.resolve(null),
+    pkgEntry
+      ? fetchRawFile(pkgEntry, fetchFn).then((raw) =>
+          raw ? safeParseManifest(raw) : emptyManifest(),
+        )
+      : Promise.resolve(emptyManifest()),
+  ]);
+
+  return { manifest, readme };
+}
+
+/** List a repo directory, returning `null` on 404 or any transient failure. */
+async function listDirSafe(
+  owner: string,
+  repo: string,
+  apiPath: string,
+  ref: string,
+  fetchFn: FetchLike,
+): Promise<readonly GitHubContentEntry[] | null> {
+  const suffix = apiPath
+    ? `/${encodeURIComponent(apiPath).replaceAll("%2F", "/")}`
+    : "";
+  const url =
+    `https://api.github.com/repos/${owner}/${repo}/contents${suffix}` +
+    `?ref=${encodeURIComponent(ref)}`;
+
+  try {
+    const res = await githubFetch(url, "application/vnd.github+json", fetchFn);
+    if (!res.ok) {
+      return null;
+    }
+    const parsed = GitHubContentListingSchema.safeParse(await res.json());
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Download a file entry's raw body, returning `null` on any failure. */
+async function fetchRawFile(
+  entry: GitHubContentEntry,
+  fetchFn: FetchLike,
+): Promise<string | null> {
+  if (!entry.download_url) {
+    return null;
+  }
+  try {
+    const res = await githubFetch(
+      entry.download_url,
+      "application/vnd.github.raw",
+      fetchFn,
+    );
+    if (!res.ok) {
+      return null;
+    }
+    return await res.text();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the external catalog entry claiming {@link name}.
+ *
+ * Both default and historical-ref lookups apply catalog visibility first. The
+ * default ref then reads the gated catalog used by search and install, while an
+ * explicit historical {@link ref} reads the GitHub marketplace manifest at
+ * that revision.
+ *
+ * A gated-catalog outage (fail-hard {@link PluginCatalogUnavailableError})
+ * propagates when nothing is installed — there is nothing to render and the
+ * failure is transient, so the caller maps it to a retryable 503 instead of a
+ * misleading not-found. When a local copy exists ({@link installed}) that same
+ * outage degrades to `null` so the view still renders from disk. A marketplace
+ * fetch/parse failure or a malformed entry always degrades to `null`: that
+ * metadata is supplementary, never required to render a detail view.
+ */
+async function resolveCatalogEntry(
+  name: string,
+  ref: string,
+  fetchFn: FetchLike,
+  installed: boolean,
+): Promise<PluginSearchMatch | null> {
+  if (!isPluginCatalogEntryVisible(name)) {
+    return null;
+  }
+  try {
+    const match =
+      ref === DEFAULT_PLUGIN_REF
+        ? await findCatalogEntry(name, { fetch: fetchFn })
+        : await findMarketplaceMatch(name, ref, fetchFn);
+    return validateCatalogMatchSource(match);
+  } catch (err) {
+    if (err instanceof PluginCatalogUnavailableError && !installed) {
+      throw err;
+    }
+    return null;
+  }
+}
+
+/**
+ * Guard a resolved catalog match through the installer's source validation.
+ *
+ * Returns the match only when {@link resolveSourceFromMatch} accepts its source
+ * (valid `owner/repo` slug, clean path, full commit SHA). A malformed row — the
+ * exact coordinate install-by-name refuses — resolves to `null`, so the detail
+ * view neither advertises its source nor enriches from it (metadata included):
+ * the whole row is untrusted, mirroring install rejecting it.
+ */
+function validateCatalogMatchSource(
+  match: PluginSearchMatch | null,
+): PluginSearchMatch | null {
+  if (!match) {
+    return null;
+  }
+  try {
+    resolveSourceFromMatch(match);
+    return match;
+  } catch {
+    return null;
+  }
+}
+
+/** Read the GitHub marketplace at {@link ref} and project the named entry. */
+async function findMarketplaceMatch(
+  name: string,
+  ref: string,
+  fetchFn: FetchLike,
+): Promise<PluginSearchMatch | null> {
+  const entries = await fetchMarketplaceEntries({ fetch: fetchFn }, { ref });
+  const entry = entries.find((e) => e.name === name);
+  return entry ? marketplaceMatch(entry) : null;
+}
+
+function githubFetch(
+  url: string,
+  accept: string,
+  fetchFn: FetchLike,
+): Promise<Response> {
+  return fetchFn(url, {
+    headers: { Accept: accept, "User-Agent": "vellum-assistant-cli" },
+  });
+}
+
+function emptyManifest(): PluginManifestFields {
+  return {
+    version: null,
+    description: null,
+    homepage: null,
+    license: null,
+    artifact: null,
+    icon: null,
+  };
+}
+
+function safeParseManifest(raw: string): PluginManifestFields {
+  try {
+    return parseManifest(raw);
+  } catch {
+    return emptyManifest();
+  }
+}
+
+/** Extract the surfaced fields from a `package.json` body. Throws on bad JSON. */
+function parseManifest(raw: string): PluginManifestFields {
+  const parsed = PluginPackageJsonSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) {
+    return emptyManifest();
+  }
+  return {
+    version: parsed.data.version ?? null,
+    description: parsed.data.description ?? null,
+    homepage: parsed.data.homepage ?? null,
+    license: parsed.data.license ?? null,
+    artifact: parsed.data.artifact ?? null,
+    icon: parsed.data.icon ?? null,
+  };
+}

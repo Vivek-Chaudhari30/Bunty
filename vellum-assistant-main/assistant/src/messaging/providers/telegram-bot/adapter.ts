@@ -1,0 +1,115 @@
+/**
+ * Telegram Bot messaging provider adapter.
+ *
+ * Calls the Telegram Bot API directly — no gateway proxy hop.
+ */
+
+import type { OAuthConnection } from "../../../oauth/connection.js";
+import { getConnectionByProvider } from "../../../oauth/oauth-store.js";
+import { credentialKey } from "../../../security/credential-key.js";
+import { getSecureKeyAsync } from "../../../security/secure-keys.js";
+import type { MessagingProvider } from "../../provider.js";
+import type {
+  ConnectionInfo,
+  Conversation,
+  HistoryOptions,
+  ListOptions,
+  Message,
+  SearchOptions,
+  SearchResult,
+} from "../../provider-types.js";
+import * as telegram from "./client.js";
+
+/** Read the Telegram bot token from the credential vault. */
+async function getBotToken(): Promise<string | undefined> {
+  return getSecureKeyAsync(credentialKey("telegram", "bot_token"));
+}
+
+export const telegramBotMessagingProvider: MessagingProvider = {
+  id: "telegram",
+  displayName: "Telegram",
+  credentialService: "telegram",
+  capabilities: new Set(),
+
+  async isConnected(): Promise<boolean> {
+    const conn = getConnectionByProvider("telegram");
+    if (!(conn && conn.status === "active")) {
+      return false;
+    }
+    const botToken = await getBotToken();
+    if (!botToken) {
+      return false;
+    }
+    const webhookSecret = await getSecureKeyAsync(
+      credentialKey("telegram", "webhook_secret"),
+    );
+    return !!webhookSecret;
+  },
+
+  async testConnection(_connection?: OAuthConnection): Promise<ConnectionInfo> {
+    const botToken = await getBotToken();
+    if (!botToken) {
+      return {
+        connected: false,
+        user: "unknown",
+        platform: "telegram",
+        metadata: {
+          error: "No bot token found. Run the telegram-setup skill.",
+        },
+      };
+    }
+
+    try {
+      const resp = await telegram.getMe(botToken);
+      if (!resp.ok || !resp.result) {
+        return {
+          connected: false,
+          user: "unknown",
+          platform: "telegram",
+          metadata: { error: resp.description ?? "getMe failed" },
+        };
+      }
+
+      return {
+        connected: true,
+        user: resp.result.username ?? resp.result.first_name,
+        platform: "telegram",
+        metadata: {
+          botId: resp.result.id,
+          botUsername: resp.result.username,
+          botName: resp.result.first_name,
+        },
+      };
+    } catch (e) {
+      return {
+        connected: false,
+        user: "unknown",
+        platform: "telegram",
+        metadata: { error: e instanceof Error ? e.message : "getMe failed" },
+      };
+    }
+  },
+
+  async listConversations(
+    _connection?: OAuthConnection,
+    _options?: ListOptions,
+  ): Promise<Conversation[]> {
+    return [];
+  },
+
+  async getHistory(
+    _connection: OAuthConnection | undefined,
+    _conversationId: string,
+    _options?: HistoryOptions,
+  ): Promise<Message[]> {
+    return [];
+  },
+
+  async search(
+    _connection: OAuthConnection | undefined,
+    _query: string,
+    _options?: SearchOptions,
+  ): Promise<SearchResult> {
+    return { total: 0, messages: [], hasMore: false };
+  },
+};

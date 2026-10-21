@@ -1,0 +1,687 @@
+/**
+ * Tests for `runBackgroundJob()`.
+ *
+ * Strategy: stub `bootstrapConversation`, `processMessage`, and
+ * `emitNotificationSignal` via `mock.module()` and inspect the recorded
+ * calls. We do NOT exercise the real conversation runtime here — the unit
+ * under test is the wrapper's contract:
+ *  - bootstrap is called once
+ *  - processMessage is awaited (or raced against a timeout)
+ *  - failure paths emit `activity.failed` (unless suppressed)
+ *  - the result is always a structured value, never a thrown error
+ */
+
+import { beforeEach, describe, expect, mock, test } from "bun:test";
+
+import { setOverridesForTesting } from "../../__tests__/feature-flag-test-helpers.js";
+import type { TrustContext } from "../../daemon/trust-context-types.js";
+
+// ── Module mocks ─────────────────────────────────────────────────────
+
+let bootstrapCalls = 0;
+let bootstrapLastArgs: Record<string, unknown> | null = null;
+let bootstrapError: Error | null = null;
+const STUB_CONVERSATION_ID = "conv-test-1";
+
+mock.module("../../persistence/conversation-bootstrap.js", () => ({
+  bootstrapConversation: (opts: Record<string, unknown>) => {
+    bootstrapCalls += 1;
+    bootstrapLastArgs = opts;
+    if (bootstrapError) {
+      throw bootstrapError;
+    }
+    return { id: STUB_CONVERSATION_ID };
+  },
+}));
+
+const addMessageCalls: Array<{
+  conversationId: string;
+  role: string;
+  content: string;
+}> = [];
+let addMessageError: Error | null = null;
+
+mock.module("../../persistence/conversation-crud.js", () => ({
+  addMessage: async (conversationId: string, role: string, content: string) => {
+    addMessageCalls.push({ conversationId, role, content });
+    if (addMessageError) {
+      throw addMessageError;
+    }
+    return { id: `msg-${addMessageCalls.length}` };
+  },
+  reserveMessage: mock(async () => ({ id: "msg-reserve" })),
+}));
+
+let processMessageImpl: (
+  conversationId: string,
+  content: string,
+  options: Record<string, unknown> | undefined,
+) => Promise<{
+  messageId: string;
+  turnFailure?: { failureCode?: string };
+}> = async () => ({ messageId: "msg-1" });
+const processMessageCalls: Array<{
+  conversationId: string;
+  content: string;
+  options: Record<string, unknown> | undefined;
+}> = [];
+
+mock.module("../../daemon/process-message.js", () => ({
+  processMessage: async (
+    conversationId: string,
+    content: string,
+    options: Record<string, unknown> | undefined,
+  ) => {
+    processMessageCalls.push({ conversationId, content, options });
+    return processMessageImpl(conversationId, content, options);
+  },
+}));
+
+const emitCalls: Array<Record<string, unknown>> = [];
+let emitImpl: (
+  params: Record<string, unknown>,
+) => Promise<unknown> = async () => ({
+  signalId: "sig-1",
+  deduplicated: false,
+  dispatched: true,
+  reason: "ok",
+  deliveryResults: [],
+});
+
+mock.module("../../notifications/emit-signal.js", () => ({
+  emitNotificationSignal: (params: Record<string, unknown>) => {
+    emitCalls.push(params);
+    return emitImpl(params);
+  },
+}));
+
+// Stub the pre-first-message gate. Default OPEN — every pre-existing
+// test assumes a fully-onboarded daemon. The dedicated "gate closed"
+// test flips this to false.
+let preFirstMessageGateOpen = true;
+mock.module("../pre-first-message-gate.js", () => ({
+  hasReceivedUserMessage: () => preFirstMessageGateOpen,
+}));
+
+// Web presence backs the `visibleInSourceNow` attention hint. Recording the
+// arguments lets the suppression tests assert not just the resolved hint but
+// whether presence was consulted at all.
+let webConversationFocused = false;
+const webPresenceArgs: unknown[][] = [];
+const realWebPresence = await import("../web-presence.js");
+mock.module("../web-presence.js", () => ({
+  ...realWebPresence,
+  isWebConversationFocused: (...args: unknown[]) => {
+    webPresenceArgs.push(args);
+    return webConversationFocused;
+  },
+}));
+
+// Import after mocks are in place.
+const { runBackgroundJob } = await import("../background-job-runner.js");
+
+// ── Shared fixtures ──────────────────────────────────────────────────
+
+const TRUST_CONTEXT: TrustContext = {
+  sourceChannel: "vellum",
+  trustClass: "guardian",
+};
+
+function baseOpts(overrides: Record<string, unknown> = {}) {
+  return {
+    jobName: "test-job",
+    source: "test-source",
+    prompt: "do the test",
+    trustContext: TRUST_CONTEXT,
+    callSite: "heartbeatAgent" as const,
+    timeoutMs: 5_000,
+    origin: "heartbeat" as const,
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  bootstrapCalls = 0;
+  bootstrapLastArgs = null;
+  bootstrapError = null;
+  processMessageCalls.length = 0;
+  emitCalls.length = 0;
+  addMessageCalls.length = 0;
+  addMessageError = null;
+  preFirstMessageGateOpen = true;
+  webConversationFocused = false;
+  webPresenceArgs.length = 0;
+  processMessageImpl = async () => ({ messageId: "msg-1" });
+  emitImpl = async () => ({
+    signalId: "sig-1",
+    deduplicated: false,
+    dispatched: true,
+    reason: "ok",
+    deliveryResults: [],
+  });
+});
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+describe("runBackgroundJob", () => {
+  test("success path: returns ok=true and emits no notification", async () => {
+    processMessageImpl = async () => ({ messageId: "msg-success" });
+
+    const result = await runBackgroundJob(baseOpts());
+
+    expect(result.ok).toBe(true);
+    expect(result.conversationId).toBe(STUB_CONVERSATION_ID);
+    expect(result.error).toBeUndefined();
+    expect(result.errorKind).toBeUndefined();
+    expect(bootstrapCalls).toBe(1);
+    expect(bootstrapLastArgs).toMatchObject({
+      conversationType: "background",
+      source: "test-source",
+      origin: "heartbeat",
+      systemHint: "do the test",
+      groupId: "system:background",
+    });
+    expect(processMessageCalls).toHaveLength(1);
+    expect(processMessageCalls[0].options).toMatchObject({
+      trustContext: TRUST_CONTEXT,
+      callSite: "heartbeatAgent",
+    });
+    // No requestOrigin set on baseOpts → none threaded to processMessage, so no
+    // origin-scoped permission grant can fire for an ordinary background job.
+    expect(
+      (processMessageCalls[0].options as { requestOrigin?: string })
+        .requestOrigin,
+    ).toBeUndefined();
+    expect(emitCalls).toHaveLength(0);
+  });
+
+  test("threads requestOrigin into processMessage options when set", async () => {
+    await runBackgroundJob(baseOpts({ requestOrigin: "memory_consolidation" }));
+
+    expect(processMessageCalls).toHaveLength(1);
+    expect(processMessageCalls[0].options).toMatchObject({
+      trustContext: TRUST_CONTEXT,
+      callSite: "heartbeatAgent",
+      requestOrigin: "memory_consolidation",
+    });
+  });
+
+  test("threads allowedTools + toolGateMode into processMessage options when set", async () => {
+    await runBackgroundJob(
+      baseOpts({
+        allowedTools: ["file_read", "bash"],
+        toolGateMode: "wire",
+      }),
+    );
+
+    expect(processMessageCalls).toHaveLength(1);
+    expect(processMessageCalls[0].options).toMatchObject({
+      allowedTools: ["file_read", "bash"],
+      toolGateMode: "wire",
+    });
+  });
+
+  test("omits allowedTools/toolGateMode from processMessage options when unset (ordinary jobs unchanged)", async () => {
+    await runBackgroundJob(baseOpts());
+
+    expect(processMessageCalls).toHaveLength(1);
+    const opts = processMessageCalls[0].options as {
+      allowedTools?: unknown;
+      toolGateMode?: unknown;
+    };
+    expect(opts.allowedTools).toBeUndefined();
+    expect(opts.toolGateMode).toBeUndefined();
+  });
+
+  test("threads skipPromptIndexing as skipUserMessageIndexing when set", async () => {
+    await runBackgroundJob(baseOpts({ skipPromptIndexing: true }));
+
+    expect(processMessageCalls).toHaveLength(1);
+    expect(processMessageCalls[0].options).toMatchObject({
+      skipUserMessageIndexing: true,
+    });
+  });
+
+  test("omits skipUserMessageIndexing when skipPromptIndexing is unset (prompts index by default)", async () => {
+    await runBackgroundJob(baseOpts());
+
+    expect(processMessageCalls).toHaveLength(1);
+    const opts = processMessageCalls[0].options as {
+      skipUserMessageIndexing?: unknown;
+    };
+    expect(opts.skipUserMessageIndexing).toBeUndefined();
+  });
+
+  test("generic exception: returns ok=false with errorKind=exception and emits activity.failed with dedupeKey", async () => {
+    processMessageImpl = async () => {
+      throw new Error("boom");
+    };
+
+    const result = await runBackgroundJob(baseOpts());
+
+    expect(result.ok).toBe(false);
+    expect(result.errorKind).toBe("exception");
+    expect(result.error).toBeInstanceOf(Error);
+    expect(result.error?.message).toBe("boom");
+    expect(result.conversationId).toBe(STUB_CONVERSATION_ID);
+
+    expect(emitCalls).toHaveLength(1);
+    const emitted = emitCalls[0];
+    expect(emitted.sourceEventName).toBe("activity.failed");
+    expect(emitted.sourceChannel).toBe("assistant_tool");
+    expect(emitted.sourceContextId).toBe(STUB_CONVERSATION_ID);
+    expect(emitted.contextPayload).toMatchObject({
+      jobName: "test-job",
+      errorMessage: "boom",
+      errorKind: "exception",
+    });
+    expect(emitted.attentionHints).toMatchObject({
+      requiresAction: false,
+      urgency: "medium",
+      isAsyncBackground: true,
+      visibleInSourceNow: false,
+    });
+    // Dedupe key collapses repeated failures of the same job per UTC day.
+    expect(typeof emitted.dedupeKey).toBe("string");
+    expect(emitted.dedupeKey as string).toMatch(
+      /^activity-failed:test-job:\d{4}-\d{2}-\d{2}$/,
+    );
+  });
+
+  test("non-throwing turn failure: returns ok=false with errorKind=model_provider and emits activity.failed", async () => {
+    // A failed LLM call (e.g. an invalid provider) does NOT throw — the turn
+    // persists a synthetic error message and processMessage resolves with a
+    // `turnFailure`. The runner must surface this as a failure, not ok=true.
+    processMessageImpl = async () => ({
+      messageId: "msg-failed-turn",
+      turnFailure: { failureCode: "PROVIDER_BILLING" },
+    });
+
+    const result = await runBackgroundJob(baseOpts());
+
+    expect(result.ok).toBe(false);
+    expect(result.errorKind).toBe("model_provider");
+    expect(result.error?.message).toContain("PROVIDER_BILLING");
+    expect(result.conversationId).toBe(STUB_CONVERSATION_ID);
+    // The stable classified code rides the result so callers can branch on
+    // the failure class without parsing the error message.
+    expect(result.turnFailure?.failureCode).toBe("PROVIDER_BILLING");
+
+    expect(emitCalls).toHaveLength(1);
+    expect(emitCalls[0].sourceEventName).toBe("activity.failed");
+    expect(
+      (emitCalls[0].contextPayload as { errorKind: string }).errorKind,
+    ).toBe("model_provider");
+    // A provider-scoped failure code keys the notification on the cause and
+    // the resolved provider scope, not the job. `heartbeatAgent` resolves the
+    // cost-optimized default profile, so every job failing on this code
+    // through that route collapses into one notification per UTC day.
+    expect(emitCalls[0].dedupeKey as string).toMatch(
+      /^activity-failed:cause:PROVIDER_BILLING:cost-optimized:\d{4}-\d{2}-\d{2}$/,
+    );
+  });
+
+  test("a usable overrideProfile scopes the cause-keyed dedupe", async () => {
+    processMessageImpl = async () => ({
+      messageId: "msg-failed-turn",
+      turnFailure: { failureCode: "PROVIDER_BILLING" },
+    });
+
+    await runBackgroundJob(baseOpts({ overrideProfile: "balanced" }));
+
+    expect(emitCalls).toHaveLength(1);
+    expect(emitCalls[0].dedupeKey as string).toMatch(
+      /^activity-failed:cause:PROVIDER_BILLING:balanced:\d{4}-\d{2}-\d{2}$/,
+    );
+  });
+
+  test("carried turn attribution scopes the dedupe and rides the payload", async () => {
+    processMessageImpl = async () => ({
+      messageId: "msg-failed-turn",
+      turnFailure: {
+        failureCode: "PROVIDER_BILLING",
+        userMessage: "You're out of credits.",
+        errorCategory: "credits_exhausted",
+        connectionName: "conn-a",
+        profileName: "balanced",
+      },
+    });
+
+    const result = await runBackgroundJob(baseOpts());
+
+    expect(result.ok).toBe(false);
+    expect(result.turnFailure?.userMessage).toBe("You're out of credits.");
+    expect(emitCalls).toHaveLength(1);
+    // The carried connection outranks the call site's recomputed profile.
+    expect(emitCalls[0].dedupeKey as string).toMatch(
+      /^activity-failed:cause:PROVIDER_BILLING:conn-a:\d{4}-\d{2}-\d{2}$/,
+    );
+    expect(emitCalls[0].contextPayload).toMatchObject({
+      failureSummary: "You're out of credits.",
+      errorCategory: "credits_exhausted",
+      connectionName: "conn-a",
+    });
+  });
+
+  test("job-specific failure code keeps the per-job dedupe key", async () => {
+    // CONTEXT_TOO_LARGE names a defect in this job's own prompt; collapsing
+    // it across jobs would hide a second job's unrelated failure.
+    processMessageImpl = async () => ({
+      messageId: "msg-failed-turn",
+      turnFailure: { failureCode: "CONTEXT_TOO_LARGE" },
+    });
+
+    const result = await runBackgroundJob(baseOpts());
+
+    expect(result.ok).toBe(false);
+    expect(result.turnFailure?.failureCode).toBe("CONTEXT_TOO_LARGE");
+    expect(emitCalls).toHaveLength(1);
+    expect(emitCalls[0].dedupeKey as string).toMatch(
+      /^activity-failed:test-job:\d{4}-\d{2}-\d{2}$/,
+    );
+  });
+
+  test("code-less provider failure dedupes on the shared model_provider cause", async () => {
+    processMessageImpl = async () => {
+      throw new Error("provider returned 401");
+    };
+
+    const result = await runBackgroundJob(baseOpts());
+
+    expect(result.ok).toBe(false);
+    expect(result.errorKind).toBe("model_provider");
+    expect(emitCalls).toHaveLength(1);
+    expect(emitCalls[0].dedupeKey as string).toMatch(
+      /^activity-failed:cause:model_provider:cost-optimized:\d{4}-\d{2}-\d{2}$/,
+    );
+  });
+
+  test("timeout: returns ok=false with errorKind=timeout and emits activity.failed", async () => {
+    // Never resolve — force timeout to win the race.
+    processMessageImpl = () => new Promise(() => {});
+
+    const result = await runBackgroundJob(baseOpts({ timeoutMs: 50 }));
+
+    expect(result.ok).toBe(false);
+    expect(result.errorKind).toBe("timeout");
+    expect(result.error?.message).toContain("timed out after 50ms");
+    expect(emitCalls).toHaveLength(1);
+    expect(emitCalls[0].sourceEventName).toBe("activity.failed");
+    expect(
+      (emitCalls[0].contextPayload as { errorKind: string }).errorKind,
+    ).toBe("timeout");
+    // A timeout is job-specific, so it keeps the per-job dedupe key.
+    expect(emitCalls[0].dedupeKey as string).toMatch(
+      /^activity-failed:test-job:\d{4}-\d{2}-\d{2}$/,
+    );
+  });
+
+  test("suppressFailureNotifications: failure returns ok=false but emits nothing", async () => {
+    processMessageImpl = async () => {
+      throw new Error("suppressed");
+    };
+
+    const result = await runBackgroundJob(
+      baseOpts({ suppressFailureNotifications: true }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errorKind).toBe("exception");
+    expect(result.error?.message).toBe("suppressed");
+    expect(emitCalls).toHaveLength(0);
+  });
+
+  test("onConversationCreated fires synchronously after bootstrap, BEFORE processMessage", async () => {
+    let processMessageStarted = false;
+    let callbackFiredBeforeProcessMessage = false;
+
+    processMessageImpl = async () => {
+      processMessageStarted = true;
+      // Delay completion so we can observe the ordering — even with the
+      // delay, the callback should already have fired.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      return { messageId: "msg-after" };
+    };
+
+    const seenConversationIds: string[] = [];
+    const onConversationCreated = (conversationId: string) => {
+      seenConversationIds.push(conversationId);
+      callbackFiredBeforeProcessMessage = !processMessageStarted;
+    };
+
+    const result = await runBackgroundJob(baseOpts({ onConversationCreated }));
+
+    expect(result.ok).toBe(true);
+    expect(seenConversationIds).toEqual([STUB_CONVERSATION_ID]);
+    expect(callbackFiredBeforeProcessMessage).toBe(true);
+  });
+
+  test("onConversationCreated callback throws are swallowed and the job still runs", async () => {
+    const result = await runBackgroundJob(
+      baseOpts({
+        onConversationCreated: () => {
+          throw new Error("callback boom");
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(processMessageCalls).toHaveLength(1);
+  });
+
+  test("conversationType=scheduled and scheduleJobId are propagated to bootstrapConversation", async () => {
+    await runBackgroundJob(
+      baseOpts({
+        conversationType: "scheduled",
+        scheduleJobId: "job-abc",
+      }),
+    );
+
+    expect(bootstrapLastArgs).toMatchObject({
+      conversationType: "scheduled",
+      scheduleJobId: "job-abc",
+    });
+  });
+
+  test("default conversationType is 'background' when not specified", async () => {
+    await runBackgroundJob(baseOpts());
+    expect(bootstrapLastArgs).toMatchObject({ conversationType: "background" });
+    // No scheduleJobId by default.
+    expect(bootstrapLastArgs).not.toHaveProperty("scheduleJobId");
+  });
+
+  test("empty sandwich prompt uses the postamble as the processMessage kickoff", async () => {
+    let addMessageCountAtProcessMessageStart = -1;
+    processMessageImpl = async () => {
+      addMessageCountAtProcessMessageStart = addMessageCalls.length;
+      return { messageId: "msg-final" };
+    };
+
+    await runBackgroundJob(
+      baseOpts({
+        prompt: "",
+        assistantSandwich: {
+          preamble: "TRUSTED_PRE",
+          content: "UNTRUSTED_PAYLOAD",
+          postamble: "TRUSTED_POST",
+        },
+      }),
+    );
+
+    // persistUserMessage rejects empty content, so the trusted postamble is
+    // the kickoff rather than a third addMessage plus an empty prompt.
+    expect(addMessageCalls).toHaveLength(2);
+    expect(addMessageCalls[0]).toMatchObject({
+      conversationId: STUB_CONVERSATION_ID,
+      role: "user",
+      content: "TRUSTED_PRE",
+    });
+    expect(addMessageCalls[1]).toMatchObject({
+      conversationId: STUB_CONVERSATION_ID,
+      role: "assistant",
+      content: "UNTRUSTED_PAYLOAD",
+    });
+    expect(processMessageCalls).toHaveLength(1);
+    expect(processMessageCalls[0].content).toBe("TRUSTED_POST");
+    expect(processMessageCalls[0].options).toMatchObject({
+      skipUserMessageIndexing: true,
+    });
+    expect(addMessageCountAtProcessMessageStart).toBe(2);
+    expect(emitCalls).toHaveLength(0);
+  });
+
+  test("non-empty sandwich prompt still seeds all three sandwich messages before processMessage", async () => {
+    let addMessageCountAtProcessMessageStart = -1;
+    processMessageImpl = async () => {
+      addMessageCountAtProcessMessageStart = addMessageCalls.length;
+      return { messageId: "msg-final" };
+    };
+
+    await runBackgroundJob(
+      baseOpts({
+        prompt: "do the test",
+        assistantSandwich: {
+          preamble: "TRUSTED_PRE",
+          content: "UNTRUSTED_PAYLOAD",
+          postamble: "TRUSTED_POST",
+        },
+      }),
+    );
+
+    expect(addMessageCalls).toHaveLength(3);
+    expect(addMessageCalls[0]).toMatchObject({
+      conversationId: STUB_CONVERSATION_ID,
+      role: "user",
+      content: "TRUSTED_PRE",
+    });
+    expect(addMessageCalls[1]).toMatchObject({
+      conversationId: STUB_CONVERSATION_ID,
+      role: "assistant",
+      content: "UNTRUSTED_PAYLOAD",
+    });
+    expect(addMessageCalls[2]).toMatchObject({
+      conversationId: STUB_CONVERSATION_ID,
+      role: "user",
+      content: "TRUSTED_POST",
+    });
+    expect(processMessageCalls).toHaveLength(1);
+    expect(processMessageCalls[0].content).toBe("do the test");
+    expect(addMessageCountAtProcessMessageStart).toBe(3);
+  });
+
+  describe("pre-first-message gate", () => {
+    test("gate closed: no bootstrap, no processMessage, no notification — result reports skipReason", async () => {
+      preFirstMessageGateOpen = false;
+
+      const result = await runBackgroundJob(baseOpts());
+
+      expect(result.ok).toBe(true);
+      expect(result.skipReason).toBe("pre_first_user_message");
+      expect(result.conversationId).toBe("");
+      expect(bootstrapCalls).toBe(0);
+      expect(processMessageCalls).toHaveLength(0);
+      expect(emitCalls).toHaveLength(0);
+    });
+
+    test("gate closed but allowPreFirstUserMessage=true: runs normally", async () => {
+      preFirstMessageGateOpen = false;
+
+      const result = await runBackgroundJob(
+        baseOpts({ allowPreFirstUserMessage: true }),
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.skipReason).toBeUndefined();
+      expect(bootstrapCalls).toBe(1);
+      expect(processMessageCalls).toHaveLength(1);
+    });
+  });
+});
+
+// Runs last on purpose: it is the only block that turns the presence flag on,
+// so every test above reads the flag in its default off state.
+describe("runBackgroundJob presence suppression opt-in", () => {
+  beforeEach(() => {
+    setOverridesForTesting({ "activity-presence-suppression": true });
+    webConversationFocused = true;
+  });
+
+  function emittedHint(): Record<string, unknown> {
+    expect(emitCalls).toHaveLength(1);
+    return emitCalls[0].attentionHints as Record<string, unknown>;
+  }
+
+  test("a carried turn failure lets a focused conversation suppress the alert", async () => {
+    // Every path that stamps a failed turn outcome emits `conversation_error`
+    // first, so the focused conversation is already showing this failure.
+    processMessageImpl = async () => ({
+      messageId: "msg-failed-turn",
+      turnFailure: { failureCode: "PROVIDER_BILLING" },
+    });
+
+    const result = await runBackgroundJob(baseOpts());
+
+    expect(result.ok).toBe(false);
+    expect(emittedHint()).toMatchObject({ visibleInSourceNow: true });
+    expect(webPresenceArgs).toEqual([[STUB_CONVERSATION_ID]]);
+  });
+
+  test("a timeout alerts even when the conversation is focused", async () => {
+    // The timeout does not abort `processMessage`, so the transcript still
+    // reads as an in-progress turn and there is no rendered error to duplicate.
+    processMessageImpl = () => new Promise(() => {});
+
+    const result = await runBackgroundJob(baseOpts({ timeoutMs: 20 }));
+
+    expect(result.errorKind).toBe("timeout");
+    expect(emittedHint()).toMatchObject({ visibleInSourceNow: false });
+    expect(webPresenceArgs).toEqual([]);
+  });
+
+  test("a throw out of processMessage alerts even when the conversation is focused", async () => {
+    // Message preparation and persistence run before the agent loop, so a
+    // throw from there never reaches the code that renders a failure.
+    processMessageImpl = async () => {
+      throw new Error("failed to persist the user message");
+    };
+
+    const result = await runBackgroundJob(baseOpts());
+
+    expect(result.errorKind).toBe("exception");
+    expect(result.turnFailure).toBeUndefined();
+    expect(emittedHint()).toMatchObject({ visibleInSourceNow: false });
+    expect(webPresenceArgs).toEqual([]);
+  });
+
+  test("a sandwich persistence failure alerts even when the conversation is focused", async () => {
+    // The conversation exists and is focused, but nothing has run in it yet.
+    addMessageError = new Error("sandwich write failed");
+
+    const result = await runBackgroundJob(
+      baseOpts({
+        assistantSandwich: {
+          preamble: "TRUSTED_PRE",
+          content: "UNTRUSTED_PAYLOAD",
+          postamble: "TRUSTED_POST",
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.conversationId).toBe(STUB_CONVERSATION_ID);
+    expect(processMessageCalls).toHaveLength(0);
+    expect(emittedHint()).toMatchObject({ visibleInSourceNow: false });
+    expect(webPresenceArgs).toEqual([]);
+  });
+
+  test("a bootstrap failure alerts even when a conversation is focused", async () => {
+    bootstrapError = new Error("bootstrap boom");
+
+    const result = await runBackgroundJob(baseOpts());
+
+    expect(result.ok).toBe(false);
+    expect(result.conversationId).toBe("");
+    expect(emittedHint()).toMatchObject({ visibleInSourceNow: false });
+    expect(webPresenceArgs).toEqual([]);
+  });
+});

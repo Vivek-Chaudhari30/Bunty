@@ -1,0 +1,2606 @@
+/**
+ * Tests for `orchestrate.ts` (cache-ordered candidate pool).
+ *
+ * The orchestrator composes the stable-prefix lanes (curated core + frecency
+ * hot, both computed at lane init and passed in) with three deterministic
+ * finder lanes — the section-grain BM25 needle, the dense lane, and link-graph
+ * edge expansion — into ONE cache-ordered pool, then runs a SINGLE forced-tool
+ * select over it. The result is this turn's selections only; cross-turn
+ * persistence is the injector's job, not the orchestrator's.
+ *
+ * The select provider is stubbed (no network); a single stub answers the one
+ * `select_pages` call per turn by reading the numbered `<candidates>` block.
+ * The dense lane is stubbed at the module boundary. The needle and edge graph
+ * are real, built from tiny inline fixtures so the pool assembly is exercised
+ * end-to-end.
+ */
+
+import {
+  afterAll,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
+
+import type { Message, Provider, ProviderResponse } from "@vellumai/plugin-api";
+
+import { runWithLatencySubSpans } from "../../../../../daemon/turn-latency-sub-spans.js";
+import {
+  MEMORY_CONTEXT_PHASE_KEY,
+  TurnLatencyTracker,
+} from "../../../../../daemon/turn-latency-tracker.js";
+import type { PageIndexEntry } from "../../substrate/page-index.js";
+import { renderCard } from "../card.js";
+import type { EdgeGraph } from "../edge.js";
+import { buildEdgeGraph } from "../edge.js";
+import type { V3GateConfig } from "../gate.js";
+import type { OrchestrateDeps } from "../orchestrate.js";
+import { buildSectionNeedle } from "../section-needle.js";
+import { buildSectionIndex } from "../sections.js";
+import type { MemoryRoutingTurn, SectionIndex, Slug } from "../types.js";
+
+// ---------------------------------------------------------------------------
+// Module stubs installed BEFORE the orchestrator import so pool-select and the
+// dense lane observe them at load time.
+// ---------------------------------------------------------------------------
+
+let providerStub: Provider | null = null;
+
+const realPluginApi = await import("@vellumai/plugin-api");
+mock.module("@vellumai/plugin-api", () => ({
+  ...realPluginApi,
+  getConfiguredProvider: async () => providerStub,
+}));
+
+mock.module("../../../../../util/logger.js", () => ({
+  getLogger: () =>
+    new Proxy({} as Record<string, unknown>, {
+      get: (_t, prop) => (prop === "child" ? () => ({}) : () => {}),
+    }),
+}));
+
+// The dense lane is stubbed: each test sets `denseHits` to control which
+// articles (+ matched ordinals) the dense lane returns. The stub DELEGATES to
+// the real `denseLane` unless this file's tests are running (`denseMockActive`),
+// so the process-global `mock.module` cannot leak fake behavior into
+// dense.test.ts (which exercises the real lane). Spread the real module so
+// every other export (`OVERSAMPLE`) stays present.
+const realDense = { ...(await import("../dense.js")) };
+let denseMockActive = false;
+let denseHits: Array<{ article: Slug; section: number; score?: number }> = [];
+// Per-query hit override for tests that need the full-message and span-chunk
+// dense calls to return DIFFERENT results; falls back to `denseHits`.
+let denseHitsByQuery = new Map<
+  string,
+  Array<{ article: Slug; section: number; score?: number }>
+>();
+let denseCalls: Array<{ query: string; k: number }> = [];
+mock.module("../dense.js", () => ({
+  ...realDense,
+  denseLane: async (...args: Parameters<typeof realDense.denseLane>) => {
+    if (!denseMockActive) {
+      return realDense.denseLane(...args);
+    }
+    denseCalls.push({ query: args[1], k: args[2] });
+    return args[2] <= 0 ? [] : (denseHitsByQuery.get(args[1]) ?? denseHits);
+  },
+  // Orchestrate now calls the SCORED variant; the mock must intercept it too
+  // (else the `...realDense` spread resolves the real lane and hits Qdrant).
+  // Same active-flag guard and `denseHits` fixture, defaulting an unset score
+  // to 1 so existing `denseK: 100` tests keep working without a score field.
+  denseLaneScored: async (
+    ...args: Parameters<typeof realDense.denseLaneScored>
+  ) => {
+    if (!denseMockActive) {
+      return realDense.denseLaneScored(...args);
+    }
+    denseCalls.push({ query: args[1], k: args[2] });
+    return args[2] <= 0
+      ? []
+      : (denseHitsByQuery.get(args[1]) ?? denseHits).map((h) => ({
+          ...h,
+          score: h.score ?? 1,
+        }));
+  },
+}));
+
+// The watchdog telemetry store is stubbed with the same active-flag delegation
+// as the dense lane: gate tests capture the per-run gate telemetry; any other
+// test file sharing the process falls through to the real store. Spread the
+// real module so the query/type exports stay present.
+const realWatchdogStore = {
+  ...(await import("../../../../../telemetry/watchdog-events-store.js")),
+};
+let watchdogMockActive = false;
+type RecordedEvent = {
+  checkName: string;
+  value?: number | null;
+  detail?: Record<string, unknown> | null;
+};
+let recordedGateEvents: RecordedEvent[] = [];
+// Split by check_name rather than into one bucket: orchestrate emits a gate
+// event AND a selection event per turn, and the gate assertions below count
+// their events exactly.
+let recordedSelectionEvents: RecordedEvent[] = [];
+mock.module("../../../../../telemetry/watchdog-events-store.js", () => ({
+  ...realWatchdogStore,
+  recordWatchdogEvent: (
+    record: Parameters<typeof realWatchdogStore.recordWatchdogEvent>[0],
+  ) => {
+    if (!watchdogMockActive) {
+      return realWatchdogStore.recordWatchdogEvent(record);
+    }
+    if (record.checkName === MEMORY_V3_SELECTION_CHECK_NAME) {
+      recordedSelectionEvents.push(record);
+      return;
+    }
+    recordedGateEvents.push(record);
+  },
+}));
+
+const {
+  orchestrate,
+  DEFAULT_NEEDLE_K,
+  DEFAULT_DENSE_K,
+  MEMORY_V3_INJECTION_GATE_CHECK_NAME,
+  MEMORY_V3_SELECTION_CHECK_NAME,
+} = await import("../orchestrate.js");
+const { MemoryV3RetrievalUnavailableError } = await import("../pool-select.js");
+
+// ---------------------------------------------------------------------------
+// Fixtures: a tiny corpus of pages with bodies + `links:` frontmatter.
+// ---------------------------------------------------------------------------
+
+const PAGES: Record<Slug, string> = {
+  "topic-a": "lead for topic a\n## Details\napple banana about topic a",
+  "topic-b": "lead for topic b\n## More\ncherry date about topic b",
+  "topic-c": "lead for topic c\n## Notes\nelderberry fig about topic c",
+  "topic-d": "lead for topic d\n## Notes\ngrape about topic d",
+};
+
+/** Raw page = frontmatter (with `links:`) + body. */
+const RAW: Record<Slug, string> = {
+  "topic-a": `---\nlinks:\n  - "topic-d — the curated edge from a to d"\n---\n${PAGES["topic-a"]}`,
+  "topic-b": `---\nedges: []\n---\n${PAGES["topic-b"]}`,
+  "topic-c": `---\nedges: []\n---\n${PAGES["topic-c"]}`,
+  "topic-d": `---\nedges: []\n---\n${PAGES["topic-d"]}`,
+};
+
+const SLUGS = Object.keys(PAGES);
+
+function makeEntries(): PageIndexEntry[] {
+  return SLUGS.map((slug, i) => ({
+    id: i + 1,
+    slug,
+    summary: `summary of ${slug}`,
+    edges: [],
+    leaves: [],
+    modifiedAt: 0,
+    freshAt: null,
+  }));
+}
+
+interface Lanes {
+  sectionIndex: SectionIndex;
+  needle: ReturnType<typeof buildSectionNeedle>;
+  edgeGraph: EdgeGraph;
+}
+
+async function buildLanes(): Promise<Lanes> {
+  const sectionIndex = await buildSectionIndex(SLUGS, async (s) => PAGES[s]!);
+  const needle = buildSectionNeedle(sectionIndex);
+  const edgeGraph = await buildEdgeGraph(makeEntries(), async (s) => RAW[s]!);
+  return { sectionIndex, needle, edgeGraph };
+}
+
+/** Lanes over an ad-hoc page map (bodies only, no `links:` frontmatter), for
+ *  tests whose fixture needs pages the shared corpus does not have. */
+async function customLanes(pages: Record<Slug, string>): Promise<Lanes> {
+  const slugs = Object.keys(pages);
+  const entries: PageIndexEntry[] = slugs.map((slug, i) => ({
+    id: i + 1,
+    slug,
+    summary: `summary of ${slug}`,
+    edges: [],
+    leaves: [],
+    modifiedAt: 0,
+    freshAt: null,
+  }));
+  const sectionIndex = await buildSectionIndex(slugs, async (s) => pages[s]!);
+  const needle = buildSectionNeedle(sectionIndex);
+  const edgeGraph = await buildEdgeGraph(
+    entries,
+    async (s) => `---\nedges: []\n---\n${pages[s]}`,
+  );
+  return { sectionIndex, needle, edgeGraph };
+}
+
+const config = {} as never;
+
+/**
+ * Orchestrate deps with empty stable-prefix lanes unless overridden. Mirrors
+ * lane init: every core/hot slug gets a pre-rendered card (from the RAW
+ * fixture when one exists) unless the test overrides `prefixCards` itself.
+ */
+function depsOf(
+  lanes: Lanes,
+  overrides: Partial<OrchestrateDeps> = {},
+): OrchestrateDeps {
+  const coreSlugs = overrides.coreSlugs ?? [];
+  const hotSlugs = overrides.hotSlugs ?? [];
+  const freshSlugs = overrides.freshSlugs ?? [];
+  const alwaysCandidateSlugs = overrides.alwaysCandidateSlugs ?? [];
+  const prefixCards = new Map<Slug, string>(
+    [...coreSlugs, ...hotSlugs, ...freshSlugs, ...alwaysCandidateSlugs].map(
+      (slug) => [slug, renderCard(slug, RAW[slug] ?? "")],
+    ),
+  );
+  return {
+    sectionIndex: lanes.sectionIndex,
+    needle: lanes.needle,
+    denseConfig: config,
+    edgeGraph: lanes.edgeGraph,
+    coreSlugs,
+    hotSlugs,
+    freshSlugs,
+    prefixCards,
+    finderSectionsPerPage: 3,
+    ...overrides,
+  };
+}
+
+function makeTurn(
+  turnNumber: number,
+  currentMessage: string,
+  previousAssistantMessage?: string,
+): MemoryRoutingTurn {
+  return {
+    conversationId: "conv-xyz",
+    turnNumber,
+    currentMessage,
+    recentContext: "prior context",
+    previousAssistantMessage,
+  };
+}
+
+function toolUseResponse(input: Record<string, unknown>): ProviderResponse {
+  return {
+    model: "stub-model",
+    stopReason: "tool_use",
+    usage: { inputTokens: 0, outputTokens: 0 },
+    content: [{ type: "tool_use", id: "tu-1", name: "select_pages", input }],
+  };
+}
+
+/**
+ * Parse the two-segment selector input back into the globally-numbered pool:
+ * stable-prefix cards (`<candidate_cards>`, identified by their
+ * `[i] # memory/concepts/<slug>.md` header line) and finder lines
+ * (`<candidates>`, `[i] slug — descriptor`). Also captures the raw stable
+ * prefix block for byte-identity assertions.
+ */
+function parsePool(messages: Message[]): {
+  slugs: Slug[];
+  lines: string[];
+  prefixBlock: string | null;
+} {
+  const entries: Array<{ id: number; slug: string; line: string }> = [];
+  let prefixBlock: string | null = null;
+  for (const msg of messages) {
+    for (const block of msg.content) {
+      if (block.type !== "text") {
+        continue;
+      }
+      const cards = /<candidate_cards>\n([\s\S]*?)\n<\/candidate_cards>/.exec(
+        block.text,
+      );
+      if (cards) {
+        prefixBlock = cards[0];
+        for (const m of cards[1].matchAll(
+          /^\[(\d+)\] # memory\/concepts\/(.+)\.md$/gm,
+        )) {
+          entries.push({ id: Number(m[1]), slug: m[2]!, line: m[0] });
+        }
+      }
+      const finder = /<candidates>\n([\s\S]*?)\n<\/candidates>/.exec(
+        block.text,
+      );
+      if (finder) {
+        for (const line of finder[1].split("\n")) {
+          const m = /^\[(\d+)\] (?:\([^)]*\) )?(\S+)(?: — |$)/.exec(line);
+          if (m) {
+            entries.push({ id: Number(m[1]), slug: m[2]!, line });
+          }
+        }
+      }
+    }
+  }
+  entries.sort((a, b) => a.id - b.id);
+  return {
+    slugs: entries.map((e) => e.slug),
+    lines: entries.map((e) => e.line),
+    prefixBlock,
+  };
+}
+
+/**
+ * Provider that selects the pool candidates whose slug is in `keep` (mapping
+ * each back to its 1-based id). Captures the rendered candidate list (slugs
+ * and raw lines) for pool assertions.
+ */
+let lastPool: Slug[] = [];
+let lastPoolLines: string[] = [];
+let lastPrefixBlock: string | null = null;
+let selectCalls = 0;
+function selectProvider(keep: Slug[]): Provider {
+  return {
+    name: "stub",
+    sendMessage: async (messages) => {
+      selectCalls++;
+      const parsed = parsePool(messages);
+      lastPool = parsed.slugs;
+      lastPoolLines = parsed.lines;
+      lastPrefixBlock = parsed.prefixBlock;
+      const ids: number[] = [];
+      parsed.slugs.forEach((slug, i) => {
+        if (keep.includes(slug)) {
+          ids.push(i + 1);
+        }
+      });
+      return toolUseResponse({ ids });
+    },
+  };
+}
+
+beforeEach(() => {
+  denseMockActive = true;
+  watchdogMockActive = true;
+  providerStub = null;
+  denseHits = [];
+  denseHitsByQuery = new Map();
+  denseCalls = [];
+  recordedGateEvents = [];
+  recordedSelectionEvents = [];
+  lastPool = [];
+  lastPoolLines = [];
+  lastPrefixBlock = null;
+  selectCalls = 0;
+});
+
+afterAll(() => {
+  denseMockActive = false;
+  watchdogMockActive = false;
+});
+
+// ---------------------------------------------------------------------------
+// Pool composition: the candidate pool is the cache-ordered union of the
+// lanes. Synthetic capability pages are not always-added — they enter through
+// a lane (see the dedicated test below).
+// ---------------------------------------------------------------------------
+
+describe("orchestrate — candidate pool composition", () => {
+  test("pool unions needle ∪ dense ∪ edge; one select runs", async () => {
+    const lanes = await buildLanes();
+    // "apple" hits topic-a (needle). Dense returns topic-b. topic-a links to
+    // topic-d (edge).
+    denseHits = [{ article: "topic-b", section: 0 }];
+    providerStub = selectProvider([]); // selection is irrelevant to pool union
+
+    await orchestrate(makeTurn(1, "apple"), depsOf(lanes, { denseK: 100 }));
+
+    expect(selectCalls).toBe(1);
+    expect(new Set(lastPool)).toEqual(
+      new Set(["topic-a", "topic-b", "topic-d"]),
+    );
+  });
+
+  test("a synthetic capability page enters the pool via the needle lane", async () => {
+    // A capability slug indexed with body content (the section index treats it
+    // like any other page) is ranked by the real needle when the query matches
+    // its text — this is how synthetic pages reach the pool now that they are no
+    // longer always-added.
+    const CAP: Slug = "skills/example";
+    const sectionIndex = await buildSectionIndex([...SLUGS, CAP], async (s) =>
+      s === CAP
+        ? "# Skill: example\nuse the kumquat skill to do the thing"
+        : PAGES[s]!,
+    );
+    const needle = buildSectionNeedle(sectionIndex);
+    const edgeGraph = await buildEdgeGraph(makeEntries(), async (s) => RAW[s]!);
+
+    providerStub = selectProvider([]); // selection irrelevant to pool union
+    await orchestrate(
+      makeTurn(1, "kumquat"),
+      depsOf({ sectionIndex, needle, edgeGraph }),
+    );
+
+    // The needle ranked the capability page on the "kumquat" term, so it is in
+    // the candidate pool.
+    expect(lastPool).toContain(CAP);
+  });
+
+  test("always-candidate slugs are placed in the stable prefix and are selectable", async () => {
+    const lanes = await buildLanes();
+    const WF: Slug = "skills/workflows";
+    // No retrieval lane surfaces WF for "apple" (hits topic-a/b/d) — it reaches
+    // the selector ONLY because it is an always-candidate.
+    providerStub = selectProvider([WF]);
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { alwaysCandidateSlugs: [WF] }),
+    );
+
+    expect(lastPool).toContain(WF);
+    expect(result.selections.map((s) => s.slug)).toContain(WF);
+  });
+
+  test("an always-candidate slug already in core is not double-listed", async () => {
+    const lanes = await buildLanes();
+    const WF: Slug = "skills/workflows";
+    providerStub = selectProvider([]);
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { coreSlugs: [WF], alwaysCandidateSlugs: [WF] }),
+    );
+
+    expect(lastPool.filter((s) => s === WF)).toHaveLength(1);
+  });
+
+  test("edge curated link description becomes the edge candidate's descriptor", async () => {
+    const lanes = await buildLanes();
+    providerStub = selectProvider([]);
+
+    await orchestrate(makeTurn(1, "apple"), depsOf(lanes));
+
+    const line = lastPoolLines.find((l) => / topic-d — /.test(l));
+    expect(line).toContain("the curated edge from a to d");
+  });
+
+  test("needleK and denseK default to their constants", async () => {
+    const lanes = await buildLanes();
+    let needleK = -1;
+    // Orchestrate drives the finder via the SCORED query, so capture the budget
+    // there (the unscored `query` is no longer the orchestrate entry point).
+    const needle = {
+      query: () => [],
+      queryScored: (_t: string, k: number) => {
+        needleK = k;
+        return [];
+      },
+      bestSection: () => -1,
+      idf: () => 0,
+      topTerms: () => [],
+      df: () => 0,
+      scoreTerm: () => [],
+    };
+    providerStub = selectProvider([]);
+    await orchestrate(makeTurn(1, "x"), depsOf(lanes, { needle }));
+    expect(needleK).toBe(DEFAULT_NEEDLE_K);
+    expect(DEFAULT_NEEDLE_K).toBe(12);
+    expect(denseCalls).toEqual([]);
+    expect(DEFAULT_DENSE_K).toBe(0);
+  });
+
+  test("denseK override controls the embedding-backed candidate budget", async () => {
+    const lanes = await buildLanes();
+    providerStub = selectProvider([]);
+
+    await orchestrate(makeTurn(1, "apple"), depsOf(lanes, { denseK: 7 }));
+
+    expect(denseCalls.map((call) => call.k)).toEqual([7]);
+  });
+
+  test("denseK = 0 disables dense retrieval for both current and reply queries", async () => {
+    const lanes = await buildLanes();
+    providerStub = selectProvider([]);
+
+    await orchestrate(
+      makeTurn(1, "apple", "previous reply mentioned cherry"),
+      depsOf(lanes, { denseK: 0, replyQueryK: 12 }),
+    );
+
+    expect(denseCalls).toEqual([]);
+  });
+
+  test("selectorEnabled=false keeps all pooled candidates without calling the selector provider", async () => {
+    const lanes = await buildLanes();
+    // "apple" hits topic-a (needle), dense returns topic-b, and topic-a links
+    // to topic-d. With the selector disabled, every pooled candidate is passed
+    // through as a selection without requiring the L2 callsite.
+    denseHits = [{ article: "topic-b", section: 0 }];
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { denseK: 100, selectorEnabled: false }),
+    );
+
+    expect(selectCalls).toBe(0);
+    expect(new Set(result.selections.map((s) => s.slug))).toEqual(
+      new Set(["topic-a", "topic-b", "topic-d"]),
+    );
+    // A passthrough is not a selector judgment.
+    expect(result.selectorRan).toBe(false);
+  });
+
+  test("selectorEnabled=false with zero candidate lanes returns no selections", async () => {
+    const lanes = await buildLanes();
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        needleK: 0,
+        denseK: 0,
+        replyQueryK: 0,
+        selectorEnabled: false,
+      }),
+    );
+
+    expect(selectCalls).toBe(0);
+    expect(result.selections).toEqual([]);
+    expect(result.lanes).toEqual({
+      core: [],
+      hot: [],
+      fresh: [],
+      always: [],
+      finder: [],
+    });
+  });
+
+  test("a finder line carries its matched section and terms, and selecting it selects that section", async () => {
+    const lanes = await buildLanes();
+    denseHits = [];
+    providerStub = selectProvider(["topic-a"]);
+    const result = await orchestrate(makeTurn(1, "apple"), depsOf(lanes));
+    // topic-a matched "apple" in its `## Details` section.
+    const line = result.lanes.finder.find((c) => c.slug === "topic-a");
+    expect(line?.section?.article).toBe("topic-a");
+    expect(line?.section?.text).toContain("apple");
+    expect(line?.terms).toEqual(["apple"]);
+    expect(result.selections).toEqual([
+      { slug: "topic-a", sections: [line!.section!] },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cache order: the pool's stable prefix is core (file order) then hot (score
+// order); finder candidates follow, deduped against the prefix. The prefix is
+// byte-identical across turns while the lanes are unchanged — that is the
+// whole point of the ordering (selector-input KV cache).
+// ---------------------------------------------------------------------------
+
+describe("orchestrate — cache-ordered pool (core + hot + finders)", () => {
+  test("pool order is core, then hot, then finder candidates", async () => {
+    const lanes = await buildLanes();
+    // Core and hot pages do not match "apple"; the needle surfaces topic-a.
+    // topic-a links to topic-d, but topic-d is HOT (stable prefix), so the
+    // edge lane does not re-surface it.
+    denseHits = [{ article: "topic-b", section: 0 }];
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        coreSlugs: ["topic-c"],
+        hotSlugs: ["topic-d"],
+        denseK: 100,
+      }),
+    );
+
+    expect(lastPool).toEqual(["topic-c", "topic-d", "topic-a", "topic-b"]);
+    expect(result.lanes.core).toEqual(["topic-c"]);
+    expect(result.lanes.hot).toEqual(["topic-d"]);
+    // The edge lane skipped topic-d (already in the stable prefix).
+    expect(result.lanes.finder.map((c) => c.slug)).toEqual([
+      "topic-a",
+      "topic-b",
+    ]);
+  });
+
+  test("fresh follows hot in the pool and dedups against core/hot", async () => {
+    const lanes = await buildLanes();
+    denseHits = [];
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        coreSlugs: ["topic-c"],
+        hotSlugs: ["topic-d"],
+        // topic-c (core) and topic-d (hot) are defensively dropped; only
+        // topic-b earns a fresh slot.
+        freshSlugs: ["topic-c", "topic-d", "topic-b"],
+      }),
+    );
+
+    expect(lastPool).toEqual(["topic-c", "topic-d", "topic-b", "topic-a"]);
+    expect(result.lanes.fresh).toEqual(["topic-b"]);
+  });
+
+  test('reply-query hits join the finder tail tagged "reply", after primary lanes and before edge', async () => {
+    const lanes = await buildLanes();
+    denseHits = [];
+    providerStub = selectProvider([]);
+
+    // Primary query matches topic-a; the previous reply matches topic-b. The
+    // edge lane expands topic-a's curated link to topic-d.
+    const result = await orchestrate(
+      makeTurn(1, "apple", "cherry date"),
+      depsOf(lanes, { replyQueryK: 5 }),
+    );
+
+    expect(result.lanes.finder.map((c) => [c.slug, c.lane])).toEqual([
+      ["topic-a", "needle"],
+      ["topic-b", "reply"],
+      ["topic-d", "edge"],
+    ]);
+    // The reply-matched section rides its finder line.
+    expect(
+      result.lanes.finder.find((c) => c.slug === "topic-b")?.section?.text,
+    ).toContain("cherry date");
+  });
+
+  test("a section both queries surface is pooled once, under the primary lane", async () => {
+    const lanes = await buildLanes();
+    denseHits = [];
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple", "apple banana"),
+      depsOf(lanes, { replyQueryK: 5 }),
+    );
+
+    const topicA = result.lanes.finder.filter((c) => c.slug === "topic-a");
+    expect(topicA).toHaveLength(1);
+    expect(topicA[0]!.lane).toBe("needle");
+  });
+
+  test("no previous assistant message → no reply-lane candidates", async () => {
+    const lanes = await buildLanes();
+    denseHits = [];
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { replyQueryK: 5 }),
+    );
+
+    expect(result.lanes.finder.some((c) => c.lane === "reply")).toBe(false);
+  });
+
+  test("replyQueryK = 0 disables the pass even with a previous reply", async () => {
+    const lanes = await buildLanes();
+    denseHits = [];
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple", "cherry date"),
+      depsOf(lanes, { replyQueryK: 0 }),
+    );
+
+    expect(result.lanes.finder.some((c) => c.lane === "reply")).toBe(false);
+  });
+
+  test('learned-edge expansion surfaces association neighbours tagged "learned", after the static edge lane', async () => {
+    const lanes = await buildLanes();
+    denseHits = [];
+    providerStub = selectProvider([]);
+
+    // Needle("apple") surfaces topic-a; static links expand a → d; the
+    // learned graph associates a → c (no authored link exists).
+    const learnedGraph = {
+      adjacency: new Map([["topic-a", new Map([["topic-c", undefined]])]]),
+      hubs: new Set<Slug>(),
+      slugs: new Set(SLUGS),
+    };
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { learnedGraph, learnedPerSeed: 3, learnedCap: 20 }),
+    );
+
+    expect(result.lanes.finder.map((c) => [c.slug, c.lane])).toEqual([
+      ["topic-a", "needle"],
+      ["topic-d", "edge"],
+      ["topic-c", "learned"],
+    ]);
+    // Association, not lexical relevance, surfaced topic-c: its line carries
+    // no section (a selection of it injects the lead).
+    expect(
+      result.lanes.finder.find((c) => c.slug === "topic-c")?.section,
+    ).toBeUndefined();
+  });
+
+  test("learnedCap = 0 disables the learned pass", async () => {
+    const lanes = await buildLanes();
+    denseHits = [];
+    providerStub = selectProvider([]);
+
+    const learnedGraph = {
+      adjacency: new Map([["topic-a", new Map([["topic-c", undefined]])]]),
+      hubs: new Set<Slug>(),
+      slugs: new Set(SLUGS),
+    };
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { learnedGraph, learnedCap: 0 }),
+    );
+
+    expect(result.lanes.finder.some((c) => c.lane === "learned")).toBe(false);
+  });
+
+  test("the rendered stable prefix is byte-identical across turns with different queries", async () => {
+    const lanes = await buildLanes();
+    const deps = depsOf(lanes, {
+      coreSlugs: ["topic-c"],
+      hotSlugs: ["topic-b"],
+    });
+
+    providerStub = selectProvider([]);
+    await orchestrate(makeTurn(1, "apple"), deps);
+    const prefix1 = lastPrefixBlock;
+
+    await orchestrate(makeTurn(2, "grape"), deps);
+    const prefix2 = lastPrefixBlock;
+
+    // Stable-prefix cards are pre-rendered and query-independent, so the
+    // whole rendered cards block matches byte-for-byte across turns.
+    expect(prefix1).not.toBeNull();
+    expect(prefix2).toBe(prefix1!);
+    expect(prefix1).toContain("topic-c");
+    expect(prefix1).toContain("topic-b");
+  });
+
+  test("stable-prefix candidates render their pre-rendered cards verbatim", async () => {
+    const lanes = await buildLanes();
+    providerStub = selectProvider([]);
+
+    await orchestrate(
+      makeTurn(1, "zzzz"),
+      depsOf(lanes, {
+        coreSlugs: ["topic-c"],
+        hotSlugs: ["topic-d"],
+        prefixCards: new Map([
+          [
+            "topic-c",
+            "# memory/concepts/topic-c.md\nlead for topic c\n\n[sections: §Notes]",
+          ],
+          ["topic-d", "# memory/concepts/topic-d.md\nlead for topic d"],
+        ]),
+      }),
+    );
+
+    expect(lastPrefixBlock).toContain(
+      "[1] # memory/concepts/topic-c.md\nlead for topic c\n\n[sections: §Notes]",
+    );
+    expect(lastPrefixBlock).toContain(
+      "[2] # memory/concepts/topic-d.md\nlead for topic d",
+    );
+  });
+
+  test("a stable-prefix slug with no pre-rendered card throws (never silently degrades)", async () => {
+    const lanes = await buildLanes();
+    providerStub = selectProvider([]);
+
+    await expect(
+      orchestrate(
+        makeTurn(1, "zzzz"),
+        depsOf(lanes, {
+          coreSlugs: ["topic-c"],
+          hotSlugs: ["topic-d"],
+          // topic-d is missing — a lane-init bug; a degraded card would break
+          // the byte-stable-prefix contract, so orchestrate must throw.
+          prefixCards: new Map([["topic-c", renderCard("topic-c", "")]]),
+        }),
+      ),
+    ).rejects.toThrow('no pre-rendered card for stable-prefix slug "topic-d"');
+  });
+
+  test("a finder hit on a core page repeats as a finder line and dedupes on selection", async () => {
+    const lanes = await buildLanes();
+    // topic-a is CORE and the needle also hits it on "apple". The stub keeps
+    // BOTH occurrences (card id + finder-line id).
+    providerStub = selectProvider(["topic-a"]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { coreSlugs: ["topic-a"] }),
+    );
+
+    // The pool lists topic-a twice — once as the stable-prefix card, once as
+    // a finder line carrying its CURRENT matched section (the tail is not
+    // deduped against the prefix, by design: filtering would not change the
+    // prefix here, but the snippet line is the page's current relevance).
+    expect(lastPool.filter((s) => s === "topic-a")).toHaveLength(2);
+    expect(lastPool[0]).toBe("topic-a");
+    // The finder line shows the matched-section snippet.
+    expect(
+      lastPoolLines.find((l) => /^\[2\] (?:\([^)]*\) )?topic-a — /.test(l)),
+    ).toContain("apple");
+    // Selecting both ids still yields ONE selection (merged per slug), which
+    // carries the finder line's matched section.
+    const line = result.lanes.finder.find((c) => c.slug === "topic-a");
+    expect(line?.section?.text).toContain("apple");
+    expect(result.selections).toEqual([
+      { slug: "topic-a", sections: [line!.section!] },
+    ]);
+  });
+
+  test("a hot slug duplicated into core is defensively dropped from hot", async () => {
+    const lanes = await buildLanes();
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "zzzz"),
+      depsOf(lanes, {
+        coreSlugs: ["topic-c"],
+        hotSlugs: ["topic-c", "topic-d"],
+      }),
+    );
+
+    expect(result.lanes.core).toEqual(["topic-c"]);
+    expect(result.lanes.hot).toEqual(["topic-d"]);
+    expect(lastPool).toEqual(["topic-c", "topic-d"]);
+  });
+
+  test("selections are current-turn only — no carried set is unioned in", async () => {
+    const lanes = await buildLanes();
+    const deps = depsOf(lanes, { coreSlugs: ["topic-c"] });
+
+    // Turn 1 selects topic-a.
+    providerStub = selectProvider(["topic-a"]);
+    const t1 = await orchestrate(makeTurn(1, "apple"), deps);
+    expect(t1.selections.map((s) => s.slug)).toEqual(["topic-a"]);
+
+    // Turn 2 selects only topic-b; topic-a does NOT reappear (cross-turn
+    // persistence is the injector's job now, not orchestration's).
+    denseHits = [{ article: "topic-b", section: 0 }];
+    providerStub = selectProvider(["topic-b"]);
+    const t2 = await orchestrate(makeTurn(2, "cherry"), deps);
+    expect(t2.selections.map((s) => s.slug)).toEqual(["topic-b"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Edge-only injection: a page surfaced ONLY by the edge lane (the query did not
+// lexically hit it) records NO matched section, so injection falls back to the
+// FULL page (the curated `links` description — not the often-empty lead the
+// query never hit — is what made the candidate relevant). The best-section text
+// is kept only as the select-pool descriptor fallback.
+// ---------------------------------------------------------------------------
+
+describe("orchestrate — edge-only injection", () => {
+  test("an edge-only page carries NO section (its selection injects the lead)", async () => {
+    const lanes = await buildLanes();
+    // "apple" hits topic-a (needle); topic-a links to topic-d (edge-only — the
+    // query never hits topic-d). Select topic-d so it is in the result.
+    denseHits = [];
+    providerStub = selectProvider(["topic-d"]);
+    const result = await orchestrate(makeTurn(1, "apple"), depsOf(lanes));
+
+    // topic-d was selected with NO section, so the injector renders its lead.
+    expect(result.selections).toContainEqual({ slug: "topic-d", sections: [] });
+    expect(
+      result.lanes.finder.find((c) => c.slug === "topic-d")?.section,
+    ).toBeUndefined();
+  });
+
+  test("an edge-only page with no curated description falls back to bestSection text as the descriptor", async () => {
+    // A bare `links:` entry (no ` — `) carries NO description, so the edge
+    // candidate's descriptor falls back to the page's best section against the
+    // query. The query never hits dst-page, so bestSection returns its lead;
+    // that lead text becomes the descriptor (and the line still carries no
+    // section).
+    const pages: Record<Slug, string> = {
+      "src-page": "lead for src\n## Body\nalpha bravo about src",
+      "dst-page": "lead content for dst page\n## Extra\nnothing relevant here",
+    };
+    const raw: Record<Slug, string> = {
+      // bare slug — no ` — ` separator → undefined curated description.
+      "src-page": `---\nlinks:\n  - "dst-page"\n---\n${pages["src-page"]}`,
+      "dst-page": `---\nedges: []\n---\n${pages["dst-page"]}`,
+    };
+    const slugs = Object.keys(pages);
+    const entries: PageIndexEntry[] = slugs.map((slug, i) => ({
+      id: i + 1,
+      slug,
+      summary: `summary of ${slug}`,
+      edges: [],
+      leaves: [],
+      modifiedAt: 0,
+      freshAt: null,
+    }));
+    const sectionIndex = await buildSectionIndex(slugs, async (s) => pages[s]!);
+    const needle = buildSectionNeedle(sectionIndex);
+    const edgeGraph = await buildEdgeGraph(entries, async (s) => raw[s]!);
+
+    providerStub = selectProvider([]);
+
+    // "alpha" hits src-page (needle); src-page links to dst-page (edge-only, no
+    // curated description).
+    const result = await orchestrate(
+      makeTurn(1, "alpha"),
+      depsOf({ sectionIndex, needle, edgeGraph }),
+    );
+
+    // Descriptor fell back to dst-page's lead text; still no section.
+    const line = lastPoolLines.find((l) => / dst-page — /.test(l));
+    expect(line).toContain("lead content for dst page");
+    expect(
+      result.lanes.finder.find((c) => c.slug === "dst-page")?.section,
+    ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dense liveness: a dense hit whose article is no longer in the live section
+// index (its page was deleted; its Qdrant points linger) is dropped from the
+// pool, so a deleted page can never be surfaced via the dense lane.
+// ---------------------------------------------------------------------------
+
+describe("orchestrate — dense liveness filter", () => {
+  test("a dense hit absent from sectionIndex.byArticle is dropped from the pool", async () => {
+    const lanes = await buildLanes();
+    // Dense returns a live page (topic-b) AND a deleted page (gone-page) whose
+    // points still linger in Qdrant but which is absent from the section index.
+    denseHits = [
+      { article: "topic-b", section: 0 },
+      { article: "gone-page", section: 0 },
+    ];
+    providerStub = selectProvider([]); // selection irrelevant to pool membership
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { denseK: 100 }),
+    );
+
+    // The live dense hit is pooled; the deleted page is dropped entirely.
+    expect(lastPool).toContain("topic-b");
+    expect(lastPool).not.toContain("gone-page");
+    expect(result.lanes.finder.map((c) => c.slug)).not.toContain("gone-page");
+  });
+
+  test("a dense hit with an unresolvable ordinal falls back to the lead-section snippet", async () => {
+    const lanes = await buildLanes();
+    // Ordinal 99 resolves to no section, so the candidate carries no match
+    // text — its finder line falls back to the page's lead-section text.
+    denseHits = [{ article: "topic-b", section: 99 }];
+    providerStub = selectProvider([]);
+    await orchestrate(makeTurn(1, "zzzz"), depsOf(lanes, { denseK: 100 }));
+
+    const line = lastPoolLines.find((l) => / topic-b — /.test(l));
+    expect(line).toContain("lead for topic b");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lane provenance: each finder line records the lane that surfaced it, exposed
+// via `result.lanes.finder` so the selection telemetry can attribute true
+// sources. A section two lanes both score is pooled once, under the first lane
+// (needle → dense → reply → span → entity order); a different section of the
+// same page is its own line under its own lane.
+// ---------------------------------------------------------------------------
+
+describe("orchestrate — finder lane provenance", () => {
+  test("each finder candidate is tagged with its surfacing lane", async () => {
+    const lanes = await buildLanes();
+    // "apple" hits topic-a (needle). Dense returns topic-b. topic-a links to
+    // topic-d (edge). So each lane contributes exactly one distinct slug.
+    denseHits = [{ article: "topic-b", section: 0 }];
+    providerStub = selectProvider([]); // selection irrelevant to pool provenance
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { denseK: 100 }),
+    );
+
+    const laneOf = new Map(result.lanes.finder.map((c) => [c.slug, c.lane]));
+    expect(laneOf.get("topic-a")).toBe("needle");
+    expect(laneOf.get("topic-b")).toBe("dense");
+    expect(laneOf.get("topic-d")).toBe("edge");
+  });
+
+  test("the same section surfaced by needle AND dense is pooled once, under the needle lane", async () => {
+    const lanes = await buildLanes();
+    // topic-a is surfaced by the needle on "apple" (`## Details`, ordinal 1);
+    // dense ALSO returns that section. Needle runs first, so the one line
+    // reads needle.
+    denseHits = [{ article: "topic-a", section: 1 }];
+    providerStub = selectProvider([]);
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { denseK: 100 }),
+    );
+
+    const entries = result.lanes.finder.filter((c) => c.slug === "topic-a");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.lane).toBe("needle");
+  });
+
+  test("a different section of a needle-surfaced page reached by dense is its own dense line", async () => {
+    const lanes = await buildLanes();
+    // needle: topic-a `## Details` (ordinal 1); dense: topic-a's lead
+    // (ordinal 0). Two sections, two lines, needle first.
+    denseHits = [{ article: "topic-a", section: 0 }];
+    providerStub = selectProvider(["topic-a"]);
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { denseK: 100 }),
+    );
+
+    const entries = result.lanes.finder.filter((c) => c.slug === "topic-a");
+    expect(entries.map((c) => [c.lane, c.section?.ordinal])).toEqual([
+      ["needle", 1],
+      ["dense", 0],
+    ]);
+    // The pool shows both lines; keeping both selects both sections.
+    expect(lastPool.filter((s) => s === "topic-a")).toHaveLength(2);
+    expect(result.selections).toEqual([
+      {
+        slug: "topic-a",
+        sections: [entries[0]!.section!, entries[1]!.section!],
+      },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Degradation: an empty pool and the recall-safe omitted-ids path.
+// ---------------------------------------------------------------------------
+
+describe("orchestrate — degradation", () => {
+  test("an empty pool yields no selections", async () => {
+    const lanes = await buildLanes();
+    providerStub = selectProvider([]);
+    const result = await orchestrate(
+      makeTurn(1, "zzzzz no-match"),
+      depsOf(lanes, {
+        needle: {
+          query: () => [],
+          queryScored: () => [],
+          bestSection: () => -1,
+          idf: () => 0,
+          topTerms: () => [],
+          df: () => 0,
+          scoreTerm: () => [],
+        },
+      }),
+    );
+    expect(result.selections).toEqual([]);
+    expect(result.lanes.finder).toEqual([]);
+    expect(result.selectorRan).toBe(false);
+  });
+
+  test("omitted ids keeps ALL pooled candidates (recall-safe)", async () => {
+    const lanes = await buildLanes();
+    denseHits = [{ article: "topic-b", section: 0 }];
+    providerStub = {
+      name: "stub",
+      sendMessage: async () => toolUseResponse({}), // omitted ids → keep all
+    };
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { coreSlugs: ["topic-c"], denseK: 100 }),
+    );
+    expect(new Set(result.selections.map((s) => s.slug))).toEqual(
+      new Set(["topic-c", "topic-a", "topic-b", "topic-d"]),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Entity lane: the heading section is the identity the lane exists to surface,
+// so it joins the pool as its own line beside any bulk-theme section a prior
+// lane pooled for the same page, and surfaces a heading-named page no other
+// lane found.
+// ---------------------------------------------------------------------------
+
+describe("orchestrate — entity lane", () => {
+  test("adds the heading section as its own line beside the bulk-theme section another lane pooled", async () => {
+    const lanes = await buildLanes();
+    const { sectionIndex } = lanes;
+    // topic-a sections: [leadDoc] = lead (bulk), [headingDoc] = "## Details".
+    const [leadDoc, headingDoc] = sectionIndex.byArticle.get("topic-a")!;
+    const lead = sectionIndex.sections[leadDoc!]!;
+    const heading = sectionIndex.sections[headingDoc!]!;
+
+    // needle surfaces topic-a for its BULK lead section; the entity catalog
+    // maps a message token to topic-a's HEADING section.
+    const needle = {
+      query: () => [{ article: "topic-a", section: leadDoc! }],
+      queryScored: () => [{ article: "topic-a", section: leadDoc!, score: 1 }],
+      bestSection: () => leadDoc!,
+      idf: () => 0,
+      topTerms: () => [],
+      df: () => 0,
+      scoreTerm: () => [],
+    };
+    const entityIndex = new Map<string, number[]>([["widget", [headingDoc!]]]);
+
+    const result = await orchestrate(
+      makeTurn(1, "tell me about the widget"),
+      depsOf(lanes, { needle, entityIndex, selectorEnabled: false }),
+    );
+
+    // Two lines for the page: the needle's bulk match keeps its line and
+    // attribution, and the heading joins under the entity lane with the
+    // heading text as its descriptor.
+    const hits = result.lanes.finder.filter((c) => c.slug === "topic-a");
+    expect(hits.map((c) => [c.lane, c.section])).toEqual([
+      ["needle", lead],
+      ["entity", heading],
+    ]);
+    expect(hits[1]!.descriptor).toBe(heading.text);
+    // Both sections reach the selection (the passthrough keeps every line).
+    expect(result.selections).toContainEqual({
+      slug: "topic-a",
+      sections: [lead, heading],
+    });
+  });
+
+  test("an entity hit on the heading a prior lane already pooled is a no-op", async () => {
+    const lanes = await buildLanes();
+    const { sectionIndex } = lanes;
+    const [, headingDoc] = sectionIndex.byArticle.get("topic-a")!;
+    const heading = sectionIndex.sections[headingDoc!]!;
+    const needle = {
+      query: () => [{ article: "topic-a", section: headingDoc! }],
+      queryScored: () => [
+        { article: "topic-a", section: headingDoc!, score: 1 },
+      ],
+      bestSection: () => headingDoc!,
+      idf: () => 0,
+      topTerms: () => [],
+      df: () => 0,
+      scoreTerm: () => [],
+    };
+    const entityIndex = new Map<string, number[]>([["widget", [headingDoc!]]]);
+
+    const result = await orchestrate(
+      makeTurn(1, "tell me about the widget"),
+      depsOf(lanes, { needle, entityIndex, selectorEnabled: false }),
+    );
+
+    const hits = result.lanes.finder.filter((c) => c.slug === "topic-a");
+    expect(hits.map((c) => [c.lane, c.section])).toEqual([["needle", heading]]);
+  });
+
+  test("surfaces a heading-named page no other lane found, tagged `entity`", async () => {
+    const lanes = await buildLanes();
+    const { sectionIndex } = lanes;
+    const [, headingDoc] = sectionIndex.byArticle.get("topic-c")!;
+    const heading = sectionIndex.sections[headingDoc!]!;
+    const needle = {
+      query: () => [] as { article: Slug; section: number }[],
+      queryScored: () => [],
+      bestSection: () => -1,
+      idf: () => 0,
+      topTerms: () => [],
+      df: () => 0,
+      scoreTerm: () => [],
+    };
+    const entityIndex = new Map<string, number[]>([["gadget", [headingDoc!]]]);
+
+    const result = await orchestrate(
+      makeTurn(1, "what about the gadget"),
+      depsOf(lanes, { needle, entityIndex, selectorEnabled: false }),
+    );
+
+    const hits = result.lanes.finder.filter((c) => c.slug === "topic-c");
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.lane).toBe("entity");
+    expect(hits[0]!.section).toBe(heading);
+    expect(result.selections).toContainEqual({
+      slug: "topic-c",
+      sections: [heading],
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Injection gate: an OPT-IN, pass-open score check between the finder lanes and
+// edge expansion. A passing gate proceeds to selectPool as before; a closing
+// gate skips the selector entirely (empty selections) — or, with
+// `bypassForCore`, selects over the stable prefix only. Disabled/omitted is a
+// no-op. `selectCalls` (incremented by the provider stub) detects whether the
+// selector ran.
+// ---------------------------------------------------------------------------
+
+/** A `V3GateConfig` literal from the schema (`memory.v3.gate`) defaults plus the
+ *  effective `enabled` flag, overridable per test. */
+function gateConfigOf(overrides: Partial<V3GateConfig> = {}): V3GateConfig {
+  return {
+    enabled: true,
+    denseThreshold: 0.52,
+    sparseThreshold: 0.35,
+    sparseOnlyThreshold: 0.45,
+    denseClusterThreshold: 0.47,
+    denseClusterMaxDelta: 0.04,
+    topK: 5,
+    bm25NormK: null,
+    bypassForCore: false,
+    ...overrides,
+  };
+}
+
+describe("orchestrate — injection gate", () => {
+  test("gate pass → selects normally (provider runs once, selections produced)", async () => {
+    const lanes = await buildLanes();
+    // Dense top-1 (0.9) clears the default denseThreshold (0.52) → dense_pass.
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+    providerStub = selectProvider(["topic-a"]); // "apple" needles topic-a
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { denseK: 100, gateConfig: gateConfigOf() }),
+    );
+
+    expect(selectCalls).toBe(1);
+    expect(result.selections.map((s) => s.slug)).toContain("topic-a");
+    expect(result.selectorRan).toBe(true);
+  });
+
+  test("gate fail → empty selections, selector never called", async () => {
+    const lanes = await buildLanes();
+    // No needle-term overlap (zero sparse signal) and a dense top-1 (0.1) well
+    // below every dense threshold → the gate closes.
+    denseHits = [{ article: "topic-b", section: 0, score: 0.1 }];
+    providerStub = selectProvider([]); // would increment selectCalls if reached
+
+    const result = await orchestrate(
+      makeTurn(1, "zzzz nomatch"),
+      depsOf(lanes, { denseK: 100, gateConfig: gateConfigOf() }),
+    );
+
+    expect(selectCalls).toBe(0);
+    expect(result.selections).toEqual([]);
+    expect(result.lanes.finder).toEqual([]);
+    expect(result.selectorRan).toBe(false);
+  });
+
+  test("gate stays inert when the dense lane is off (denseK = 0 new-user profile)", async () => {
+    const lanes = await buildLanes();
+    // denseK: 0 leaves `densed` empty — the lean new-user profile. A low-score
+    // needle hit (norm ≈ 0.011) would CLOSE the gate if it ran on sparse signal
+    // alone, but zero dense hits means dense is unavailable, not low-relevance:
+    // the gate is dense-gated and never runs, so selection proceeds and memory
+    // is not suppressed.
+    const needle = {
+      query: () => [],
+      queryScored: () => [{ article: "topic-a", section: 0, score: 0.1 }],
+      bestSection: () => -1,
+      idf: () => 0,
+      topTerms: () => [],
+      df: () => 0,
+      scoreTerm: () => [],
+    };
+    providerStub = selectProvider(["topic-a"]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { needle, denseK: 0, gateConfig: gateConfigOf() }),
+    );
+
+    expect(selectCalls).toBe(1);
+    expect(result.selections.map((s) => s.slug)).toContain("topic-a");
+  });
+
+  test("stale dense hits for deleted pages don't fake availability or close the gate", async () => {
+    const lanes = await buildLanes();
+    // Dense returns ONLY a deleted page (gone-page) whose points linger in
+    // Qdrant but which is absent from the live section index, at a LOW score
+    // that would close the gate if scored. The live needle lane has a low-score
+    // hit on a real page. With the raw `densed` the gate would see a hit and
+    // close on the low scores; with `liveDensed` (empty) it takes the
+    // dense-unavailable pass-open branch, so selection still runs.
+    denseHits = [{ article: "gone-page", section: 0, score: 0.1 }];
+    const needle = {
+      query: () => [],
+      queryScored: () => [{ article: "topic-a", section: 0, score: 0.1 }],
+      bestSection: () => -1,
+      idf: () => 0,
+      topTerms: () => [],
+      df: () => 0,
+      scoreTerm: () => [],
+    };
+    providerStub = selectProvider(["topic-a"]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { needle, denseK: 100, gateConfig: gateConfigOf() }),
+    );
+
+    expect(selectCalls).toBe(1);
+    expect(result.selections.map((s) => s.slug)).toContain("topic-a");
+    // The stale deleted page never reaches the pool either.
+    expect(lastPool).not.toContain("gone-page");
+    // The lane WAS enabled, so this reports as an outage, not as disabled.
+    expect(recordedGateEvents[0]!.detail).toMatchObject({
+      pass: true,
+      reason: "dense_unavailable",
+    });
+  });
+
+  test("bypassForCore: true on a closed gate selects the stable prefix only (no finder lines)", async () => {
+    const lanes = await buildLanes();
+    // Non-empty low-score dense (0.1, below every dense threshold) makes the
+    // dense-gated gate run and close for the low-signal query; bypassForCore
+    // then runs selectPool over the stable prefix (core+hot) with an empty
+    // finder tail.
+    denseHits = [{ article: "topic-b", section: 0, score: 0.1 }];
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "zzzz nomatch"),
+      depsOf(lanes, {
+        coreSlugs: ["topic-c"],
+        hotSlugs: ["topic-d"],
+        denseK: 100,
+        gateConfig: gateConfigOf({ bypassForCore: true }),
+      }),
+    );
+
+    expect(selectCalls).toBe(1);
+    // The selector input is exactly the stable prefix — two card lines, no
+    // finder candidate lines.
+    expect(lastPool).toEqual(["topic-c", "topic-d"]);
+    expect(lastPoolLines).toHaveLength(2);
+    expect(lastPoolLines.every((l) => l.includes("# memory/concepts/"))).toBe(
+      true,
+    );
+    expect(result.lanes.finder).toEqual([]);
+    expect(result.selections.every((s) => s.sections.length === 0)).toBe(true);
+    // The selector judged the stable-only pool, so the result says it ran.
+    expect(result.selectorRan).toBe(true);
+  });
+
+  test("bypassForCore honors selectorEnabled: false — stable prefix passes through without the selector", async () => {
+    const lanes = await buildLanes();
+    // Non-empty low-score dense closes the gate; with the selector off (the
+    // new-user profile), the bypass mirrors the normal path and passes the
+    // stable prefix straight through via selectAllPoolCandidates rather than
+    // forcing the selectPool LLM call.
+    denseHits = [{ article: "topic-b", section: 0, score: 0.1 }];
+    providerStub = selectProvider([]); // must NOT be called
+
+    const result = await orchestrate(
+      makeTurn(1, "zzzz nomatch"),
+      depsOf(lanes, {
+        coreSlugs: ["topic-c"],
+        hotSlugs: ["topic-d"],
+        denseK: 100,
+        selectorEnabled: false,
+        gateConfig: gateConfigOf({ bypassForCore: true }),
+      }),
+    );
+
+    // The selector never ran; selections are exactly the stable-prefix slugs in
+    // cache order (selectAllPoolCandidates over the stable-only pool).
+    expect(selectCalls).toBe(0);
+    expect(result.selections.map((s) => s.slug)).toEqual([
+      "topic-c",
+      "topic-d",
+    ]);
+    expect(result.lanes.finder).toEqual([]);
+    expect(result.selections.every((s) => s.sections.length === 0)).toBe(true);
+    expect(result.selectorRan).toBe(false);
+  });
+
+  test("gate disabled (omitted) → unchanged behavior (selector runs, selections produced)", async () => {
+    const lanes = await buildLanes();
+    providerStub = selectProvider(["topic-a"]);
+
+    const result = await orchestrate(makeTurn(1, "apple"), depsOf(lanes));
+
+    expect(selectCalls).toBe(1);
+    expect(result.selections.map((s) => s.slug)).toContain("topic-a");
+  });
+
+  test("gate enabled:false is a no-op even with gate-closing fixtures", async () => {
+    const lanes = await buildLanes();
+    // These fixtures would CLOSE the gate if it ran (weak needle, sub-threshold
+    // dense). With enabled:false the gate never runs, so selection proceeds.
+    denseHits = [{ article: "topic-b", section: 0, score: 0.1 }];
+    providerStub = selectProvider(["topic-a"]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        denseK: 100,
+        gateConfig: gateConfigOf({ enabled: false }),
+      }),
+    );
+
+    expect(selectCalls).toBe(1);
+    expect(result.selections.map((s) => s.slug)).toContain("topic-a");
+  });
+
+  test("a scored gate run records ONE telemetry event carrying the decision", async () => {
+    const lanes = await buildLanes();
+    // Dense top-1 (0.9) clears denseThreshold (0.52) → dense_pass.
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+    providerStub = selectProvider(["topic-a"]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { denseK: 100, gateConfig: gateConfigOf() }),
+    );
+
+    expect(recordedGateEvents).toHaveLength(1);
+    const event = recordedGateEvents[0]!;
+    expect(event.checkName).toBe(MEMORY_V3_INJECTION_GATE_CHECK_NAME);
+    expect(event.value).toBe(1);
+    expect(event.detail).toMatchObject({
+      pass: true,
+      reason: "dense_pass",
+      scored: true,
+      top_dense_score: 0.9,
+    });
+  });
+
+  test("a closed gate records pass:false with the failure reason", async () => {
+    const lanes = await buildLanes();
+    // No needle-term overlap and sub-threshold dense → fail_no_signal.
+    denseHits = [{ article: "topic-b", section: 0, score: 0.1 }];
+    providerStub = selectProvider([]);
+
+    await orchestrate(
+      makeTurn(1, "zzzz nomatch"),
+      depsOf(lanes, { denseK: 100, gateConfig: gateConfigOf() }),
+    );
+
+    expect(recordedGateEvents).toHaveLength(1);
+    expect(recordedGateEvents[0]!.detail).toMatchObject({
+      pass: false,
+      reason: "fail_no_signal",
+    });
+  });
+
+  test("denseK: 0 records reason dense_disabled, not dense_unavailable", async () => {
+    const lanes = await buildLanes();
+    // denseK: 0 → the lane never ran → the gate passes open without scoring.
+    // Deliberate configuration (the lean new-user profile), so it must NOT be
+    // reported as an outage.
+    const needle = {
+      query: () => [],
+      queryScored: () => [{ article: "topic-a", section: 0, score: 0.1 }],
+      bestSection: () => -1,
+      idf: () => 0,
+      topTerms: () => [],
+      df: () => 0,
+      scoreTerm: () => [],
+    };
+    providerStub = selectProvider(["topic-a"]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { needle, denseK: 0, gateConfig: gateConfigOf() }),
+    );
+
+    expect(recordedGateEvents).toHaveLength(1);
+    expect(recordedGateEvents[0]!.detail).toMatchObject({
+      pass: true,
+      reason: "dense_disabled",
+      scored: false,
+    });
+  });
+
+  test("an enabled dense lane yielding no live hits records reason dense_unavailable", async () => {
+    const lanes = await buildLanes();
+    // denseK > 0 but the lane came back empty — a degraded embedding backend or
+    // a Qdrant error swallowed to [] by denseLaneScored. Dense SHOULD have
+    // scored this turn and didn't, so this is the alertable reason.
+    denseHits = [];
+    const needle = {
+      query: () => [],
+      queryScored: () => [{ article: "topic-a", section: 0, score: 0.1 }],
+      bestSection: () => -1,
+      idf: () => 0,
+      topTerms: () => [],
+      df: () => 0,
+      scoreTerm: () => [],
+    };
+    providerStub = selectProvider(["topic-a"]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { needle, denseK: 100, gateConfig: gateConfigOf() }),
+    );
+
+    expect(recordedGateEvents).toHaveLength(1);
+    expect(recordedGateEvents[0]!.detail).toMatchObject({
+      pass: true,
+      reason: "dense_unavailable",
+      scored: false,
+    });
+  });
+
+  test("records the corpus size on a scored run", async () => {
+    const lanes = await buildLanes();
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+    providerStub = selectProvider(["topic-a"]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        denseK: 100,
+        realConceptPageCount: 42,
+        gateConfig: gateConfigOf(),
+      }),
+    );
+
+    expect(recordedGateEvents[0]!.detail).toMatchObject({
+      reason: "dense_pass",
+      real_concept_page_count: 42,
+    });
+  });
+
+  test("records the corpus size on a dense_disabled run", async () => {
+    const lanes = await buildLanes();
+    // The sub-threshold cohort is the whole reason the field exists: without it
+    // `dense_disabled` says only "below the threshold", not how far below.
+    const needle = {
+      query: () => [],
+      queryScored: () => [{ article: "topic-a", section: 0, score: 0.1 }],
+      bestSection: () => -1,
+      idf: () => 0,
+      topTerms: () => [],
+      df: () => 0,
+      scoreTerm: () => [],
+    };
+    providerStub = selectProvider(["topic-a"]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        needle,
+        denseK: 0,
+        realConceptPageCount: 3,
+        gateConfig: gateConfigOf(),
+      }),
+    );
+
+    expect(recordedGateEvents[0]!.detail).toMatchObject({
+      reason: "dense_disabled",
+      real_concept_page_count: 3,
+    });
+  });
+
+  test("omits the corpus size when the dep is not threaded", async () => {
+    const lanes = await buildLanes();
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+    providerStub = selectProvider(["topic-a"]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { denseK: 100, gateConfig: gateConfigOf() }),
+    );
+
+    expect(recordedGateEvents).toHaveLength(1);
+    expect(recordedGateEvents[0]!.detail).not.toHaveProperty(
+      "real_concept_page_count",
+    );
+  });
+
+  test("a passed gate that selects NOTHING is recorded as a zero selection", async () => {
+    const lanes = await buildLanes();
+    // The case the gate's own pass rate cannot see: retrieval was confident
+    // enough to spend the selector call, and the selector judged that no
+    // candidate was relevant. Pass rate says 100%; injection rate says 0%.
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+    providerStub = selectProvider([]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { denseK: 100, gateConfig: gateConfigOf() }),
+    );
+
+    expect(recordedGateEvents[0]!.detail).toMatchObject({
+      pass: true,
+      reason: "dense_pass",
+    });
+    expect(recordedSelectionEvents).toHaveLength(1);
+    const event = recordedSelectionEvents[0]!;
+    expect(event.checkName).toBe(MEMORY_V3_SELECTION_CHECK_NAME);
+    expect(event.value).toBe(0);
+    expect(event.detail).toMatchObject({
+      gate_reason: "dense_pass",
+      gate_pass: true,
+      selector_ran: true,
+      selected_count: 0,
+    });
+  });
+
+  test("the selection event carries the gate reason and a non-zero count", async () => {
+    const lanes = await buildLanes();
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+    providerStub = selectProvider(["topic-a"]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        denseK: 100,
+        realConceptPageCount: 42,
+        gateConfig: gateConfigOf(),
+      }),
+    );
+
+    expect(recordedSelectionEvents).toHaveLength(1);
+    expect(recordedSelectionEvents[0]!.value).toBe(1);
+    expect(recordedSelectionEvents[0]!.detail).toMatchObject({
+      gate_reason: "dense_pass",
+      selector_ran: true,
+      selected_count: 1,
+      real_concept_page_count: 42,
+    });
+    expect(
+      Number(recordedSelectionEvents[0]!.detail!.pool_size),
+    ).toBeGreaterThan(0);
+  });
+
+  test("selectorEnabled: false marks the passthrough as selector_ran: false", async () => {
+    const lanes = await buildLanes();
+    // The lean profile passes the whole pool through without consulting the
+    // selector, so `selected_count` there is pool size, not a relevance
+    // judgment. Without this flag those turns would read as a 100% hit rate.
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        denseK: 100,
+        coreSlugs: ["topic-a"],
+        selectorEnabled: false,
+        gateConfig: gateConfigOf(),
+      }),
+    );
+
+    expect(recordedSelectionEvents).toHaveLength(1);
+    expect(recordedSelectionEvents[0]!.detail).toMatchObject({
+      selector_ran: false,
+    });
+    expect(
+      Number(recordedSelectionEvents[0]!.detail!.selected_count),
+    ).toBeGreaterThan(0);
+  });
+
+  test("the recall-safe fallback (omitted ids) records selector_kept_all: true", async () => {
+    const lanes = await buildLanes();
+    // The model omitting `ids` keeps the whole pool — indistinguishable from an
+    // explicit large selection by `selected_count` alone. This is the flag that
+    // separates "gave up judging" from "judged everything relevant".
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+    providerStub = {
+      name: "stub",
+      sendMessage: async () => toolUseResponse({}), // omitted ids → keep all
+    };
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        coreSlugs: ["topic-c"],
+        denseK: 100,
+        gateConfig: gateConfigOf(),
+      }),
+    );
+
+    expect(recordedSelectionEvents).toHaveLength(1);
+    expect(recordedSelectionEvents[0]!.detail).toMatchObject({
+      selector_ran: true,
+      selector_kept_all: true,
+    });
+  });
+
+  test("an explicit selection records selector_kept_all: false", async () => {
+    const lanes = await buildLanes();
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+    providerStub = selectProvider(["topic-a"]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { denseK: 100, gateConfig: gateConfigOf() }),
+    );
+
+    expect(recordedSelectionEvents[0]!.detail).toMatchObject({
+      selector_kept_all: false,
+    });
+  });
+
+  test("net_new_count counts only selections not already live in the conversation", async () => {
+    const lanes = await buildLanes();
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+    // Selector picks topic-a and topic-b; topic-a is already resident, so only
+    // topic-b is a net-new injection this turn.
+    providerStub = selectProvider(["topic-a", "topic-b"]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        denseK: 100,
+        isResident: (slug) => slug === "topic-a",
+        gateConfig: gateConfigOf(),
+      }),
+    );
+
+    expect(recordedSelectionEvents[0]!.detail).toMatchObject({
+      selected_count: 2,
+      net_new_count: 1,
+    });
+  });
+
+  test("net_new_count is omitted when isResident is not threaded", async () => {
+    const lanes = await buildLanes();
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+    providerStub = selectProvider(["topic-a"]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, { denseK: 100, gateConfig: gateConfigOf() }),
+    );
+
+    expect(recordedSelectionEvents[0]!.detail).not.toHaveProperty(
+      "net_new_count",
+    );
+  });
+
+  test("an empty pool is not a selector judgment", async () => {
+    const lanes = await buildLanes();
+    // `selectPool` returns [] before it ever reaches the provider when the pool
+    // is empty, so a candidate-less turn must not count as "the selector found
+    // nothing relevant" — that would drag the relevance rate down with turns the
+    // selector never saw.
+    const needle = {
+      query: () => [],
+      queryScored: () => [],
+      bestSection: () => -1,
+      idf: () => 0,
+      topTerms: () => [],
+      df: () => 0,
+      scoreTerm: () => [],
+    };
+    denseHits = [];
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        needle,
+        denseK: 0,
+        coreSlugs: [],
+        hotSlugs: [],
+        freshSlugs: [],
+        selectorEnabled: true,
+        gateConfig: gateConfigOf(),
+      }),
+    );
+
+    expect(recordedSelectionEvents).toHaveLength(1);
+    expect(recordedSelectionEvents[0]!.detail).toMatchObject({
+      selector_ran: false,
+      selected_count: 0,
+      pool_size: 0,
+    });
+    expect(result.selectorRan).toBe(false);
+  });
+
+  test("a hard-closed gate records a zero selection with selector_ran: false", async () => {
+    const lanes = await buildLanes();
+    // Zero BY CONSTRUCTION — the selector was never asked. Must not be counted
+    // as "the selector found nothing relevant".
+    denseHits = [{ article: "topic-b", section: 0, score: 0.1 }];
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "zzzz nomatch"),
+      depsOf(lanes, {
+        coreSlugs: ["topic-c"],
+        denseK: 100,
+        gateConfig: gateConfigOf(),
+      }),
+    );
+
+    expect(recordedSelectionEvents).toHaveLength(1);
+    expect(recordedSelectionEvents[0]!.detail).toMatchObject({
+      gate_reason: "fail_no_signal",
+      gate_pass: false,
+      selector_ran: false,
+      selected_count: 0,
+      pool_size: 0,
+    });
+    // The result carries the same fact for the pool record: the stable prefix
+    // is still reported as a lane, as computed, but the
+    // selector never ran over it.
+    expect(result.selectorRan).toBe(false);
+    expect(result.selections).toEqual([]);
+    expect(result.lanes.core).toEqual(["topic-c"]);
+  });
+
+  test("gate_reason is null on a selection when the gate never ran", async () => {
+    const lanes = await buildLanes();
+    denseHits = [{ article: "topic-b", section: 0, score: 0.9 }];
+    providerStub = selectProvider(["topic-a"]);
+
+    await orchestrate(makeTurn(1, "apple"), depsOf(lanes, { denseK: 100 }));
+
+    expect(recordedGateEvents).toEqual([]);
+    expect(recordedSelectionEvents).toHaveLength(1);
+    expect(recordedSelectionEvents[0]!.detail).toMatchObject({
+      gate_reason: null,
+      gate_pass: null,
+      selected_count: 1,
+    });
+  });
+
+  test("no gate telemetry when the gate is disabled or omitted", async () => {
+    const lanes = await buildLanes();
+    denseHits = [{ article: "topic-b", section: 0, score: 0.1 }];
+    providerStub = selectProvider(["topic-a"]);
+
+    await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        denseK: 100,
+        gateConfig: gateConfigOf({ enabled: false }),
+      }),
+    );
+    await orchestrate(makeTurn(2, "apple"), depsOf(lanes));
+
+    expect(recordedGateEvents).toEqual([]);
+  });
+});
+
+describe("latency sub-spans", () => {
+  test("orchestration inside a sub-span scope records v3_lanes / v3_expand / v3_selection", async () => {
+    // Each `Date.now()` call advances the clock 20ms so every measured span
+    // clears the recorder's floor without real waiting. Scoped to this test.
+    let clock = 0;
+    const nowSpy = spyOn(Date, "now").mockImplementation(() => (clock += 20));
+    try {
+      const lanes = await buildLanes();
+      denseHits = [{ article: "topic-b", section: 0 }];
+      providerStub = selectProvider(["topic-a"]);
+      const tracker = new TurnLatencyTracker();
+
+      await runWithLatencySubSpans(tracker, MEMORY_CONTEXT_PHASE_KEY, () =>
+        orchestrate(
+          makeTurn(1, "apple banana"),
+          depsOf(lanes, { denseK: 100 }),
+        ),
+      );
+
+      tracker.mark("turn_start");
+      tracker.mark("prompt_hook_start");
+      tracker.mark("prompt_hook_end");
+      const memory = tracker
+        .serializeSince(0)
+        .breakdown?.phases.find((p) => p.key === MEMORY_CONTEXT_PHASE_KEY);
+      expect(memory?.subPhases?.map((s) => s.key)).toEqual([
+        "v3_lanes",
+        "v3_expand",
+        "v3_selection",
+      ]);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("a gate hard-skip records no v3_expand and no v3_selection", async () => {
+    let clock = 0;
+    const nowSpy = spyOn(Date, "now").mockImplementation(() => (clock += 20));
+    try {
+      const lanes = await buildLanes();
+      // Low dense score against a high threshold closes the gate; no bypass.
+      denseHits = [{ article: "topic-b", section: 0, score: 0.01 }];
+      providerStub = selectProvider(["topic-a"]);
+      const tracker = new TurnLatencyTracker();
+
+      await runWithLatencySubSpans(tracker, MEMORY_CONTEXT_PHASE_KEY, () =>
+        orchestrate(
+          makeTurn(1, "apple banana"),
+          depsOf(lanes, {
+            denseK: 100,
+            gateConfig: gateConfigOf({ enabled: true, bypassForCore: false }),
+          }),
+        ),
+      );
+
+      tracker.mark("turn_start");
+      tracker.mark("prompt_hook_start");
+      tracker.mark("prompt_hook_end");
+      const memory = tracker
+        .serializeSince(0)
+        .breakdown?.phases.find((p) => p.key === MEMORY_CONTEXT_PHASE_KEY);
+      expect(memory?.subPhases?.map((s) => s.key)).toEqual(["v3_lanes"]);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Span-query pass: the dense lane re-run over the current message's clause
+// chunks as separate queries at `spanQueryK`, union-additive into the pool.
+// ---------------------------------------------------------------------------
+
+describe("orchestrate — span-query pass", () => {
+  const TWO_CHUNK_MESSAGE =
+    "apple appears in the first sentence here. elderberry shows up in the second sentence.";
+  const CHUNK_1 = "apple appears in the first sentence here.";
+  const CHUNK_2 = "elderberry shows up in the second sentence.";
+
+  test("spanQueryK omitted (default) runs no span dense calls", async () => {
+    const lanes = await buildLanes();
+
+    await orchestrate(
+      makeTurn(1, TWO_CHUNK_MESSAGE),
+      depsOf(lanes, { denseK: 100, selectorEnabled: false }),
+    );
+
+    expect(denseCalls).toEqual([{ query: TWO_CHUNK_MESSAGE, k: 100 }]);
+  });
+
+  test("span pass is inert when denseK=0", async () => {
+    const lanes = await buildLanes();
+
+    await orchestrate(
+      makeTurn(1, TWO_CHUNK_MESSAGE),
+      depsOf(lanes, { denseK: 0, spanQueryK: 7, selectorEnabled: false }),
+    );
+
+    expect(denseCalls).toEqual([]);
+  });
+
+  test("single-chunk message skips the span pass", async () => {
+    const lanes = await buildLanes();
+
+    await orchestrate(
+      makeTurn(1, "apple in one single sentence."),
+      depsOf(lanes, { denseK: 100, spanQueryK: 7, selectorEnabled: false }),
+    );
+
+    expect(denseCalls).toEqual([
+      { query: "apple in one single sentence.", k: 100 },
+    ]);
+  });
+
+  test("multi-chunk message adds span-lane candidates additively", async () => {
+    const lanes = await buildLanes();
+    // Full-message dense (and any chunk without an override) returns topic-b;
+    // chunk 1 re-surfaces topic-a (already a needle hit — attribution must
+    // stay "needle"); chunk 2 surfaces topic-d, which no other lane reaches
+    // ("grape" is not in the message, and the topic-a → topic-d curated edge
+    // must not re-surface an already-seen slug).
+    denseHits = [{ article: "topic-b", section: 0 }];
+    denseHitsByQuery.set(CHUNK_1, [{ article: "topic-a", section: 1 }]);
+    denseHitsByQuery.set(CHUNK_2, [{ article: "topic-d", section: 0 }]);
+
+    const result = await orchestrate(
+      makeTurn(1, TWO_CHUNK_MESSAGE),
+      depsOf(lanes, { denseK: 100, spanQueryK: 7, selectorEnabled: false }),
+    );
+
+    expect(denseCalls).toEqual([
+      { query: TWO_CHUNK_MESSAGE, k: 100 },
+      { query: CHUNK_1, k: 7 },
+      { query: CHUNK_2, k: 7 },
+    ]);
+    const laneOf = new Map(
+      result.lanes.finder.map((c) => [c.slug, c.lane] as const),
+    );
+    // "apple"/"elderberry" needle hits keep their lanes; the full-message
+    // dense hit keeps "dense"; only the genuinely span-surfaced page tags
+    // "span".
+    expect(laneOf.get("topic-a")).toBe("needle");
+    expect(laneOf.get("topic-c")).toBe("needle");
+    expect(laneOf.get("topic-b")).toBe("dense");
+    expect(laneOf.get("topic-d")).toBe("span");
+    expect(result.lanes.finder.filter((c) => c.slug === "topic-a").length).toBe(
+      1,
+    );
+    // The span hit's matched section rides its line and its selection.
+    const spanLine = result.lanes.finder.find((c) => c.slug === "topic-d");
+    expect(spanLine?.section?.text).toContain("lead for topic d");
+    expect(result.selections).toContainEqual({
+      slug: "topic-d",
+      sections: [spanLine!.section!],
+    });
+    // Additive: the span-only page joins the passthrough selections alongside
+    // every other lane's candidates.
+    expect(new Set(result.selections.map((s) => s.slug))).toEqual(
+      new Set(["topic-a", "topic-b", "topic-c", "topic-d"]),
+    );
+  });
+
+  test("an article hit by several chunks on different sections pools them strongest cosine first", async () => {
+    const lanes = await buildLanes();
+    // Both chunks surface topic-d on different sections; the EARLIER chunk's
+    // hit is the weaker one. Chunk order must not decide the line order: the
+    // strong match (ordinal 1, `## Notes`) is pooled before the lead.
+    denseHits = [];
+    denseHitsByQuery.set(CHUNK_1, [
+      { article: "topic-d", section: 0, score: 0.2 },
+    ]);
+    denseHitsByQuery.set(CHUNK_2, [
+      { article: "topic-d", section: 1, score: 0.9 },
+    ]);
+
+    const result = await orchestrate(
+      makeTurn(1, TWO_CHUNK_MESSAGE),
+      depsOf(lanes, { denseK: 100, spanQueryK: 7, selectorEnabled: false }),
+    );
+
+    const lines = result.lanes.finder.filter((c) => c.slug === "topic-d");
+    expect(lines.map((c) => [c.lane, c.section?.ordinal])).toEqual([
+      ["span", 1],
+      ["span", 0],
+    ]);
+    expect(lines[0]!.section?.text).toContain("grape");
+    expect(result.selections).toContainEqual({
+      slug: "topic-d",
+      sections: [lines[0]!.section!, lines[1]!.section!],
+    });
+  });
+
+  test("a span hit on a different section of a dense-surfaced page joins as its own span line", async () => {
+    const lanes = await buildLanes();
+    // Full-message dense pools topic-b's lead (ordinal 0); chunk 2 finds
+    // `## More` (ordinal 1). Different sections, so the page carries both
+    // lines: the dense one keeps its place and the span one follows.
+    denseHits = [{ article: "topic-b", section: 0, score: 0.4 }];
+    denseHitsByQuery.set(CHUNK_2, [
+      { article: "topic-b", section: 1, score: 0.9 },
+    ]);
+
+    const result = await orchestrate(
+      makeTurn(1, TWO_CHUNK_MESSAGE),
+      depsOf(lanes, { denseK: 100, spanQueryK: 7, selectorEnabled: false }),
+    );
+
+    const lines = result.lanes.finder.filter((c) => c.slug === "topic-b");
+    expect(lines.map((c) => [c.lane, c.section?.ordinal])).toEqual([
+      ["dense", 0],
+      ["span", 1],
+    ]);
+    expect(lines[1]!.descriptor).toContain("cherry date");
+  });
+
+  test("a span hit on a section already pooled is a no-op, whatever its cosine", async () => {
+    const lanes = await buildLanes();
+    // topic-a: the needle pooled `## Details` (ordinal 1); chunk 1 scores the
+    // same section higher than anything else this turn. topic-b: dense pooled
+    // the lead; chunk 2 scores the lead lower. Neither adds a line, and the
+    // attributions stay.
+    denseHits = [{ article: "topic-b", section: 0, score: 0.4 }];
+    denseHitsByQuery.set(CHUNK_1, [
+      { article: "topic-a", section: 1, score: 0.99 },
+    ]);
+    denseHitsByQuery.set(CHUNK_2, [
+      { article: "topic-b", section: 0, score: 0.3 },
+    ]);
+
+    const result = await orchestrate(
+      makeTurn(1, TWO_CHUNK_MESSAGE),
+      depsOf(lanes, { denseK: 100, spanQueryK: 7, selectorEnabled: false }),
+    );
+
+    const linesOf = (slug: Slug) =>
+      result.lanes.finder
+        .filter((c) => c.slug === slug)
+        .map((c) => [c.lane, c.section?.ordinal]);
+    expect(linesOf("topic-a")).toEqual([["needle", 1]]);
+    expect(linesOf("topic-b")).toEqual([["dense", 0]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-section finder lines: a page whose sections match different parts of
+// the message carries one line per matched section (capped per page), each
+// snippet showing the matched terms in context, and selecting the lines
+// selects those sections.
+// ---------------------------------------------------------------------------
+
+describe("orchestrate: multi-section finder lines", () => {
+  // A page whose `## Parody` section matches the message's bulk and whose
+  // `## Inventory` section matches only its last clause, deep in its body.
+  // The slug shares no token with the queries: its last segment heads every
+  // section's text, so a query term in it would score every section.
+  const FILLER = "filler words to push the match deep into the section ";
+  const BULK_AND_CLAUSE_PAGES: Record<Slug, string> = {
+    "autumn-notes": [
+      "lead for the page",
+      "## Parody",
+      "the parody verse everyone laughed at, a hilarious skit",
+      "## Inventory",
+      `${FILLER.repeat(8)}the turnip crates are counted here`,
+    ].join("\n"),
+  };
+  const BULK = "the parody verse was hilarious and everyone laughed.";
+  const CLAUSE = "please remind me about the turnip.";
+
+  test("a page whose sections match the bulk and the last clause carries both lines, and keeping both selects both sections", async () => {
+    const lanes = await customLanes(BULK_AND_CLAUSE_PAGES);
+    const [, parodyDoc, inventoryDoc] =
+      lanes.sectionIndex.byArticle.get("autumn-notes")!;
+    const parody = lanes.sectionIndex.sections[parodyDoc!]!;
+    const inventory = lanes.sectionIndex.sections[inventoryDoc!]!;
+    // The needle scores the bulk theme (`## Parody`); the span pass over the
+    // last clause reaches `## Inventory`.
+    denseHits = [];
+    denseHitsByQuery.set(CLAUSE, [{ article: "autumn-notes", section: 2 }]);
+    providerStub = selectProvider(["autumn-notes"]);
+
+    const result = await orchestrate(
+      makeTurn(1, `${BULK} ${CLAUSE}`),
+      depsOf(lanes, { denseK: 100, spanQueryK: 7 }),
+    );
+
+    const lines = result.lanes.finder.filter((c) => c.slug === "autumn-notes");
+    expect(lines.map((c) => [c.lane, c.section])).toEqual([
+      ["needle", parody],
+      ["span", inventory],
+    ]);
+    // Two pool lines, each a keyword-in-context snippet of its own section.
+    const poolLines = lastPoolLines.filter((l) => l.includes(" autumn-notes "));
+    expect(poolLines).toHaveLength(2);
+    expect(poolLines[0]).toContain("§Parody: ");
+    expect(poolLines[0]).toContain("parody");
+    expect(poolLines[1]).toContain("§Inventory: ");
+    expect(poolLines[1]).toContain("turnip");
+    // Keeping both ids selects both sections.
+    expect(result.selections).toEqual([
+      { slug: "autumn-notes", sections: [parody, inventory] },
+    ]);
+  });
+
+  test("a needle line's snippet is a window around its top contributing term, not the section head", async () => {
+    const lanes = await customLanes(BULK_AND_CLAUSE_PAGES);
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(makeTurn(1, "turnip"), depsOf(lanes));
+
+    expect(result.lanes.finder[0]?.terms).toEqual(["turnip"]);
+    const line = lastPoolLines.find((l) => l.includes(" autumn-notes "))!;
+    // "turnip" sits past the first 300 characters of `## Inventory`, so a
+    // section-head snippet would not show it; the window is centered on it
+    // and the synthetic head line is not shown.
+    expect(line).toContain("§Inventory: … ");
+    expect(line).toContain("the turnip crates are counted here");
+    expect(line).not.toContain("autumn-notes - Inventory");
+  });
+
+  test("finderSectionsPerPage caps a page's lines in surfacing order", async () => {
+    const lanes = await customLanes({
+      "many-page": [
+        "lead for the many page",
+        "## Alpha",
+        "alpha text",
+        "## Bravo",
+        "bravo text",
+        "## Charlie",
+        "charlie text",
+      ].join("\n"),
+    });
+    // needle → `## Alpha` (ordinal 1); full-message dense → `## Bravo`
+    // (ordinal 2); the span pass over the second sentence → `## Charlie`
+    // (ordinal 3).
+    const first = "alpha is the subject of the first sentence.";
+    const second = "the second sentence is about something else.";
+    denseHits = [{ article: "many-page", section: 2 }];
+    denseHitsByQuery.set(second, [{ article: "many-page", section: 3 }]);
+    providerStub = selectProvider([]);
+
+    const capped = await orchestrate(
+      makeTurn(1, `${first} ${second}`),
+      depsOf(lanes, { denseK: 100, spanQueryK: 7, finderSectionsPerPage: 2 }),
+    );
+    expect(
+      capped.lanes.finder.map((c) => [c.lane, c.section?.ordinal]),
+    ).toEqual([
+      ["needle", 1],
+      ["dense", 2],
+    ]);
+
+    const uncapped = await orchestrate(
+      makeTurn(2, `${first} ${second}`),
+      depsOf(lanes, { denseK: 100, spanQueryK: 7 }),
+    );
+    expect(
+      uncapped.lanes.finder.map((c) => [c.lane, c.section?.ordinal]),
+    ).toEqual([
+      ["needle", 1],
+      ["dense", 2],
+      ["span", 3],
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rare-term lane: a query word that occurs in at most `maxDf` sections
+// surfaces its top sections as their own lines tagged with the word, after
+// the entity lane; a section a prior lane pooled is a no-op, and rare hits
+// feed neither the injection gate nor the edge seeds.
+// ---------------------------------------------------------------------------
+
+describe("orchestrate: rare-term lane", () => {
+  // The message's bulk theme (the parody) matches `## Parody`; its last
+  // clause's one distinctive word, "turnip", sits twice each in two other
+  // sections of the page and once, in a longer body, on a second page. The
+  // common words recur in every section, so among the message's words only
+  // the parody words (which hit `## Parody` alone) and "turnip" are rare.
+  const RARE_TERM_PAGES: Record<Slug, string> = {
+    "sample-notes": [
+      "the weekly report lists the sample notes",
+      "## Parody",
+      "parody verse: everyone laughed, hilarious skit, roast, encore, standing ovation, crowd; the weekly report lists the rest",
+      "## Inventory",
+      "inventory: the weekly report lists the turnip crates and the turnip totals",
+      "## Harvest",
+      "harvest: the weekly report lists the turnip deliveries and the turnip receipts, with the dates of each",
+    ].join("\n"),
+    "autumn-recipes": [
+      "## Soup",
+      "turnip soup: the weekly report lists onions, celery, carrots, thyme, cream, salt, pepper, and a long simmer",
+    ].join("\n"),
+  };
+  const MESSAGE =
+    "parody verse hilarious, everyone laughed: skit, roast, encore, standing ovation, crowd. The weekly report lists the turnip";
+  const RARE = { maxDf: 3, maxDfFraction: 1, perTerm: 2, cap: 24 };
+
+  test("a rare word's top sections join as lines tagged with the word beside the bulk-theme line, and selecting them selects the sections", async () => {
+    const lanes = await customLanes(RARE_TERM_PAGES);
+    const [, parodyDoc, inventoryDoc, harvestDoc] =
+      lanes.sectionIndex.byArticle.get("sample-notes")!;
+    const parody = lanes.sectionIndex.sections[parodyDoc!]!;
+    const inventory = lanes.sectionIndex.sections[inventoryDoc!]!;
+    const harvest = lanes.sectionIndex.sections[harvestDoc!]!;
+    providerStub = selectProvider(["sample-notes"]);
+
+    const result = await orchestrate(
+      makeTurn(1, MESSAGE),
+      depsOf(lanes, { rareTerm: RARE }),
+    );
+
+    const lines = result.lanes.finder.filter((c) => c.slug === "sample-notes");
+    expect(lines.map((c) => [c.lane, c.section])).toEqual([
+      ["needle", parody],
+      ["rare", inventory],
+      ["rare", harvest],
+    ]);
+    expect(lines[1]!.terms).toEqual(["turnip"]);
+    expect(lines[2]!.terms).toEqual(["turnip"]);
+    // The second page's only "turnip" section is the needle's own line for
+    // it, and the third-ranked "turnip" section is past perTerm anyway.
+    expect(
+      result.lanes.finder
+        .filter((c) => c.slug === "autumn-recipes")
+        .map((c) => c.lane),
+    ).toEqual(["needle"]);
+    // Each rare line is tagged with the word and snippets the section
+    // around it.
+    const rareLines = lastPoolLines.filter((l) =>
+      l.includes("(rare: turnip) "),
+    );
+    expect(rareLines).toHaveLength(2);
+    expect(rareLines[0]).toContain("(rare: turnip) sample-notes ");
+    expect(rareLines[0]).toContain(
+      "§Inventory: inventory: the weekly report lists the turnip",
+    );
+    expect(rareLines[1]).toContain("§Harvest: ");
+    expect(rareLines[1]).toContain("turnip");
+    expect(result.selections).toContainEqual({
+      slug: "sample-notes",
+      sections: [parody, inventory, harvest],
+    });
+  });
+
+  test("a rare hit on a section the needle already pooled is a no-op", async () => {
+    const lanes = await customLanes(RARE_TERM_PAGES);
+    const [, , inventoryDoc, harvestDoc] =
+      lanes.sectionIndex.byArticle.get("sample-notes")!;
+    const inventory = lanes.sectionIndex.sections[inventoryDoc!]!;
+    const harvest = lanes.sectionIndex.sections[harvestDoc!]!;
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "turnip"),
+      depsOf(lanes, {
+        needle: {
+          ...lanes.needle,
+          queryScored: () => [
+            { article: "sample-notes", section: inventoryDoc!, score: 1 },
+          ],
+        },
+        rareTerm: RARE,
+      }),
+    );
+
+    expect(result.lanes.finder.map((c) => [c.slug, c.lane, c.section])).toEqual(
+      [
+        ["sample-notes", "needle", inventory],
+        ["sample-notes", "rare", harvest],
+      ],
+    );
+  });
+
+  // Deps for a page the bulk-theme lanes fill to a per-page cap of three
+  // before the rare lane runs: the needle pools `## Alpha` (ordinal 1), the
+  // full-message dense pass `## Bravo` (2), and the reply pass `## Charlie`
+  // (3). `alpha` is the Alpha section's text, `tail` the page's further
+  // sections. Of the message's words only "turnip" occurs in the corpus.
+  const CAPPED_MESSAGE = "any turnip news";
+  const REPLY = "the previous reply";
+  async function cappedPageDeps(
+    alpha: string,
+    tail: string[],
+    rareTerm = RARE,
+    entity?: { token: string; ordinal: number },
+  ): Promise<OrchestrateDeps> {
+    const lanes = await customLanes({
+      "many-page": [
+        "lead for the many page",
+        "## Alpha",
+        alpha,
+        "## Bravo",
+        "bravo text",
+        "## Charlie",
+        "charlie text",
+        ...tail,
+      ].join("\n"),
+    });
+    const docs = lanes.sectionIndex.byArticle.get("many-page")!;
+    const alphaDoc = docs[1]!;
+    denseHits = [{ article: "many-page", section: 2 }];
+    denseHitsByQuery.set(REPLY, [{ article: "many-page", section: 3 }]);
+    return depsOf(lanes, {
+      needle: {
+        ...lanes.needle,
+        queryScored: () => [
+          { article: "many-page", section: alphaDoc, score: 1 },
+        ],
+      },
+      denseK: 100,
+      replyQueryK: 5,
+      finderSectionsPerPage: 3,
+      rareTerm,
+      ...(entity
+        ? { entityIndex: new Map([[entity.token, [docs[entity.ordinal]!]]]) }
+        : {}),
+    });
+  }
+
+  test("an entity hit joins a page the prior lanes filled to the per-page cap", async () => {
+    // The message names the `## Delta` heading (ordinal 4) of a page whose
+    // first three sections the bulk-theme lanes already pooled. Of the
+    // message's words only "delta" occurs in the corpus, so the rare lane's
+    // hit on the same section is a no-op behind the entity line.
+    const tail = ["## Delta", "delta text"];
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, `${CAPPED_MESSAGE} and delta`, REPLY),
+      await cappedPageDeps("alpha text", tail, RARE, {
+        token: "delta",
+        ordinal: 4,
+      }),
+    );
+    expect(
+      result.lanes.finder.map((c) => [c.lane, c.section?.ordinal]),
+    ).toEqual([
+      ["needle", 1],
+      ["dense", 2],
+      ["reply", 3],
+      ["entity", 4],
+    ]);
+  });
+
+  test("a rare hit joins a page the prior lanes filled to the per-page cap, bounded by the lane's own cap", async () => {
+    // "turnip" is held by `## Delta` (ordinal 4) and `## Echo` (5) alone.
+    const tail = [
+      "## Delta",
+      "delta text, and the turnip",
+      "## Echo",
+      "echo text, and the turnip",
+    ];
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, CAPPED_MESSAGE, REPLY),
+      await cappedPageDeps("alpha text", tail),
+    );
+    expect(
+      result.lanes.finder.map((c) => [c.lane, c.section?.ordinal]),
+    ).toEqual([
+      ["needle", 1],
+      ["dense", 2],
+      ["reply", 3],
+      ["rare", 4],
+      ["rare", 5],
+    ]);
+    expect(
+      result.lanes.finder.filter((c) => c.lane === "rare").map((c) => c.terms),
+    ).toEqual([["turnip"], ["turnip"]]);
+
+    // The lane's own cap is what bounds the lines past the page cap, so a
+    // page carries at most `finderSectionsPerPage + rareTerm.cap` lines.
+    const bounded = await orchestrate(
+      makeTurn(2, CAPPED_MESSAGE, REPLY),
+      await cappedPageDeps("alpha text", tail, { ...RARE, cap: 1 }),
+    );
+    expect(
+      bounded.lanes.finder.map((c) => [c.lane, c.section?.ordinal]),
+    ).toEqual([
+      ["needle", 1],
+      ["dense", 2],
+      ["reply", 3],
+      ["rare", 4],
+    ]);
+  });
+
+  test("a rare hit on a section a capped page already carries is still a no-op", async () => {
+    // "turnip" is held by `## Alpha`, which the needle pooled, and by
+    // `## Delta` (ordinal 4).
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, CAPPED_MESSAGE, REPLY),
+      await cappedPageDeps("alpha text, and the turnip", [
+        "## Delta",
+        "delta text, and the turnip",
+      ]),
+    );
+    expect(
+      result.lanes.finder.map((c) => [c.lane, c.section?.ordinal]),
+    ).toEqual([
+      ["needle", 1],
+      ["dense", 2],
+      ["reply", 3],
+      ["rare", 4],
+    ]);
+    expect(
+      result.lanes.finder.filter((c) => c.lane === "rare").map((c) => c.terms),
+    ).toEqual([["turnip"]]);
+  });
+
+  test("omitting the rare-term tuning disables the lane", async () => {
+    const lanes = await customLanes(RARE_TERM_PAGES);
+    providerStub = selectProvider([]);
+
+    const without = await orchestrate(makeTurn(1, "turnip"), depsOf(lanes));
+    expect(without.lanes.finder.some((c) => c.lane === "rare")).toBe(false);
+
+    const withLane = await orchestrate(
+      makeTurn(2, "turnip"),
+      depsOf(lanes, { rareTerm: RARE }),
+    );
+    expect(withLane.lanes.finder.some((c) => c.lane === "rare")).toBe(true);
+  });
+
+  test("rare hits seed no edge expansion", async () => {
+    // topic-a links to topic-d, and "apple" occurs only in topic-a's
+    // `## Details`. With the needle finding nothing for the message, the
+    // rare lane alone surfaces topic-a, and the edge lane has no seed.
+    const lanes = await buildLanes();
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        needle: { ...lanes.needle, queryScored: () => [] },
+        rareTerm: RARE,
+      }),
+    );
+
+    expect(result.lanes.finder.map((c) => [c.slug, c.lane, c.terms])).toEqual([
+      ["topic-a", "rare", ["apple"]],
+    ]);
+    expect(lastPool).not.toContain("topic-d");
+  });
+
+  test("rare hits do not open the injection gate", async () => {
+    // No sparse signal (the needle finds nothing) and a dense top-1 far
+    // below every threshold close the gate; the rare hit on topic-a neither
+    // opens it nor survives the closed gate.
+    const lanes = await buildLanes();
+    denseHits = [{ article: "topic-b", section: 0, score: 0.1 }];
+    providerStub = selectProvider([]);
+
+    const result = await orchestrate(
+      makeTurn(1, "apple"),
+      depsOf(lanes, {
+        needle: { ...lanes.needle, queryScored: () => [] },
+        denseK: 100,
+        gateConfig: gateConfigOf(),
+        rareTerm: RARE,
+      }),
+    );
+
+    expect(selectCalls).toBe(0);
+    expect(result.selections).toEqual([]);
+    expect(result.lanes.finder).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Selector infrastructure failure: the stable prefix is kept unjudged.
+// ---------------------------------------------------------------------------
+
+describe("selector infrastructure failure", () => {
+  /** A provider whose every send fails, so `selectPool` exhausts its
+   *  re-prompt retries and throws `MemoryV3RetrievalUnavailableError`. */
+  function failingProvider(): Provider {
+    return {
+      name: "stub",
+      sendMessage: async () => {
+        selectCalls++;
+        throw new Error("upstream rejected the request");
+      },
+    };
+  }
+
+  test("keeps the stable prefix unjudged, drops the finder tail, and records selector_ran: false", async () => {
+    const lanes = await buildLanes();
+    providerStub = failingProvider();
+
+    const result = await orchestrate(
+      makeTurn(1, "apple banana"),
+      depsOf(lanes, { coreSlugs: ["topic-c"], hotSlugs: ["topic-d"] }),
+    );
+
+    // The selector was tried (and retried) before the fallback engaged.
+    expect(selectCalls).toBeGreaterThan(1);
+    // The finder lane surfaced topic-a for the query, so the pool held it.
+    expect(result.lanes.finder.map((c) => c.slug)).toContain("topic-a");
+    // Only the stable prefix survives, in cache order, with no sections.
+    expect(result.selections.map((s) => s.slug)).toEqual([
+      "topic-c",
+      "topic-d",
+    ]);
+    expect(result.selections.every((s) => s.sections.length === 0)).toBe(true);
+    expect(result.selectorRan).toBe(false);
+    expect(result.selectorFailure).toBeInstanceOf(
+      MemoryV3RetrievalUnavailableError,
+    );
+    expect(recordedSelectionEvents).toHaveLength(1);
+    expect(recordedSelectionEvents[0]!.detail).toMatchObject({
+      selector_ran: false,
+      selector_failed: true,
+      selector_kept_all: false,
+      selected_count: 2,
+      pool_size: 3,
+    });
+  });
+
+  test("with no stable prefix the turn keeps nothing, and the failure still rides the result", async () => {
+    const lanes = await buildLanes();
+    providerStub = failingProvider();
+
+    const result = await orchestrate(
+      makeTurn(1, "apple banana"),
+      depsOf(lanes),
+    );
+
+    expect(result.selections).toEqual([]);
+    expect(result.selectorRan).toBe(false);
+    expect(result.selectorFailure).toBeInstanceOf(
+      MemoryV3RetrievalUnavailableError,
+    );
+  });
+
+  test("a non-infrastructure throw from the selector still propagates", async () => {
+    const lanes = await buildLanes();
+    providerStub = {
+      name: "stub",
+      sendMessage: async () => {
+        throw new Error("boom");
+      },
+    };
+    // `selectPool` wraps provider throws into its infrastructure error, so a
+    // plain throw reaching the orchestrator means something outside the
+    // selector broke; only a card map hole does that here.
+    await expect(
+      orchestrate(
+        makeTurn(1, "apple"),
+        depsOf(lanes, { coreSlugs: ["topic-c"], prefixCards: new Map() }),
+      ),
+    ).rejects.toThrow("no pre-rendered card");
+  });
+});

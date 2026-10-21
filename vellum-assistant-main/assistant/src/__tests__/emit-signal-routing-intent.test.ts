@@ -1,0 +1,1181 @@
+import { beforeEach, describe, expect, mock, test } from "bun:test";
+
+import { saveRawConfig } from "../config/loader.js";
+import type { NotificationSignal } from "../notifications/signal.js";
+import type { NotificationChannel } from "../notifications/types.js";
+
+let assistantInitiatedCandidate = false;
+const resolveAssistantInitiatedThreadMock = mock(
+  (signal: NotificationSignal) => ({
+    isCandidate: assistantInitiatedCandidate,
+    vellumSignal: assistantInitiatedCandidate
+      ? {
+          ...signal,
+          requiresConversation: true,
+          conversationMetadata: { source: "assistant_initiated" },
+        }
+      : signal,
+  }),
+);
+mock.module("../notifications/assistant-initiated-thread.js", () => ({
+  resolveAssistantInitiatedThread: resolveAssistantInitiatedThreadMock,
+}));
+
+const evaluateSignalMock = mock();
+const enforceRoutingIntentMock = mock();
+const updateDecisionMock = mock();
+const runDeterministicChecksMock = mock();
+const createEventMock = mock();
+const setEventDedupeKeyMock = mock();
+const dispatchDecisionMock = mock();
+const isPlatformClientConfiguredMock = mock();
+const writeHomeFeedItemForSignalMock = mock(
+  async (..._args: unknown[]) => null,
+);
+
+mock.module("../notifications/home-feed-side-effect.js", () => ({
+  writeHomeFeedItemForSignal: (...args: unknown[]) =>
+    writeHomeFeedItemForSignalMock(...args),
+}));
+
+mock.module("../channels/config.js", () => ({
+  getDeliverableChannels: () => ["vellum", "telegram"],
+}));
+
+// Guardian connectivity is resolved from the gateway pull. No active guardian
+// binding ⇒ binding-based channels (telegram) are not reported connected.
+// Guardian connectivity resolves solely from the gateway delivery; an empty
+// list ⇒ telegram stays disconnected.
+mock.module("../contacts/guardian-delivery-reader.js", () => ({
+  getGuardianDelivery: async () => [],
+  guardianForChannel: () => undefined,
+}));
+
+mock.module("../notifications/adapters/macos.js", () => ({
+  VellumAdapter: class {
+    constructor(_broadcastFn: unknown) {}
+  },
+}));
+
+mock.module("../notifications/adapters/telegram.js", () => ({
+  TelegramAdapter: class {},
+}));
+
+mock.module("../notifications/broadcaster.js", () => ({
+  NotificationBroadcaster: class {
+    constructor(_adapters: unknown[]) {}
+    setOnConversationCreated(_fn: unknown) {}
+  },
+}));
+
+// Capture the real enforcement before the module mock below replaces it:
+// the single_channel interplay tests exercise the genuine cap logic against
+// the urgency force-add's channel ordering.
+const { enforceRoutingIntent: realEnforceRoutingIntent } =
+  await import("../notifications/decision-engine.js");
+
+mock.module("../notifications/decision-engine.js", () => ({
+  evaluateSignal: (...args: unknown[]) => evaluateSignalMock(...args),
+  enforceRoutingIntent: (...args: unknown[]) =>
+    enforceRoutingIntentMock(...args),
+}));
+
+mock.module("../notifications/decisions-store.js", () => ({
+  updateDecision: (...args: unknown[]) => updateDecisionMock(...args),
+}));
+
+mock.module("../notifications/deterministic-checks.js", () => ({
+  runDeterministicChecks: (...args: unknown[]) =>
+    runDeterministicChecksMock(...args),
+  // emit-signal also imports checkSourceActiveSuppression for the pre-decision
+  // gate. Mirror its real signal-only contract here so the gate behaves under
+  // the mock without depending on bun's export-merge semantics. The real
+  // implementation is unit-tested in
+  // notifications/__tests__/deterministic-checks.test.ts.
+  checkSourceActiveSuppression: (signal: {
+    attentionHints: { visibleInSourceNow?: boolean };
+  }) =>
+    signal.attentionHints.visibleInSourceNow
+      ? {
+          passed: false,
+          reason:
+            "Source-active suppression: user is already viewing the source context",
+        }
+      : { passed: true },
+}));
+
+mock.module("../notifications/events-store.js", () => ({
+  createEvent: (...args: unknown[]) => createEventMock(...args),
+  setEventDedupeKey: (...args: unknown[]) => setEventDedupeKeyMock(...args),
+}));
+
+mock.module("../notifications/runtime-dispatch.js", () => ({
+  dispatchDecision: (...args: unknown[]) => dispatchDecisionMock(...args),
+}));
+
+mock.module("../platform/client.js", () => ({
+  // The adapter import graph needs the class symbol; nothing in these tests
+  // dispatches through it.
+  VellumPlatformClient: class {
+    static async create(): Promise<null> {
+      return null;
+    }
+  },
+  isPlatformClientConfigured: () => isPlatformClientConfiguredMock(),
+}));
+
+import {
+  classifyNotificationReceipt,
+  emitNotificationSignal,
+} from "../notifications/emit-signal.js";
+
+beforeEach(() => {
+  saveRawConfig({});
+  assistantInitiatedCandidate = false;
+  resolveAssistantInitiatedThreadMock.mockClear();
+  writeHomeFeedItemForSignalMock.mockClear();
+  evaluateSignalMock.mockReset();
+  enforceRoutingIntentMock.mockReset();
+  updateDecisionMock.mockReset();
+  runDeterministicChecksMock.mockReset();
+  createEventMock.mockReset();
+  setEventDedupeKeyMock.mockReset();
+  dispatchDecisionMock.mockReset();
+  isPlatformClientConfiguredMock.mockReset();
+
+  createEventMock.mockReturnValue({ id: "evt-1" });
+  runDeterministicChecksMock.mockResolvedValue({ passed: true });
+  dispatchDecisionMock.mockResolvedValue({
+    dispatched: true,
+    reason: "ok",
+    deliveryResults: [],
+  });
+  isPlatformClientConfiguredMock.mockResolvedValue(true);
+  enforceRoutingIntentMock.mockImplementation((decision: unknown) => decision);
+});
+
+describe("emitNotificationSignal chat reply preference", () => {
+  test.each([
+    [false, false],
+    [true, true],
+    [false, true],
+    [true, false],
+  ])(
+    "preserves routing candidates when the setting changes %s -> %s",
+    async (initial, enabled) => {
+      saveRawConfig({ notifications: { newMessageEnabled: initial } });
+      const selectedChannels: NotificationChannel[] = [
+        "vellum",
+        "platform",
+        "telegram",
+      ];
+      const decision = {
+        shouldNotify: true,
+        selectedChannels,
+        reasoningSummary: "Selected reply delivery",
+        renderedCopy: {
+          vellum: { title: "Answer", body: "The result is ready." },
+        },
+        dedupeKey: "reply-1",
+        confidence: 1,
+        fallbackUsed: false,
+        persistedDecisionId: "decision-1",
+      };
+      evaluateSignalMock.mockResolvedValue(decision);
+      enforceRoutingIntentMock.mockReturnValue(decision);
+      runDeterministicChecksMock.mockImplementation(async () => {
+        await Promise.resolve();
+        saveRawConfig({ notifications: { newMessageEnabled: enabled } });
+        return { passed: true };
+      });
+      const result = await emitNotificationSignal({
+        sourceEventName: "chat.assistant_reply",
+        sourceChannel: "vellum",
+        sourceContextId: "conv-1",
+        attentionHints: {
+          urgency: "high",
+          requiresAction: false,
+          isAsyncBackground: false,
+          visibleInSourceNow: false,
+        },
+        routingIntent: "all_channels",
+      });
+      expect(runDeterministicChecksMock.mock.calls[0]?.[1]).toMatchObject({
+        selectedChannels: decision.selectedChannels,
+      });
+      expect(result.selectedChannels).toEqual(selectedChannels);
+      expect(result.dispatched).toBe(true);
+      expect(dispatchDecisionMock.mock.calls[0]?.[1]).toMatchObject({
+        shouldNotify: true,
+        selectedChannels,
+      });
+      expect(writeHomeFeedItemForSignalMock).toHaveBeenCalledTimes(1);
+      expect(writeHomeFeedItemForSignalMock.mock.calls[0]?.[1]).toMatchObject({
+        shouldNotify: true,
+        selectedChannels,
+      });
+      expect(updateDecisionMock).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    "schedule.result",
+    "guardian.question",
+    "ingress.access_request",
+    "activity.failed",
+    "chat.assistant_reply.extra",
+  ])("preserves platform selection for %s", async (sourceEventName) => {
+    saveRawConfig({ notifications: { newMessageEnabled: false } });
+    evaluateSignalMock.mockResolvedValue({
+      shouldNotify: true,
+      selectedChannels: ["vellum", "platform"],
+      reasoningSummary: "Urgent delivery",
+      renderedCopy: { vellum: { title: "Alert", body: "Action required." } },
+      dedupeKey: "alert-1",
+      confidence: 1,
+      fallbackUsed: false,
+      persistedDecisionId: "decision-1",
+    });
+    const result = await emitNotificationSignal({
+      sourceEventName,
+      sourceChannel: "vellum",
+      sourceContextId: "conv-1",
+      attentionHints: {
+        urgency: "critical",
+        requiresAction: true,
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+    });
+    expect(result.selectedChannels).toEqual(["vellum", "platform"]);
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("emitNotificationSignal routing intent re-persistence", () => {
+  test("re-persists selectedChannels/reasoningSummary when enforcement changes the decision", async () => {
+    const preDecision = {
+      shouldNotify: true,
+      selectedChannels: ["vellum"],
+      reasoningSummary: "LLM selected vellum only",
+      renderedCopy: {
+        vellum: { title: "Reminder", body: "Take out trash" },
+      },
+      dedupeKey: "dedupe-rem-1",
+      confidence: 0.9,
+      fallbackUsed: false,
+      persistedDecisionId: "dec-1",
+    };
+
+    const enforcedDecision = {
+      ...preDecision,
+      selectedChannels: ["vellum", "telegram"],
+      reasoningSummary: `${preDecision.reasoningSummary} [routing_intent=all_channels enforced: vellum, telegram]`,
+    };
+
+    evaluateSignalMock.mockResolvedValue(preDecision);
+    enforceRoutingIntentMock.mockReturnValue(enforcedDecision);
+
+    const result = await emitNotificationSignal({
+      sourceEventName: "schedule.notify",
+      sourceChannel: "scheduler",
+      sourceContextId: "rem-1",
+      attentionHints: {
+        requiresAction: true,
+        urgency: "high",
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+      contextPayload: { reminderId: "rem-1" },
+      routingIntent: "all_channels",
+    });
+
+    expect(result.dispatched).toBe(true);
+    expect(updateDecisionMock).toHaveBeenCalledTimes(1);
+    expect(updateDecisionMock).toHaveBeenCalledWith("dec-1", {
+      selectedChannels: ["vellum", "telegram"],
+      reasoningSummary: `${preDecision.reasoningSummary} [routing_intent=all_channels enforced: vellum, telegram]`,
+      validationResults: {
+        dedupeKey: "dedupe-rem-1",
+        channelCount: 2,
+        hasCopy: true,
+      },
+    });
+  });
+
+  test("does not re-persist when enforcement leaves the decision unchanged", async () => {
+    const decision = {
+      shouldNotify: true,
+      selectedChannels: ["vellum"],
+      reasoningSummary: "No routing override needed",
+      renderedCopy: {
+        vellum: { title: "Reminder", body: "Drink water" },
+      },
+      dedupeKey: "dedupe-rem-2",
+      confidence: 0.8,
+      fallbackUsed: false,
+      persistedDecisionId: "dec-2",
+    };
+
+    evaluateSignalMock.mockResolvedValue(decision);
+    enforceRoutingIntentMock.mockImplementation(
+      (inputDecision: unknown) => inputDecision,
+    );
+
+    await emitNotificationSignal({
+      sourceEventName: "schedule.notify",
+      sourceChannel: "scheduler",
+      sourceContextId: "rem-2",
+      attentionHints: {
+        requiresAction: false,
+        urgency: "medium",
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+      contextPayload: { reminderId: "rem-2" },
+      routingIntent: "single_channel",
+    });
+
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
+  test("excludes unverified binding channels from connected channel candidates", async () => {
+    const decision = {
+      shouldNotify: true,
+      selectedChannels: ["vellum"],
+      reasoningSummary: "Local only",
+      renderedCopy: {
+        vellum: { title: "Reminder", body: "Check this" },
+      },
+      dedupeKey: "dedupe-rem-3",
+      confidence: 0.8,
+      fallbackUsed: false,
+      persistedDecisionId: "dec-3",
+    };
+
+    evaluateSignalMock.mockResolvedValue(decision);
+    enforceRoutingIntentMock.mockImplementation(
+      (inputDecision: unknown) => inputDecision,
+    );
+
+    await emitNotificationSignal({
+      sourceEventName: "schedule.notify",
+      sourceChannel: "scheduler",
+      sourceContextId: "rem-3",
+      attentionHints: {
+        requiresAction: false,
+        urgency: "medium",
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+      contextPayload: { reminderId: "rem-3" },
+      routingIntent: "single_channel",
+    });
+
+    expect(evaluateSignalMock).toHaveBeenCalled();
+    const callArgs = evaluateSignalMock.mock.calls[0];
+    expect(callArgs).toBeDefined();
+    expect(callArgs?.[1]).toEqual(["vellum"]);
+  });
+});
+
+describe("emitNotificationSignal source-active pre-gate", () => {
+  test("suppresses visibleInSourceNow signals before the decision engine runs", async () => {
+    const result = await emitNotificationSignal({
+      sourceEventName: "ingress.trusted_contact.verification_sent",
+      sourceChannel: "slack",
+      sourceContextId: "conv-1",
+      attentionHints: {
+        requiresAction: false,
+        urgency: "low",
+        isAsyncBackground: true,
+        visibleInSourceNow: true,
+      },
+      contextPayload: { verificationSessionId: "vs-1" },
+    });
+
+    // The event row is still persisted (audit trail), but the signal
+    // short-circuits before the LLM-backed decision stage and never dispatches.
+    expect(createEventMock).toHaveBeenCalledTimes(1);
+    expect(evaluateSignalMock).not.toHaveBeenCalled();
+    expect(runDeterministicChecksMock).not.toHaveBeenCalled();
+    expect(dispatchDecisionMock).not.toHaveBeenCalled();
+    expect(result.dispatched).toBe(false);
+    expect(result.reason).toContain("Source-active suppression");
+  });
+
+  test("does not short-circuit when visibleInSourceNow is false", async () => {
+    evaluateSignalMock.mockResolvedValue({
+      shouldNotify: false,
+      selectedChannels: [],
+      reasoningSummary: "no notify",
+      renderedCopy: {},
+      dedupeKey: "dk-not-source-active",
+      confidence: 0.5,
+      fallbackUsed: false,
+    });
+
+    await emitNotificationSignal({
+      sourceEventName: "schedule.notify",
+      sourceChannel: "scheduler",
+      sourceContextId: "conv-2",
+      attentionHints: {
+        requiresAction: false,
+        urgency: "low",
+        isAsyncBackground: true,
+        visibleInSourceNow: false,
+      },
+      contextPayload: {},
+    });
+
+    expect(evaluateSignalMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("access-request vellum floor", () => {
+  test("rescues a suppressed access-request decision onto the vellum channel", async () => {
+    evaluateSignalMock.mockResolvedValue({
+      shouldNotify: false,
+      selectedChannels: [],
+      reasoningSummary: "LLM suppressed",
+      renderedCopy: {},
+      dedupeKey: "dedupe-ar-1",
+      confidence: 0.9,
+      fallbackUsed: false,
+      persistedDecisionId: "dec-ar-1",
+    });
+    enforceRoutingIntentMock.mockImplementation(
+      (decision: unknown) => decision,
+    );
+
+    const result = await emitNotificationSignal({
+      sourceEventName: "ingress.access_request",
+      sourceChannel: "telegram",
+      sourceContextId: "access-req-telegram-user-1",
+      requiresConversation: true,
+      attentionHints: {
+        requiresAction: true,
+        urgency: "medium",
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+      contextPayload: {
+        requestId: "req-1",
+        requestCode: "AB12CD",
+        sourceChannel: "telegram",
+        conversationExternalId: "chat-123",
+        actorExternalId: "user-1",
+        actorDisplayName: "User One",
+        actorUsername: null,
+        senderIdentifier: "User One",
+        guardianBindingChannel: null,
+        guardianResolutionSource: "none",
+        previousMemberStatus: null,
+        messagePreview: null,
+        trigger: "admitted",
+      },
+    });
+
+    expect(result.dispatched).toBe(true);
+    expect(dispatchDecisionMock).toHaveBeenCalledTimes(1);
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      shouldNotify: boolean;
+      selectedChannels: string[];
+      reasoningSummary: string;
+    };
+    expect(dispatched.shouldNotify).toBe(true);
+    expect(dispatched.selectedChannels).toContain("vellum");
+    expect(dispatched.reasoningSummary).toContain(
+      "vellum forced: decisionable access request",
+    );
+  });
+
+  test("an all_channels access request the decision engine suppressed still fans out", async () => {
+    evaluateSignalMock.mockResolvedValue({
+      shouldNotify: false,
+      selectedChannels: [],
+      reasoningSummary: "LLM suppressed",
+      renderedCopy: {},
+      dedupeKey: "dedupe-ar-email",
+      confidence: 0.9,
+      fallbackUsed: false,
+      persistedDecisionId: "dec-ar-email",
+    });
+    // The real enforcement leaves a suppressed decision alone and replaces
+    // the selection with every connected channel otherwise.
+    enforceRoutingIntentMock.mockImplementation(
+      (
+        decision: { shouldNotify: boolean; selectedChannels: string[] },
+        intent: string | undefined,
+        connected: string[],
+      ) =>
+        intent === "all_channels" && decision.shouldNotify
+          ? { ...decision, selectedChannels: [...connected] }
+          : decision,
+    );
+
+    await emitNotificationSignal({
+      sourceEventName: "ingress.access_request",
+      sourceChannel: "email",
+      sourceContextId: "access-req-email-stranger",
+      requiresConversation: true,
+      routingIntent: "all_channels",
+      attentionHints: {
+        requiresAction: true,
+        urgency: "high",
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+      contextPayload: {
+        requestId: "req-email",
+        requestCode: "EM12CD",
+        sourceChannel: "email",
+        conversationExternalId: "<thread-1@example.com>",
+        actorExternalId: "stranger@example.com",
+        actorDisplayName: null,
+        actorUsername: null,
+        senderIdentifier: "stranger@example.com",
+        guardianBindingChannel: null,
+        guardianResolutionSource: "vellum-anchor",
+        previousMemberStatus: null,
+        messagePreview: null,
+      },
+    });
+
+    const enforced = enforceRoutingIntentMock.mock.calls[0][0] as {
+      shouldNotify: boolean;
+    };
+    expect(enforced.shouldNotify).toBe(true);
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      selectedChannels: string[];
+    };
+    expect(dispatched.selectedChannels).toContain("vellum");
+  });
+
+  test("re-adds vellum when single_channel routing enforcement strips it", async () => {
+    evaluateSignalMock.mockResolvedValue({
+      shouldNotify: true,
+      selectedChannels: ["vellum", "telegram"],
+      reasoningSummary: "LLM selected vellum + telegram",
+      renderedCopy: {},
+      dedupeKey: "dedupe-ar-2",
+      confidence: 0.9,
+      fallbackUsed: false,
+      persistedDecisionId: "dec-ar-2",
+    });
+    // single_channel enforcement caps the selection to the source channel.
+    enforceRoutingIntentMock.mockImplementation(
+      (decision: { selectedChannels: string[] }) => ({
+        ...decision,
+        selectedChannels: ["telegram"],
+      }),
+    );
+
+    await emitNotificationSignal({
+      sourceEventName: "ingress.access_request",
+      sourceChannel: "telegram",
+      sourceContextId: "access-req-telegram-user-2",
+      requiresConversation: true,
+      routingIntent: "single_channel",
+      attentionHints: {
+        requiresAction: true,
+        urgency: "medium",
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+      contextPayload: {
+        requestId: "req-2",
+        requestCode: "CD34EF",
+        sourceChannel: "telegram",
+        conversationExternalId: "chat-123",
+        actorExternalId: "user-2",
+        actorDisplayName: "User Two",
+        actorUsername: null,
+        senderIdentifier: "User Two",
+        guardianBindingChannel: "telegram",
+        guardianResolutionSource: "source-channel-contact",
+        previousMemberStatus: null,
+        messagePreview: null,
+      },
+    });
+
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      selectedChannels: string[];
+    };
+    expect(dispatched.selectedChannels).toContain("vellum");
+    expect(dispatched.selectedChannels).toContain("telegram");
+    // The floor's change is re-persisted alongside enforcement's.
+    expect(updateDecisionMock).toHaveBeenCalledWith(
+      "dec-ar-2",
+      expect.objectContaining({
+        selectedChannels: expect.arrayContaining(["vellum", "telegram"]),
+      }),
+    );
+  });
+
+  test("does not rescue suppressed non-access-request signals", async () => {
+    evaluateSignalMock.mockResolvedValue({
+      shouldNotify: false,
+      selectedChannels: [],
+      reasoningSummary: "LLM suppressed",
+      renderedCopy: {},
+      dedupeKey: "dedupe-bg-1",
+      confidence: 0.9,
+      fallbackUsed: false,
+      persistedDecisionId: "dec-bg-1",
+    });
+    enforceRoutingIntentMock.mockImplementation(
+      (decision: unknown) => decision,
+    );
+
+    await emitNotificationSignal({
+      sourceEventName: "schedule.notify",
+      sourceChannel: "scheduler",
+      sourceContextId: "rem-2",
+      attentionHints: {
+        requiresAction: false,
+        urgency: "medium",
+        isAsyncBackground: true,
+        visibleInSourceNow: false,
+      },
+      contextPayload: {},
+    });
+
+    // Suppression handling stays inside dispatchDecision — the floor must
+    // not have rewritten the decision for a non-access-request signal.
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      shouldNotify: boolean;
+      reasoningSummary: string;
+    };
+    expect(dispatched.shouldNotify).toBe(false);
+    expect(dispatched.reasoningSummary).not.toContain("vellum forced");
+  });
+});
+
+describe("high/critical urgency channel force", () => {
+  function makeDecision(overrides: Record<string, unknown>) {
+    return {
+      shouldNotify: true,
+      selectedChannels: ["telegram"],
+      reasoningSummary: "LLM selected telegram only",
+      renderedCopy: {},
+      dedupeKey: "dedupe-urg-1",
+      confidence: 0.9,
+      fallbackUsed: false,
+      persistedDecisionId: "dec-urg-1",
+      ...overrides,
+    };
+  }
+
+  function emitWithUrgency(urgency: "low" | "medium" | "high" | "critical") {
+    return emitNotificationSignal({
+      sourceEventName: "schedule.notify",
+      sourceChannel: "scheduler",
+      sourceContextId: "rem-urg-1",
+      attentionHints: {
+        requiresAction: true,
+        urgency,
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+      contextPayload: { reminderId: "rem-urg-1" },
+    });
+  }
+
+  test("forces vellum and platform onto a high-urgency decision missing both", async () => {
+    evaluateSignalMock.mockResolvedValue(makeDecision({}));
+
+    const result = await emitWithUrgency("high");
+
+    expect(result.dispatched).toBe(true);
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      selectedChannels: string[];
+      reasoningSummary: string;
+    };
+    expect(dispatched.selectedChannels).toContain("vellum");
+    expect(dispatched.selectedChannels).toContain("platform");
+    expect(dispatched.selectedChannels).toContain("telegram");
+    expect(dispatched.reasoningSummary).toContain(
+      "(vellum, platform forced: high urgency)",
+    );
+  });
+
+  test("re-persists the stored decision with the force-added channels when routing enforcement is a no-op", async () => {
+    evaluateSignalMock.mockResolvedValue(makeDecision({}));
+
+    await emitWithUrgency("high");
+
+    // The identity enforcement mock leaves the decision unchanged, so only
+    // the urgency force-add differs from the evaluated decision. The stored
+    // row must still be synced to the dispatched channels.
+    expect(updateDecisionMock).toHaveBeenCalledTimes(1);
+    expect(updateDecisionMock).toHaveBeenCalledWith("dec-urg-1", {
+      selectedChannels: ["vellum", "telegram", "platform"],
+      reasoningSummary:
+        "LLM selected telegram only (vellum, platform forced: high urgency)",
+      validationResults: {
+        dedupeKey: "dedupe-urg-1",
+        channelCount: 3,
+        hasCopy: false,
+      },
+    });
+  });
+
+  test("forces only the missing channel when the other is already selected", async () => {
+    evaluateSignalMock.mockResolvedValue(
+      makeDecision({ selectedChannels: ["vellum"] }),
+    );
+
+    await emitWithUrgency("critical");
+
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      selectedChannels: string[];
+      reasoningSummary: string;
+    };
+    expect(dispatched.selectedChannels).toEqual(["vellum", "platform"]);
+    expect(dispatched.reasoningSummary).toContain(
+      "(platform forced: critical urgency)",
+    );
+  });
+
+  test("leaves a high-urgency decision untouched when both channels are already selected", async () => {
+    evaluateSignalMock.mockResolvedValue(
+      makeDecision({ selectedChannels: ["vellum", "platform"] }),
+    );
+
+    await emitWithUrgency("high");
+
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      selectedChannels: string[];
+      reasoningSummary: string;
+    };
+    expect(dispatched.selectedChannels).toEqual(["vellum", "platform"]);
+    expect(dispatched.reasoningSummary).not.toContain("forced");
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
+  test("leaves medium and low urgency selections untouched", async () => {
+    for (const urgency of ["medium", "low"] as const) {
+      dispatchDecisionMock.mockClear();
+      evaluateSignalMock.mockResolvedValue(makeDecision({}));
+
+      await emitWithUrgency(urgency);
+
+      const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+        selectedChannels: string[];
+        reasoningSummary: string;
+      };
+      expect(dispatched.selectedChannels).toEqual(["telegram"]);
+      expect(dispatched.reasoningSummary).not.toContain("forced");
+    }
+  });
+
+  test("does not force channels when the decision suppresses the notification", async () => {
+    evaluateSignalMock.mockResolvedValue(
+      makeDecision({ shouldNotify: false, selectedChannels: [] }),
+    );
+
+    await emitWithUrgency("high");
+
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      shouldNotify: boolean;
+      selectedChannels: string[];
+      reasoningSummary: string;
+    };
+    expect(dispatched.shouldNotify).toBe(false);
+    expect(dispatched.selectedChannels).toEqual([]);
+    expect(dispatched.reasoningSummary).not.toContain("forced");
+  });
+
+  test("routing-intent enforcement runs after the force-add and can cap channels", async () => {
+    evaluateSignalMock.mockResolvedValue(makeDecision({}));
+    // single_channel enforcement caps the selection to the source channel.
+    enforceRoutingIntentMock.mockImplementation(
+      (decision: { selectedChannels: string[] }) => ({
+        ...decision,
+        selectedChannels: ["telegram"],
+      }),
+    );
+
+    await emitNotificationSignal({
+      sourceEventName: "schedule.notify",
+      sourceChannel: "scheduler",
+      sourceContextId: "rem-urg-2",
+      routingIntent: "single_channel",
+      attentionHints: {
+        requiresAction: true,
+        urgency: "high",
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+      contextPayload: { reminderId: "rem-urg-2" },
+    });
+
+    // Enforcement sees the force-added channels...
+    const enforcedInput = enforceRoutingIntentMock.mock.calls[0][0] as {
+      selectedChannels: string[];
+    };
+    expect(enforcedInput.selectedChannels).toEqual([
+      "vellum",
+      "telegram",
+      "platform",
+    ]);
+    // ...and its cap wins over the force-add.
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      selectedChannels: string[];
+    };
+    expect(dispatched.selectedChannels).toEqual(["telegram"]);
+  });
+
+  test("forces only vellum when the platform client is not configured", async () => {
+    isPlatformClientConfiguredMock.mockResolvedValue(false);
+    evaluateSignalMock.mockResolvedValue(makeDecision({}));
+
+    await emitWithUrgency("high");
+
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      selectedChannels: string[];
+      reasoningSummary: string;
+    };
+    expect(dispatched.selectedChannels).toEqual(["vellum", "telegram"]);
+    expect(dispatched.reasoningSummary).toContain(
+      "(vellum forced: high urgency)",
+    );
+  });
+
+  // Real single_channel enforcement caps to the source channel when it is
+  // connected, else to the FIRST selected channel. The force-add prepends
+  // vellum precisely so that fallback keeps the in-app banner; these tests
+  // run the genuine enforcement to pin the interplay.
+  describe("interplay with real single_channel enforcement", () => {
+    beforeEach(() => {
+      enforceRoutingIntentMock.mockImplementation(
+        realEnforceRoutingIntent as (...args: unknown[]) => unknown,
+      );
+    });
+
+    function emitHighUrgencySingleChannel(
+      sourceChannel: "watcher" | "assistant_tool",
+    ) {
+      return emitNotificationSignal({
+        sourceEventName: "watcher.notification",
+        sourceChannel,
+        sourceContextId: "watch-1",
+        routingIntent: "single_channel",
+        attentionHints: {
+          requiresAction: true,
+          urgency: "high",
+          isAsyncBackground: false,
+          visibleInSourceNow: false,
+        },
+        contextPayload: {},
+      });
+    }
+
+    test("vellum survives the cap when the decision selected only vellum", async () => {
+      evaluateSignalMock.mockResolvedValue(
+        makeDecision({ selectedChannels: ["vellum"] }),
+      );
+
+      await emitHighUrgencySingleChannel("watcher");
+
+      // Force-add appends platform: ["vellum", "platform"]. The source
+      // channel is not connected, so the cap falls back to index 0.
+      const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+        selectedChannels: string[];
+      };
+      expect(dispatched.selectedChannels).toEqual(["vellum"]);
+    });
+
+    test("the cap picks the prepended vellum when the decision selected another channel", async () => {
+      evaluateSignalMock.mockResolvedValue(
+        makeDecision({ selectedChannels: ["telegram"] }),
+      );
+
+      await emitHighUrgencySingleChannel("assistant_tool");
+
+      // Force-add yields ["vellum", "telegram", "platform"]; the
+      // non-connected source channel makes the cap take index 0.
+      const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+        selectedChannels: string[];
+      };
+      expect(dispatched.selectedChannels).toEqual(["vellum"]);
+    });
+  });
+});
+
+describe("exclusive channelAllowlist policy", () => {
+  function makeDecision(overrides: Record<string, unknown>) {
+    return {
+      shouldNotify: true,
+      selectedChannels: ["telegram"],
+      reasoningSummary: "LLM selected telegram only",
+      renderedCopy: {},
+      dedupeKey: "dedupe-allow-1",
+      confidence: 0.9,
+      fallbackUsed: false,
+      persistedDecisionId: "dec-allow-1",
+      ...overrides,
+    };
+  }
+
+  test("skips urgent vellum and platform force", async () => {
+    evaluateSignalMock.mockResolvedValue(
+      makeDecision({ selectedChannels: ["vellum"] }),
+    );
+
+    const result = await emitNotificationSignal({
+      sourceEventName: "user.send_notification",
+      sourceChannel: "assistant_tool",
+      sourceContextId: "cli-allowlist-1",
+      attentionHints: {
+        requiresAction: true,
+        urgency: "critical",
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+      contextPayload: {
+        requestedMessage: "telegram only",
+        channelAllowlist: ["vellum"],
+      },
+    });
+
+    expect(enforceRoutingIntentMock).not.toHaveBeenCalled();
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      selectedChannels: string[];
+      reasoningSummary: string;
+    };
+    expect(dispatched.selectedChannels).toEqual(["vellum"]);
+    expect(dispatched.reasoningSummary).not.toContain("forced");
+    expect(result.selectedChannels).toEqual(["vellum"]);
+    expect(result.receiptClass).toBe("unknown");
+  });
+
+  test("replaces an LLM selection with the connected allowlist", async () => {
+    evaluateSignalMock.mockResolvedValue(
+      makeDecision({ selectedChannels: ["vellum", "telegram", "platform"] }),
+    );
+
+    await emitNotificationSignal({
+      sourceEventName: "user.send_notification",
+      sourceChannel: "assistant_tool",
+      sourceContextId: "cli-allowlist-2",
+      attentionHints: {
+        requiresAction: true,
+        urgency: "high",
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+      contextPayload: { channelAllowlist: ["vellum"] },
+    });
+
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      selectedChannels: string[];
+      shouldNotify: boolean;
+      reasoningSummary: string;
+    };
+    expect(dispatched.selectedChannels).toEqual(["vellum"]);
+    expect(dispatched.shouldNotify).toBe(true);
+    expect(dispatched.reasoningSummary).toContain("channelAllowlist: vellum");
+  });
+
+  test("access-request floor still adds vellum when the allowlist omitted it", async () => {
+    evaluateSignalMock.mockResolvedValue(
+      makeDecision({ shouldNotify: false, selectedChannels: [] }),
+    );
+
+    await emitNotificationSignal<string>({
+      sourceEventName: "ingress.access_request",
+      sourceChannel: "telegram",
+      sourceContextId: "access-req-allowlist-1",
+      requiresConversation: true,
+      attentionHints: {
+        requiresAction: true,
+        urgency: "high",
+        isAsyncBackground: false,
+        visibleInSourceNow: false,
+      },
+      contextPayload: {
+        requestId: "req-allowlist-1",
+        channelAllowlist: ["telegram"],
+      },
+    });
+
+    const dispatched = dispatchDecisionMock.mock.calls[0][1] as {
+      shouldNotify: boolean;
+      selectedChannels: string[];
+      reasoningSummary: string;
+    };
+    expect(dispatched.shouldNotify).toBe(true);
+    expect(dispatched.selectedChannels).toContain("vellum");
+    expect(dispatched.reasoningSummary).toContain(
+      "vellum forced: decisionable access request",
+    );
+  });
+});
+
+describe("classifyNotificationReceipt", () => {
+  test("reports provider_accepted when an external channel is sent", () => {
+    expect(
+      classifyNotificationReceipt([
+        { channel: "telegram", destination: "chat-1", status: "sent" },
+        { channel: "vellum", destination: "vellum", status: "sent" },
+      ]),
+    ).toBe("provider_accepted");
+  });
+
+  test("reports gateway_accepted when only platform is accepted", () => {
+    expect(
+      classifyNotificationReceipt([
+        { channel: "platform", destination: "push", status: "pending" },
+      ]),
+    ).toBe("gateway_accepted");
+  });
+
+  test("does not claim client_os_posted from a vellum sent row", () => {
+    expect(
+      classifyNotificationReceipt([
+        { channel: "vellum", destination: "vellum", status: "sent" },
+      ]),
+    ).toBe("unknown");
+  });
+});
+
+describe("emitNotificationSignal From me push defaults", () => {
+  const params = {
+    sourceEventName: "assistant.share",
+    sourceChannel: "assistant_tool" as const,
+    sourceContextId: "conv-background",
+    attentionHints: {
+      urgency: "low" as const,
+      requiresAction: false,
+      isAsyncBackground: true,
+      visibleInSourceNow: false,
+    },
+  };
+  const decision = (selectedChannels: NotificationChannel[] = ["vellum"]) => ({
+    shouldNotify: true,
+    selectedChannels,
+    reasoningSummary: "Assistant-authored share",
+    renderedCopy: { vellum: { title: "An update", body: "A useful result." } },
+    dedupeKey: "share-1",
+    confidence: 1,
+    fallbackUsed: false,
+    persistedDecisionId: "decision-share",
+  });
+
+  beforeEach(() => {
+    assistantInitiatedCandidate = true;
+    evaluateSignalMock.mockResolvedValue(decision());
+  });
+
+  test("adds configured platform after routing and persists the final decision", async () => {
+    const result = await emitNotificationSignal(params);
+    expect(result.selectedChannels).toEqual(["vellum", "platform"]);
+    expect(resolveAssistantInitiatedThreadMock).toHaveBeenCalledTimes(1);
+    expect(updateDecisionMock).toHaveBeenCalledWith(
+      "decision-share",
+      expect.objectContaining({
+        selectedChannels: ["vellum", "platform"],
+      }),
+    );
+    expect(dispatchDecisionMock.mock.calls[0]?.[0]).toMatchObject({
+      attentionHints: { urgency: "low" },
+    });
+    expect(dispatchDecisionMock.mock.calls[0]?.[3]).toMatchObject({
+      assistantInitiatedThread: {
+        platformAdded: true,
+        resolution: {
+          isCandidate: true,
+          vellumSignal: {
+            requiresConversation: true,
+            conversationMetadata: { source: "assistant_initiated" },
+          },
+        },
+      },
+    });
+  });
+
+  test.each([
+    "quiet",
+    "unconfigured",
+    "noncandidate",
+    "suppressed",
+    "single_channel",
+    "external_only",
+    "vellum_allowlist",
+  ])("respects %s policy without adding platform", async (scenario) => {
+    assistantInitiatedCandidate = scenario !== "noncandidate";
+    isPlatformClientConfiguredMock.mockResolvedValue(
+      scenario !== "unconfigured",
+    );
+    evaluateSignalMock.mockResolvedValue({
+      ...decision(scenario === "external_only" ? ["telegram"] : ["vellum"]),
+      shouldNotify: scenario !== "suppressed",
+    });
+    const result = await emitNotificationSignal({
+      ...params,
+      routingIntent:
+        scenario === "single_channel" ? "single_channel" : undefined,
+      contextPayload: {
+        quiet: scenario === "quiet",
+        ...(scenario === "vellum_allowlist"
+          ? { channelAllowlist: ["vellum"] }
+          : {}),
+      },
+    });
+    expect(result.selectedChannels).not.toContain("platform");
+    expect(dispatchDecisionMock.mock.calls[0]?.[3]).toMatchObject({
+      assistantInitiatedThread: { platformAdded: false },
+    });
+  });
+
+  test("keeps existing platform and external selections independent of this feature", async () => {
+    evaluateSignalMock.mockResolvedValue(
+      decision(["vellum", "platform", "telegram"]),
+    );
+    const result = await emitNotificationSignal({
+      ...params,
+      contextPayload: { quiet: true },
+    });
+    expect(result.selectedChannels).toEqual(["vellum", "platform", "telegram"]);
+    expect(isPlatformClientConfiguredMock).not.toHaveBeenCalled();
+    expect(dispatchDecisionMock.mock.calls[0]?.[3]).toMatchObject({
+      assistantInitiatedThread: { platformAdded: false },
+    });
+  });
+
+  test("probes an unbound platform once across urgency and From me policy", async () => {
+    isPlatformClientConfiguredMock.mockResolvedValue(false);
+    const result = await emitNotificationSignal({
+      ...params,
+      attentionHints: { ...params.attentionHints, urgency: "high" },
+    });
+    expect(result.selectedChannels).toEqual(["vellum"]);
+    expect(isPlatformClientConfiguredMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("preserves preferred external selections while adding the platform default", async () => {
+    evaluateSignalMock.mockResolvedValue(decision(["vellum", "telegram"]));
+    const result = await emitNotificationSignal(params);
+    expect(result.selectedChannels).toEqual(["vellum", "telegram", "platform"]);
+  });
+
+  test.each(["deduplicated", "source_active"])(
+    "does not resolve candidates for %s signals",
+    async (scenario) => {
+      if (scenario === "deduplicated") {
+        createEventMock.mockReturnValue(null);
+      }
+      await emitNotificationSignal({
+        ...params,
+        attentionHints: {
+          ...params.attentionHints,
+          visibleInSourceNow: scenario === "source_active",
+        },
+      });
+      expect(resolveAssistantInitiatedThreadMock).not.toHaveBeenCalled();
+      expect(dispatchDecisionMock).not.toHaveBeenCalled();
+    },
+  );
+});

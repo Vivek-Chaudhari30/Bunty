@@ -1,0 +1,530 @@
+import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { hostname, userInfo } from "node:os";
+import { createCipheriv, pbkdf2Sync, randomBytes } from "node:crypto";
+import { credentialKey } from "../credential-key.js";
+
+// ---------------------------------------------------------------------------
+// Logger mock — captures all log calls so the secret-leak test can inspect them
+// ---------------------------------------------------------------------------
+
+const logCalls: { method: string; args: unknown[] }[] = [];
+
+mock.module("../logger.js", () => ({
+  getLogger: () =>
+    new Proxy({} as Record<string, unknown>, {
+      get: (_target, prop) => {
+        if (typeof prop !== "string") return undefined;
+        return (...args: unknown[]) => {
+          logCalls.push({ method: prop, args });
+        };
+      },
+    }),
+}));
+
+import {
+  ALL_CREDENTIAL_SPECS,
+  readCredential,
+  readCredentialResult,
+  readServiceCredentials,
+  readServiceCredentialsResult,
+  type ServiceCredentialSpec,
+} from "../credential-reader.js";
+
+// ---------------------------------------------------------------------------
+// Temp directory for metadata / encrypted store fixtures
+// ---------------------------------------------------------------------------
+
+const ALGORITHM = "aes-256-gcm";
+const AUTH_TAG_LENGTH = 16;
+const KEY_LENGTH = 32;
+const PBKDF2_ITERATIONS = 100_000;
+
+function getMachineEntropy(): string {
+  const parts: string[] = [];
+  try {
+    parts.push(hostname());
+  } catch {
+    parts.push("unknown-host");
+  }
+  try {
+    parts.push(userInfo().username);
+  } catch {
+    parts.push("unknown-user");
+  }
+  // Must match assistant/src/util/platform.ts#getPlatformName.
+  parts.push(process.platform);
+  parts.push(process.arch);
+  try {
+    parts.push(userInfo().homedir);
+  } catch {
+    parts.push("/tmp");
+  }
+  return parts.join(":");
+}
+
+function encryptEntries(
+  entries: Record<string, string>,
+  key: Buffer,
+): Record<string, { iv: string; tag: string; data: string }> {
+  const encryptedEntries: Record<
+    string,
+    { iv: string; tag: string; data: string }
+  > = {};
+  for (const [account, value] of Object.entries(entries)) {
+    const iv = randomBytes(16);
+    const cipher = createCipheriv(ALGORITHM, key, iv, {
+      authTagLength: AUTH_TAG_LENGTH,
+    });
+    const encrypted = Buffer.concat([
+      cipher.update(value, "utf-8"),
+      cipher.final(),
+    ]);
+    const tag = cipher.getAuthTag();
+    encryptedEntries[account] = {
+      iv: iv.toString("hex"),
+      tag: tag.toString("hex"),
+      data: encrypted.toString("hex"),
+    };
+  }
+  return encryptedEntries;
+}
+
+function writeEncryptedStore(entries: Record<string, string>): void {
+  mkdirSync(testSecurityDir, { recursive: true });
+  const storePath = join(testSecurityDir, "keys.enc");
+
+  const salt = randomBytes(16);
+  const key = pbkdf2Sync(
+    getMachineEntropy(),
+    salt,
+    PBKDF2_ITERATIONS,
+    KEY_LENGTH,
+    "sha512",
+  );
+
+  const store = {
+    version: 1,
+    salt: salt.toString("hex"),
+    entries: encryptEntries(entries, key),
+  };
+  writeFileSync(storePath, JSON.stringify(store));
+}
+
+/**
+ * Write a v2 encrypted store with a random store.key file.
+ * The store.key is used directly as the AES-256-GCM key (no PBKDF2).
+ */
+function writeEncryptedStoreV2(entries: Record<string, string>): void {
+  mkdirSync(testSecurityDir, { recursive: true });
+
+  const storeKey = randomBytes(KEY_LENGTH);
+  writeFileSync(join(testSecurityDir, "store.key"), storeKey);
+
+  const store = {
+    version: 2,
+    entries: encryptEntries(entries, storeKey),
+  };
+  writeFileSync(join(testSecurityDir, "keys.enc"), JSON.stringify(store));
+}
+
+// ---------------------------------------------------------------------------
+// Setup / teardown
+// ---------------------------------------------------------------------------
+
+import { testSecurityDir, testWorkspaceDir } from "./test-preload.js";
+
+beforeEach(() => {
+  logCalls.length = 0;
+});
+
+afterEach(() => {
+  // Clean up fixture files written by individual tests.
+  for (const dir of [testSecurityDir, testWorkspaceDir]) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      mkdirSync(dir, { recursive: true });
+    } catch {
+      // best-effort cleanup
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Tests: v2 encrypted store (store.key)
+// ---------------------------------------------------------------------------
+
+describe("v2 encrypted store with store.key", () => {
+  test("reads credential from v2 store when store.key exists", async () => {
+    writeEncryptedStoreV2({
+      [credentialKey("test", "key")]: "v2-secret-value",
+    });
+
+    const result = await readCredential(credentialKey("test", "key"));
+    expect(result).toBe("v2-secret-value");
+  });
+
+  test("returns undefined for v2 store when store.key is missing", async () => {
+    // Write a v2 store but without the store.key file
+    mkdirSync(testSecurityDir, { recursive: true });
+
+    const storeKey = randomBytes(KEY_LENGTH);
+    const store = {
+      version: 2,
+      entries: encryptEntries(
+        { [credentialKey("test", "key")]: "v2-secret-value" },
+        storeKey,
+      ),
+    };
+    writeFileSync(join(testSecurityDir, "keys.enc"), JSON.stringify(store));
+    // Deliberately do NOT write store.key
+
+    const result = await readCredential(credentialKey("test", "key"));
+    expect(result).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: v1 encrypted store backward compatibility
+// ---------------------------------------------------------------------------
+
+describe("v1 encrypted store backward compatibility", () => {
+  test("v1 store continues to work with entropy-based key derivation", async () => {
+    writeEncryptedStore({
+      [credentialKey("test", "key")]: "v1-secret-value",
+    });
+
+    const result = await readCredential(credentialKey("test", "key"));
+    expect(result).toBe("v1-secret-value");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: generic readServiceCredentials
+// ---------------------------------------------------------------------------
+
+describe("readServiceCredentials", () => {
+  const telegramSpec: ServiceCredentialSpec = {
+    service: "telegram",
+    requiredFields: ["bot_token", "webhook_secret"],
+  };
+
+  test("returns correct Record<string, string> for a valid spec", async () => {
+    writeEncryptedStore({
+      [credentialKey("telegram", "bot_token")]: "my-bot-token",
+      [credentialKey("telegram", "webhook_secret")]: "my-webhook-secret",
+    });
+
+    const result = await readServiceCredentials(telegramSpec);
+    expect(result).toEqual({
+      bot_token: "my-bot-token",
+      webhook_secret: "my-webhook-secret",
+    });
+  });
+
+  test("returns null when required secrets are missing", async () => {
+    const result = await readServiceCredentials(telegramSpec);
+    expect(result).toBeNull();
+  });
+
+  test("returns null when only some required secrets can be read", async () => {
+    writeEncryptedStore({
+      [credentialKey("telegram", "bot_token")]: "my-bot-token",
+    });
+
+    const result = await readServiceCredentials(telegramSpec);
+    expect(result).toBeNull();
+  });
+
+  test("works for a hypothetical new service spec (extensibility)", async () => {
+    const customSpec: ServiceCredentialSpec = {
+      service: "test_service",
+      requiredFields: ["api_key", "secret"],
+    };
+
+    writeEncryptedStore({
+      [credentialKey("test_service", "api_key")]: "custom-api-key",
+      [credentialKey("test_service", "secret")]: "custom-secret",
+    });
+
+    const result = await readServiceCredentials(customSpec);
+    expect(result).toEqual({
+      api_key: "custom-api-key",
+      secret: "custom-secret",
+    });
+  });
+
+  test("works with v2 encrypted store", async () => {
+    writeEncryptedStoreV2({
+      [credentialKey("telegram", "bot_token")]: "v2-bot-token",
+      [credentialKey("telegram", "webhook_secret")]: "v2-webhook-secret",
+    });
+
+    const result = await readServiceCredentials(telegramSpec);
+    expect(result).toEqual({
+      bot_token: "v2-bot-token",
+      webhook_secret: "v2-webhook-secret",
+    });
+  });
+
+  test("CES HTTP requires metadata records even when secrets exist", async () => {
+    writeEncryptedStore({
+      [credentialKey("telegram", "bot_token")]: "my-bot-token",
+      [credentialKey("telegram", "webhook_secret")]: "my-webhook-secret",
+    });
+
+    const previousUrl = process.env.CES_CREDENTIAL_URL;
+    const previousToken = process.env.CES_SERVICE_TOKEN;
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "GET" && url.pathname.startsWith("/v1/metadata/")) {
+          return Response.json({ error: "Record not found" }, { status: 404 });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+    process.env.CES_CREDENTIAL_URL = `http://127.0.0.1:${server.port}`;
+    process.env.CES_SERVICE_TOKEN = "test-ces-service-token";
+    try {
+      const result = await readServiceCredentials(telegramSpec);
+      expect(result).toBeNull();
+    } finally {
+      server.stop(true);
+      if (previousUrl === undefined) {
+        delete process.env.CES_CREDENTIAL_URL;
+      } else {
+        process.env.CES_CREDENTIAL_URL = previousUrl;
+      }
+      if (previousToken === undefined) {
+        delete process.env.CES_SERVICE_TOKEN;
+      } else {
+        process.env.CES_SERVICE_TOKEN = previousToken;
+      }
+    }
+  });
+
+  test("CES HTTP reads secrets after metadata records are present", async () => {
+    writeEncryptedStore({
+      [credentialKey("telegram", "bot_token")]: "my-bot-token",
+      [credentialKey("telegram", "webhook_secret")]: "my-webhook-secret",
+    });
+
+    const previousUrl = process.env.CES_CREDENTIAL_URL;
+    const previousToken = process.env.CES_SERVICE_TOKEN;
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "GET" && url.pathname.startsWith("/v1/metadata/")) {
+          return Response.json({
+            record: {
+              credentialId: "cred-1",
+              service: "telegram",
+              field: "ignored",
+              allowedTools: [],
+              allowedDomains: [],
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+    process.env.CES_CREDENTIAL_URL = `http://127.0.0.1:${server.port}`;
+    process.env.CES_SERVICE_TOKEN = "test-ces-service-token";
+    try {
+      const result = await readServiceCredentials(telegramSpec);
+      expect(result).toEqual({
+        bot_token: "my-bot-token",
+        webhook_secret: "my-webhook-secret",
+      });
+    } finally {
+      server.stop(true);
+      if (previousUrl === undefined) {
+        delete process.env.CES_CREDENTIAL_URL;
+      } else {
+        process.env.CES_CREDENTIAL_URL = previousUrl;
+      }
+      if (previousToken === undefined) {
+        delete process.env.CES_SERVICE_TOKEN;
+      } else {
+        process.env.CES_SERVICE_TOKEN = previousToken;
+      }
+    }
+  });
+});
+
+function withCesEnv(url: string, token: string, run: () => Promise<void>) {
+  const previousUrl = process.env.CES_CREDENTIAL_URL;
+  const previousToken = process.env.CES_SERVICE_TOKEN;
+  process.env.CES_CREDENTIAL_URL = url;
+  process.env.CES_SERVICE_TOKEN = token;
+  return run().finally(() => {
+    if (previousUrl === undefined) {
+      delete process.env.CES_CREDENTIAL_URL;
+    } else {
+      process.env.CES_CREDENTIAL_URL = previousUrl;
+    }
+    if (previousToken === undefined) {
+      delete process.env.CES_SERVICE_TOKEN;
+    } else {
+      process.env.CES_SERVICE_TOKEN = previousToken;
+    }
+  });
+}
+
+describe("readCredentialResult", () => {
+  const account = credentialKey("vellum", "platform_user_id");
+
+  test("CES 5xx does not fall through to keys.enc", async () => {
+    writeEncryptedStore({ [account]: "stale-keys-enc-value" });
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response("internal error", { status: 500 });
+      },
+    });
+    try {
+      await withCesEnv(
+        `http://127.0.0.1:${server.port}`,
+        "test-ces-service-token",
+        async () => {
+          const result = await readCredentialResult(account);
+          expect(result).toEqual({ value: undefined, unreachable: true });
+          expect(await readCredential(account)).toBeUndefined();
+        },
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("CES 404 falls through to keys.enc", async () => {
+    writeEncryptedStore({ [account]: "keys-enc-value" });
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ error: "not found" }, { status: 404 });
+      },
+    });
+    try {
+      await withCesEnv(
+        `http://127.0.0.1:${server.port}`,
+        "test-ces-service-token",
+        async () => {
+          const result = await readCredentialResult(account);
+          expect(result).toEqual({
+            value: "keys-enc-value",
+            unreachable: false,
+          });
+        },
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("readServiceCredentialsResult", () => {
+  const telegramSpec: ServiceCredentialSpec = {
+    service: "telegram",
+    requiredFields: ["bot_token", "webhook_secret"],
+  };
+
+  test("CES 5xx is unreachable, not missing", async () => {
+    writeEncryptedStore({
+      [credentialKey("telegram", "bot_token")]: "my-bot-token",
+      [credentialKey("telegram", "webhook_secret")]: "my-webhook-secret",
+    });
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response("internal error", { status: 500 });
+      },
+    });
+    try {
+      await withCesEnv(
+        `http://127.0.0.1:${server.port}`,
+        "test-ces-service-token",
+        async () => {
+          const result = await readServiceCredentialsResult(telegramSpec);
+          expect(result).toEqual({ status: "unreachable" });
+          expect(await readServiceCredentials(telegramSpec)).toBeNull();
+        },
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: secret values must not leak into log output
+// ---------------------------------------------------------------------------
+
+describe("secret leak prevention", () => {
+  function allLogStrings(): string {
+    return JSON.stringify(logCalls);
+  }
+
+  test("encrypted store read does not leak secret values into logs", async () => {
+    const secretValue = "super-secret-encrypted-credential-value";
+
+    writeEncryptedStore({
+      [credentialKey("leak-test", "key")]: secretValue,
+    });
+
+    const result = await readCredential(credentialKey("leak-test", "key"));
+    expect(result).toBe(secretValue);
+
+    const serialized = allLogStrings();
+    expect(serialized).not.toContain(secretValue);
+  });
+
+  test("service credential read does not leak secret values into logs", async () => {
+    const secretValue = "super-secret-telegram-token";
+
+    writeEncryptedStore({
+      [credentialKey("telegram", "bot_token")]: secretValue,
+      [credentialKey("telegram", "webhook_secret")]: "webhook-secret-value",
+    });
+
+    const result = await readServiceCredentials({
+      service: "telegram",
+      requiredFields: ["bot_token", "webhook_secret"],
+    });
+    expect(result).not.toBeNull();
+
+    const serialized = allLogStrings();
+    expect(serialized).not.toContain(secretValue);
+    expect(serialized).not.toContain("webhook-secret-value");
+  });
+});
+
+describe("ALL_CREDENTIAL_SPECS registration", () => {
+  // The credential watcher only reads and diffs services listed here, so a
+  // channel whose lifecycle is gated on `changed.has("<service>")` in
+  // index.ts is silently inert unless its spec is registered. Pinning the
+  // list makes that failure loud: the Discord Gateway client shipped with
+  // wiring the watcher could never trigger before this registration existed.
+  test("every credential-gated channel lifecycle has a registered spec", () => {
+    const services = ALL_CREDENTIAL_SPECS.map((spec) => spec.service);
+    expect(services).toContain("telegram");
+    expect(services).toContain("twilio");
+    expect(services).toContain("whatsapp");
+    expect(services).toContain("slack_channel");
+    expect(services).toContain("discord_channel");
+    expect(services).toContain("vellum");
+  });
+
+  test("the discord spec requires exactly the token the wiring reads", () => {
+    const discord = ALL_CREDENTIAL_SPECS.find(
+      (spec) => spec.service === "discord_channel",
+    );
+    expect(discord?.requiredFields).toEqual(["bot_token"]);
+  });
+});

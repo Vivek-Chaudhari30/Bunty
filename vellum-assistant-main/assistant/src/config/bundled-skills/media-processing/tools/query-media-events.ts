@@ -1,0 +1,94 @@
+/**
+ * Query media tool - sends natural language queries against video
+ * analysis data (map output) via Claude for intelligent answers.
+ *
+ * Replaces the old keyword-matching approach with an LLM-powered
+ * reduce/query step that can answer arbitrary questions about the
+ * video content.
+ */
+
+import {
+  isAbortLikeError,
+  throwIfCancelled,
+} from "../../../../tools/shared/abort.js";
+import type {
+  ToolContext,
+  ToolExecutionResult,
+} from "../../../../tools/types.js";
+import {
+  reduceForAsset,
+  type ReduceOptions,
+  type ReduceResult,
+} from "../services/reduce.js";
+
+// ---------------------------------------------------------------------------
+// Exported function for job handler use (one-shot merge mode)
+// ---------------------------------------------------------------------------
+
+export { reduceForAsset } from "../services/reduce.js";
+
+// ---------------------------------------------------------------------------
+// Tool entry point
+// ---------------------------------------------------------------------------
+
+export async function run(
+  input: Record<string, unknown>,
+  context: ToolContext,
+): Promise<ToolExecutionResult> {
+  const assetId = input.asset_id as string | undefined;
+  if (!assetId) {
+    return { content: "asset_id is required.", isError: true };
+  }
+
+  const query = input.query as string | undefined;
+  if (!query) {
+    return { content: "query is required.", isError: true };
+  }
+
+  const systemPrompt = input.system_prompt as string | undefined;
+  const model = input.model as string | undefined;
+
+  const options: ReduceOptions = {
+    query,
+    systemPrompt,
+    model,
+    // Composed with the reduce deadline inside the service, so stopping the
+    // turn aborts the paid provider call rather than abandoning it.
+    ...(context.signal ? { signal: context.signal } : {}),
+  };
+
+  throwIfCancelled(context);
+
+  try {
+    const result: ReduceResult = await reduceForAsset(
+      assetId,
+      options,
+      context.onOutput,
+    );
+
+    return {
+      content: JSON.stringify(
+        {
+          query,
+          answer: result.answer,
+          model: result.model,
+          usage: {
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+          },
+        },
+        null,
+        2,
+      ),
+      isError: false,
+    };
+  } catch (err) {
+    // A cancelled turn is not a query failure: let it reach the executor's
+    // abort handling instead of being rendered as a tool error.
+    if (isAbortLikeError(err)) {
+      throw err;
+    }
+    const msg = (err as Error).message;
+    return { content: msg, isError: true };
+  }
+}

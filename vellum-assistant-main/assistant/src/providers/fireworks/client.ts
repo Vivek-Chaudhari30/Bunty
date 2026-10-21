@@ -1,0 +1,74 @@
+import {
+  modelEffortCeilings,
+  modelSupportedEfforts,
+} from "../model-catalog.js";
+import { OpenAIChatCompletionsProvider } from "../openai/chat-completions-provider.js";
+
+export interface FireworksProviderOptions {
+  apiKey?: string;
+  baseURL?: string;
+  streamTimeoutMs?: number;
+}
+
+const DEFAULT_FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1";
+
+/**
+ * Fireworks routing hint. Prompt caching works only within one replica, so
+ * serverless and multi-replica deployments use this header to send requests
+ * that share a key to the same replica.
+ * https://docs.fireworks.ai/guides/prompt-caching#optimizing-inference-request-for-caching
+ */
+export const FIREWORKS_SESSION_AFFINITY_HEADER = "x-session-affinity";
+
+/**
+ * Headers for one outgoing Fireworks request. `sessionKey` is the durable
+ * per-conversation key; without one the header is omitted, because a shared
+ * key would pin all keyless traffic to a single replica. Transport metadata
+ * only; nothing here enters the request body.
+ */
+export function resolveFireworksRequestHeaders(
+  sessionKey: string | undefined,
+): Record<string, string> {
+  const key = sessionKey?.trim();
+  if (!key) {
+    return {};
+  }
+  return { [FIREWORKS_SESSION_AFFINITY_HEADER]: key };
+}
+
+const FIREWORKS_MODEL_EFFORT_CEILINGS = modelEffortCeilings("fireworks");
+const FIREWORKS_MODEL_SUPPORTED_EFFORTS = modelSupportedEfforts("fireworks");
+
+export class FireworksProvider extends OpenAIChatCompletionsProvider {
+  constructor(
+    apiKey: string,
+    model: string,
+    options: FireworksProviderOptions = {},
+  ) {
+    super(apiKey, model, {
+      baseURL: options.baseURL?.trim() || DEFAULT_FIREWORKS_BASE_URL,
+      providerName: "fireworks",
+      providerLabel: "Fireworks",
+      streamTimeoutMs: options.streamTimeoutMs,
+      // Fallback for models not declared in the catalog. Most Fireworks
+      // chat-completions models only document `low|medium|high`; per-model
+      // overrides (e.g. DeepSeek V4 → "max") come from
+      // {@link resolveMaxReasoningEffort}.
+      maxReasoningEffort: "high",
+      assistantReasoningField: "reasoning_content",
+      // minimax-m3's function-call serialization collapses object-typed tool
+      // args to `{}` on the wire; present them as JSON strings and decode back.
+      coerceObjectArgsToJsonString: /minimax/i.test(model),
+    });
+  }
+
+  protected override resolveMaxReasoningEffort(
+    model: string,
+  ): "high" | "xhigh" | "max" {
+    return FIREWORKS_MODEL_EFFORT_CEILINGS.get(model) ?? "high";
+  }
+
+  protected override resolveSupportedReasoningEfforts(model: string) {
+    return FIREWORKS_MODEL_SUPPORTED_EFFORTS.get(model);
+  }
+}

@@ -1,0 +1,316 @@
+import { describe, expect, test } from "bun:test";
+
+import {
+  LEGACY_MEMORY_SPOTLIGHT_MATCHER,
+  MEMORY_POINTER_MATCHER,
+  stripInjectionsForCompaction,
+  stripTailUserTextBlocksByPrefix,
+} from "../context/strip-injections.js";
+import { stripExistingMemoryInjections } from "../plugins/defaults/memory/graph/conversation-graph-memory.js";
+import { wrapMemoryPointerBlock } from "../plugins/defaults/memory/memory-marker.js";
+import type { ContentBlock, Message } from "../providers/types.js";
+
+// ---------------------------------------------------------------------------
+// stripExistingMemoryInjections — removes memory-injected blocks from the
+// front of the last user message while preserving user-attached content.
+// ---------------------------------------------------------------------------
+
+function userMsg(...content: ContentBlock[]): Message {
+  return { role: "user", content };
+}
+
+function assistantMsg(text: string): Message {
+  return { role: "assistant", content: [{ type: "text", text }] };
+}
+
+const textBlock = (text: string): ContentBlock => ({ type: "text", text });
+
+const imageBlock: ContentBlock = {
+  type: "image",
+  source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" },
+};
+
+const memoryTextBlock: ContentBlock = {
+  type: "text",
+  text: "<memory __injected>\nSome recalled context\n</memory>",
+};
+
+const memoryImageMarker: ContentBlock = {
+  type: "text",
+  text: "<memory_image __injected>\nA photo of a sunset",
+};
+
+const memoryImageClose: ContentBlock = {
+  type: "text",
+  text: "</memory_image>",
+};
+
+// Legacy 2-block format (persisted in older conversations)
+const legacyMemoryImageMarker: ContentBlock = {
+  type: "text",
+  text: "<memory_image>A photo of a sunset</memory_image>",
+};
+
+const memoryImage: ContentBlock = {
+  type: "image",
+  source: {
+    type: "base64",
+    media_type: "image/jpeg",
+    data: "/9j/4AAQ==",
+  },
+};
+
+describe("stripExistingMemoryInjections", () => {
+  test("no-op when content has no memory blocks", () => {
+    const messages = [userMsg(textBlock("hello"), imageBlock)];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result).toEqual(messages);
+  });
+
+  test("no-op for empty messages array", () => {
+    const result = stripExistingMemoryInjections([]);
+    expect(result).toEqual([]);
+  });
+
+  test("no-op when last message is assistant role", () => {
+    const messages = [userMsg(textBlock("hi")), assistantMsg("hey")];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result).toEqual(messages);
+  });
+
+  test("strips memory text block", () => {
+    const messages = [userMsg(memoryTextBlock, textBlock("hello"))];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0].content).toEqual([textBlock("hello")]);
+  });
+
+  test("strips 3-block memory image (marker + image + close)", () => {
+    const messages = [
+      userMsg(
+        memoryTextBlock,
+        memoryImageMarker,
+        memoryImage,
+        memoryImageClose,
+        textBlock("hi"),
+      ),
+    ];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0].content).toEqual([textBlock("hi")]);
+  });
+
+  test("strips multiple 3-block memory image groups", () => {
+    const messages = [
+      userMsg(
+        memoryTextBlock,
+        memoryImageMarker,
+        memoryImage,
+        memoryImageClose,
+        memoryImageMarker,
+        memoryImage,
+        memoryImageClose,
+        textBlock("hello"),
+      ),
+    ];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0].content).toEqual([textBlock("hello")]);
+  });
+
+  test("strips legacy 2-block memory image (no closing tag)", () => {
+    const messages = [
+      userMsg(
+        memoryTextBlock,
+        legacyMemoryImageMarker,
+        memoryImage,
+        textBlock("hi"),
+      ),
+    ];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0].content).toEqual([textBlock("hi")]);
+  });
+
+  test("preserves user-attached image when it is the only content", () => {
+    const messages = [userMsg(imageBlock)];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0].content).toEqual([imageBlock]);
+  });
+
+  test("preserves user-attached image with text", () => {
+    const messages = [userMsg(imageBlock, textBlock("what is this?"))];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0].content).toEqual([imageBlock, textBlock("what is this?")]);
+  });
+
+  test("preserves user image after stripping 3-block memory blocks", () => {
+    const messages = [
+      userMsg(
+        memoryTextBlock,
+        memoryImageMarker,
+        memoryImage,
+        memoryImageClose,
+        imageBlock,
+        textBlock("look at this"),
+      ),
+    ];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0].content).toEqual([imageBlock, textBlock("look at this")]);
+  });
+
+  test("preserves user image-only message after stripping memory blocks", () => {
+    const messages = [userMsg(memoryTextBlock, imageBlock)];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0].content).toEqual([imageBlock]);
+  });
+
+  test("does not modify earlier messages", () => {
+    const earlier = userMsg(textBlock("first"));
+    const messages = [
+      earlier,
+      assistantMsg("ok"),
+      userMsg(memoryTextBlock, textBlock("second")),
+    ];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0]).toBe(earlier);
+    expect(result[2].content).toEqual([textBlock("second")]);
+  });
+
+  test("does not strip user text that equals </memory_image>", () => {
+    const messages = [userMsg(textBlock("</memory_image>"))];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0].content).toEqual([textBlock("</memory_image>")]);
+  });
+
+  test("does not strip </memory_image> after memory text block (no image context)", () => {
+    const messages = [
+      userMsg(
+        memoryTextBlock,
+        textBlock("</memory_image>"),
+        textBlock("hello"),
+      ),
+    ];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0].content).toEqual([
+      textBlock("</memory_image>"),
+      textBlock("hello"),
+    ]);
+  });
+
+  test("strips images-first then text (actual injectMemoryBlock order)", () => {
+    const messages = [
+      userMsg(
+        memoryImageMarker,
+        memoryImage,
+        memoryImageClose,
+        memoryTextBlock,
+        textBlock("hello"),
+      ),
+    ];
+    const result = stripExistingMemoryInjections(messages);
+    expect(result[0].content).toEqual([textBlock("hello")]);
+  });
+
+  // Regression guard: the helper must remain last-message-only — memory-v3's
+  // frozen-card carry depends on historical `<memory>` blocks staying intact.
+  test("strips ONLY the last user message, leaving earlier ones injected", () => {
+    const messages = [
+      userMsg(memoryTextBlock, textBlock("first")),
+      assistantMsg("ok"),
+      userMsg(memoryTextBlock, textBlock("second")),
+    ];
+    const result = stripExistingMemoryInjections(messages);
+    // Earlier user message keeps its injected memory block.
+    expect(result[0].content).toEqual([memoryTextBlock, textBlock("first")]);
+    // Last user message is stripped.
+    expect(result[2].content).toEqual([textBlock("second")]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The memory-v3 pointer strip is TAIL-ONLY at assembly (a re-entry must not
+// double-stack the current turn's pointer) and history-wide only under
+// compaction. Historical user messages keep the pointer they were sent with,
+// and frozen `<memory>` section blocks are never touched (the cache contract).
+// ---------------------------------------------------------------------------
+
+const pointerBlock = (inner: string): ContentBlock => ({
+  type: "text",
+  text: wrapMemoryPointerBlock(inner),
+});
+
+describe("tail pointer strip (MEMORY_POINTER_MATCHER)", () => {
+  test("strips the tail's pointer only; earlier turns keep theirs and <memory> blocks stay", () => {
+    const messages = [
+      userMsg(memoryTextBlock, textBlock("first"), pointerBlock("p1")),
+      assistantMsg("ok"),
+      userMsg(memoryTextBlock, textBlock("second"), pointerBlock("p2")),
+    ];
+    const result = stripTailUserTextBlocksByPrefix(messages, [
+      MEMORY_POINTER_MATCHER,
+    ]);
+    // Historical turn untouched, identity preserved.
+    expect(result[0]).toBe(messages[0]);
+    expect(result[1]).toBe(messages[1]);
+    expect(result[2].content).toEqual([memoryTextBlock, textBlock("second")]);
+  });
+
+  test("requires the full wrapper: tail text merely starting with the tag survives", () => {
+    const lookalike = textBlock("<memory_pointer>\nnot really a block");
+    const messages = [userMsg(lookalike, textBlock("hello"))];
+    const result = stripTailUserTextBlocksByPrefix(messages, [
+      MEMORY_POINTER_MATCHER,
+    ]);
+    expect(result[0].content).toEqual([lookalike, textBlock("hello")]);
+  });
+
+  test("no-op when the tail carries no pointer or is not a user message", () => {
+    const withoutPointer = [
+      userMsg(memoryTextBlock, textBlock("hello"), pointerBlock("stale")),
+      assistantMsg("hi"),
+    ];
+    expect(
+      stripTailUserTextBlocksByPrefix(withoutPointer, [MEMORY_POINTER_MATCHER]),
+    ).toBe(withoutPointer);
+    const plain = [userMsg(memoryTextBlock, textBlock("hello"))];
+    expect(
+      stripTailUserTextBlocksByPrefix(plain, [MEMORY_POINTER_MATCHER]),
+    ).toBe(plain);
+  });
+
+  test("a legacy <memory_spotlight> persisted by an earlier build is tail-stripped and compaction-stripped like the pointer", () => {
+    const spotlight = textBlock(
+      "<memory_spotlight>\nlegacy matched section\n</memory_spotlight>",
+    );
+    const messages = [
+      userMsg(memoryTextBlock, textBlock("first"), spotlight),
+      assistantMsg("ok"),
+      userMsg(memoryTextBlock, textBlock("second"), spotlight),
+    ];
+    const tailStripped = stripTailUserTextBlocksByPrefix(messages, [
+      MEMORY_POINTER_MATCHER,
+      LEGACY_MEMORY_SPOTLIGHT_MATCHER,
+    ]);
+    expect(tailStripped[0]).toBe(messages[0]);
+    expect(tailStripped[2].content).toEqual([
+      memoryTextBlock,
+      textBlock("second"),
+    ]);
+
+    const compacted = stripInjectionsForCompaction([
+      userMsg(textBlock("first"), spotlight),
+      assistantMsg("ok"),
+      userMsg(textBlock("second"), spotlight),
+    ]);
+    expect(compacted[0].content).toEqual([textBlock("first")]);
+    expect(compacted[2].content).toEqual([textBlock("second")]);
+  });
+
+  test("compaction strips every turn's pointer along with the other runtime injections", () => {
+    const messages = [
+      userMsg(textBlock("first"), pointerBlock("p1")),
+      assistantMsg("ok"),
+      userMsg(textBlock("second"), pointerBlock("p2")),
+    ];
+    const result = stripInjectionsForCompaction(messages);
+    expect(result[0].content).toEqual([textBlock("first")]);
+    expect(result[2].content).toEqual([textBlock("second")]);
+  });
+});

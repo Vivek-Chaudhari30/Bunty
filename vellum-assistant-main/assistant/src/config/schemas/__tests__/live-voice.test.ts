@@ -1,0 +1,257 @@
+import { describe, expect, test } from "bun:test";
+
+import {
+  LiveVoiceConfigSchema,
+  LiveVoiceFluxConfigSchema,
+  LiveVoiceVadConfigSchema,
+} from "../live-voice.js";
+
+// `eagerEotThreshold` is deliberately absent: it has no default, and leaving it
+// unset is what keeps Deepgram from emitting speculative turn events. `model`
+// is absent for a related reason: unset means the spoken language selects the
+// model, and pinning one overrides that.
+const FLUX_DEFAULTS = {
+  turnEnd: { enabled: true },
+  eotThreshold: 0.7,
+  eotTimeoutMs: 5_000,
+};
+
+describe("LiveVoiceVadConfigSchema", () => {
+  test("empty object parses to defaults", () => {
+    const parsed = LiveVoiceVadConfigSchema.parse({});
+    expect(parsed).toEqual({
+      speechEnergyThreshold: 800,
+      noiseFloorMargin: 3,
+      silenceThresholdMs: 1200,
+      maxTurnDurationMs: 30_000,
+      bargeInMinSpeechMs: 250,
+      echoBargeInMargin: 1.5,
+      echoEmaHalfLifeMs: 400,
+      echoDrainSlackMs: 300,
+    });
+  });
+
+  test("accepts overrides", () => {
+    const parsed = LiveVoiceVadConfigSchema.parse({
+      speechEnergyThreshold: 1200,
+      silenceThresholdMs: 500,
+      maxTurnDurationMs: 60_000,
+      bargeInMinSpeechMs: 120,
+    });
+    expect(parsed.speechEnergyThreshold).toBe(1200);
+    expect(parsed.silenceThresholdMs).toBe(500);
+    expect(parsed.maxTurnDurationMs).toBe(60_000);
+    expect(parsed.bargeInMinSpeechMs).toBe(120);
+  });
+
+  test("accepts a noiseFloorMargin of 0 (adaptation disabled)", () => {
+    const parsed = LiveVoiceVadConfigSchema.parse({ noiseFloorMargin: 0 });
+    expect(parsed.noiseFloorMargin).toBe(0);
+  });
+
+  test("rejects a negative noiseFloorMargin", () => {
+    expect(() =>
+      LiveVoiceVadConfigSchema.parse({ noiseFloorMargin: -1 }),
+    ).toThrow();
+  });
+
+  test("accepts a bargeInMinSpeechMs of 0 (guard disabled)", () => {
+    const parsed = LiveVoiceVadConfigSchema.parse({ bargeInMinSpeechMs: 0 });
+    expect(parsed.bargeInMinSpeechMs).toBe(0);
+  });
+
+  test("rejects negative bargeInMinSpeechMs", () => {
+    const result = LiveVoiceVadConfigSchema.safeParse({
+      bargeInMinSpeechMs: -1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  test("rejects non-positive speechEnergyThreshold", () => {
+    const result = LiveVoiceVadConfigSchema.safeParse({
+      speechEnergyThreshold: 0,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  test("rejects non-integer silenceThresholdMs", () => {
+    const result = LiveVoiceVadConfigSchema.safeParse({
+      silenceThresholdMs: 800.5,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  test("accepts echo gate overrides", () => {
+    const parsed = LiveVoiceVadConfigSchema.parse({
+      echoBargeInMargin: 2.25,
+      echoEmaHalfLifeMs: 250,
+      echoDrainSlackMs: 500,
+    });
+    expect(parsed.echoBargeInMargin).toBe(2.25);
+    expect(parsed.echoEmaHalfLifeMs).toBe(250);
+    expect(parsed.echoDrainSlackMs).toBe(500);
+  });
+
+  test("rejects an echo margin that cannot exceed its reference", () => {
+    expect(
+      LiveVoiceVadConfigSchema.safeParse({ echoBargeInMargin: 1 }).success,
+    ).toBe(false);
+  });
+
+  test("rejects invalid echo timing values", () => {
+    expect(
+      LiveVoiceVadConfigSchema.safeParse({ echoEmaHalfLifeMs: 0 }).success,
+    ).toBe(false);
+    expect(
+      LiveVoiceVadConfigSchema.safeParse({ echoEmaHalfLifeMs: 250.5 }).success,
+    ).toBe(false);
+    expect(
+      LiveVoiceVadConfigSchema.safeParse({ echoDrainSlackMs: -1 }).success,
+    ).toBe(false);
+  });
+});
+
+describe("LiveVoiceFluxConfigSchema", () => {
+  test("empty object parses to defaults, with turn-end on", () => {
+    expect(LiveVoiceFluxConfigSchema.parse({})).toEqual(FLUX_DEFAULTS);
+  });
+
+  test("an unset eagerEotThreshold is absent, not zero", () => {
+    expect("eagerEotThreshold" in LiveVoiceFluxConfigSchema.parse({})).toBe(
+      false,
+    );
+  });
+
+  test("accepts overrides", () => {
+    const parsed = LiveVoiceFluxConfigSchema.parse({
+      turnEnd: { enabled: true },
+      model: "flux-general-multi",
+      eotThreshold: 0.85,
+      eagerEotThreshold: 0.45,
+      eotTimeoutMs: 12_000,
+    });
+    expect(parsed.turnEnd.enabled).toBe(true);
+    expect(parsed.model).toBe("flux-general-multi");
+    expect(parsed.eotThreshold).toBe(0.85);
+    expect(parsed.eagerEotThreshold).toBe(0.45);
+    expect(parsed.eotTimeoutMs).toBe(12_000);
+  });
+
+  test("partial overrides merge with defaults", () => {
+    const parsed = LiveVoiceFluxConfigSchema.parse({ eotThreshold: 0.6 });
+    expect(parsed.eotThreshold).toBe(0.6);
+    expect(parsed.turnEnd.enabled).toBe(true);
+    expect(parsed.model).toBeUndefined();
+    expect(parsed.eotTimeoutMs).toBe(5_000);
+  });
+
+  test("rejects an eotThreshold outside 0.5..0.9", () => {
+    const above = LiveVoiceFluxConfigSchema.safeParse({ eotThreshold: 0.95 });
+    expect(above.success).toBe(false);
+    expect(above.error?.issues.map((i) => i.message)).toEqual([
+      "liveVoice.flux.eotThreshold must be <= 0.9",
+    ]);
+
+    const below = LiveVoiceFluxConfigSchema.safeParse({ eotThreshold: 0.4 });
+    expect(below.success).toBe(false);
+    expect(below.error?.issues.map((i) => i.message)).toEqual([
+      "liveVoice.flux.eotThreshold must be >= 0.5",
+    ]);
+  });
+
+  test("rejects an eagerEotThreshold outside 0.3..0.9", () => {
+    expect(
+      LiveVoiceFluxConfigSchema.safeParse({ eagerEotThreshold: 0.2 }).success,
+    ).toBe(false);
+    expect(
+      LiveVoiceFluxConfigSchema.safeParse({ eagerEotThreshold: 0.95 }).success,
+    ).toBe(false);
+  });
+
+  test("rejects an eotTimeoutMs outside 500..60000, and non-integers", () => {
+    expect(
+      LiveVoiceFluxConfigSchema.safeParse({ eotTimeoutMs: 499 }).success,
+    ).toBe(false);
+    expect(
+      LiveVoiceFluxConfigSchema.safeParse({ eotTimeoutMs: 60_001 }).success,
+    ).toBe(false);
+    expect(
+      LiveVoiceFluxConfigSchema.safeParse({ eotTimeoutMs: 1_500.5 }).success,
+    ).toBe(false);
+  });
+
+  test("rejects a non-boolean turnEnd.enabled", () => {
+    const result = LiveVoiceFluxConfigSchema.safeParse({
+      turnEnd: { enabled: "yes" },
+    });
+    expect(result.success).toBe(false);
+    const msgs = result.error?.issues.map((i) => i.message) ?? [];
+    expect(msgs.some((m) => m.includes("liveVoice.flux.turnEnd.enabled"))).toBe(
+      true,
+    );
+  });
+});
+
+describe("LiveVoiceConfigSchema", () => {
+  test("empty object parses to defaults", () => {
+    const parsed = LiveVoiceConfigSchema.parse({});
+    expect(parsed).toEqual({
+      vad: {
+        speechEnergyThreshold: 800,
+        noiseFloorMargin: 3,
+        silenceThresholdMs: 1200,
+        maxTurnDurationMs: 30_000,
+        bargeInMinSpeechMs: 250,
+        echoBargeInMargin: 1.5,
+        echoEmaHalfLifeMs: 400,
+        echoDrainSlackMs: 300,
+      },
+      // Off by default: Flux turn detection is opt-in, so the front-door hold
+      // verdict keeps committing turns until it is enabled.
+      flux: FLUX_DEFAULTS,
+      // Off by default: voice turns carry only their transcript, no audio
+      // artifacts on the conversation messages (JARVIS-1283).
+      archiveAudio: false,
+    });
+  });
+
+  test("archiveAudio can be enabled", () => {
+    expect(
+      LiveVoiceConfigSchema.parse({ archiveAudio: true }).archiveAudio,
+    ).toBe(true);
+  });
+
+  test("rejects a non-boolean archiveAudio", () => {
+    const result = LiveVoiceConfigSchema.safeParse({ archiveAudio: "yes" });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const msgs = result.error.issues.map((i) => i.message);
+      expect(msgs.some((m) => m.includes("liveVoice.archiveAudio"))).toBe(true);
+    }
+  });
+
+  test("accepts overrides", () => {
+    const parsed = LiveVoiceConfigSchema.parse({
+      vad: { silenceThresholdMs: 900 },
+      flux: { turnEnd: { enabled: true } },
+    });
+    expect(parsed.vad.silenceThresholdMs).toBe(900);
+    // Unspecified vad fields still get defaults
+    expect(parsed.vad.speechEnergyThreshold).toBe(800);
+    expect(parsed.vad.maxTurnDurationMs).toBe(30_000);
+    // Partial flux overrides merge with defaults
+    expect(parsed.flux.turnEnd.enabled).toBe(true);
+    expect(parsed.flux.eotThreshold).toBe(0.7);
+  });
+
+  test("persisted configs carrying retired keys keep parsing", () => {
+    // Zod strips unrecognized keys, so a persisted config that still carries
+    // `mode` or `maxSessionDurationSeconds` parses.
+    const parsed = LiveVoiceConfigSchema.parse({
+      mode: "ptt",
+      maxSessionDurationSeconds: 600,
+    });
+    expect(parsed).not.toHaveProperty("mode");
+    expect(parsed).not.toHaveProperty("maxSessionDurationSeconds");
+  });
+});
