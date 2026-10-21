@@ -2,8 +2,33 @@
 .env
 .env.*
 !.env.example
+*.pem
+*.key
 
-# Dependencies and OS files
+# User data: call recordings, transcripts, exports (AGENTS.md section 9)
+*.wav
+*.mp3
+*.m4a
+*.ogg
+recordings/
+transcripts/
+
+# Dependencies and build output
 node_modules/
+dist/
+build/
+.wrangler/
+
+# Lock files from npm, pnpm and yarn. We use Bun, so only bun.lock is committed.
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Logs
+*.log
+
+# Editor and OS files
+/.vscode/
+/.idea/
 .DS_Store
 Thumbs.db
