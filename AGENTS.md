@@ -174,8 +174,9 @@ We use the self-hosted Notion MCP server (`@notionhq/notion-mcp-server`) with on
 integration key, because teammates are Notion guests. Every edit shows as the integration bot,
 so always fill in the Person field and never edit another person's standup row.
 
-- Features page: `<paste Notion URL here>`
-- Standup log: `<paste Notion URL here>`
+- Workspace (BUNTY): https://app.notion.com/p/BUNTY-400a4156fdd88080ba27dbe9e98d5557
+- Features page: https://app.notion.com/p/400a4156fdd8813eba60e08bc03a98e4
+- Standup log: https://app.notion.com/p/400a4156fdd881f48879e57816341bea
 
 Your person's name is in their personal settings (`~/.codex/AGENTS.md` or `~/.claude/CLAUDE.md`,
 a line like `My name is Shrestha`). If you can't find it, ask.
