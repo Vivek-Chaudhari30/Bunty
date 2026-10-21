@@ -1,0 +1,10 @@
+{
+  "name": "@bunty/app-name",
+  "version": "0.0.1",
+  "private": true,
+  "description": "One line: what this integration lets the assistant do.",
+  "peerDependencies": {
+    "@vellumai/plugin-api": "^0.8.0"
+  },
+  "vellum": {}
+}
