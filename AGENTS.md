@@ -49,7 +49,8 @@ unclear in a task, ask instead of guessing. Write every agreed decision into Not
 │   ├── _template/     Copy this to start a new integration.
 │   └── <app-name>/    Example: reminders, whatsapp, calls, google, zomato.
 ├── backend/           Our own small services that live outside Vellum (see below).
-├── website/           Static website: About us, Scope, Pricing, Contact us, Onboarding.
+├── website/           Static website (plain HTML, CSS, JS, no build step): a single
+│                      landing page.
 ├── infra/             How we run everything on a server: Docker Compose files, scripts.
 └── docs/              Exported PDFs and images, plus docs/architecture/ (Markdown that AI
                        tools must read: architecture, roadmap, protocols, decisions).

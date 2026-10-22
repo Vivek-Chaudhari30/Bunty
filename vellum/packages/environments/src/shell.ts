@@ -13,6 +13,7 @@ export interface ShellSpawnFlags {
 const WINDOWS_UTF8_PREAMBLE =
   "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}; " +
   "$OutputEncoding = [System.Text.Encoding]::UTF8; " +
+  "$ProgressPreference = 'SilentlyContinue'; " +
   "$global:LASTEXITCODE = 0;";
 
 const WINDOWS_EXIT_STATUS_SUFFIX = `

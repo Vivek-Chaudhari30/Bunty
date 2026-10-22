@@ -55,7 +55,8 @@ under [Keys still empty](#keys-still-empty). Details: [CHANGES.md](CHANGES.md).
 | 8 | Hardening and server deploy | `backend/router`, `backend/deploy`, `infra`, plugins | Built and tested with mocks; voice replies not wired into Vellum |
 
 Not started: Google (Gmail, Calendar) via Composio; Zomato and Swiggy.
-Website: built ([live preview](https://website-seven-xi-36.vercel.app)).
+Website: built in `website/` (plain static HTML, CSS and JS for Cloudflare Pages). The old
+[Vercel preview](https://website-seven-xi-36.vercel.app) still shows the previous site.
 
 ## Folders
 
@@ -73,7 +74,7 @@ Website: built ([live preview](https://website-seven-xi-36.vercel.app)).
 | `integrations/_template/` | Copy this to start a new integration |
 | `integrations/_shared-types/` | Type shim for `@vellumai/plugin-api` used by our typecheck |
 | `infra/` | Docker Compose (router + Caddy), server deploy and "delete my data" runbook |
-| `website/` | Static site: About us, Scope, Pricing, Contact us, Onboarding |
+| `website/` | Static site, no build step: a single landing page |
 | `docs/architecture/` | Architecture, roadmap, protocols, decisions, overnight log (see below) |
 
 ## Install and run the tests
@@ -131,6 +132,10 @@ channel settings. Each integration's README lists its secrets and how to test it
 cd website
 python3 -m http.server 8080   # open http://localhost:8080
 ```
+
+Open it through a server, not by double-clicking the file: asset links are root paths like `/assets/`.
+Deploy on Cloudflare Pages with no build command and `website` as the output directory.
+See [website/README.md](website/README.md).
 
 ## Keys still empty
 
