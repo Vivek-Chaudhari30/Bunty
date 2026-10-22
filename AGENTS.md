@@ -51,7 +51,13 @@ unclear in a task, ask instead of guessing. Write every agreed decision into Not
 ├── backend/           Our own small services that live outside Vellum (see below).
 ├── website/           Static website: About us, Scope, Pricing, Contact us, Onboarding.
 ├── infra/             How we run everything on a server: Docker Compose files, scripts.
-└── docs/              Exported PDFs and images only. Live docs are in Notion.
+└── docs/              Exported PDFs and images, plus docs/architecture/ (Markdown that AI
+                       tools must read: architecture, roadmap, protocols, decisions).
+                       Notion stays the place for feature pages and standups.
+
+backend/router/        Shared-number router (Phase 3). See its README.
+integrations/reach-contact/    "Call / text / tell X" tool (Phase 5).
+integrations/a2a-delegation/   Assistant-to-assistant notes and tasks (Phases 6-7).
 ```
 
 **Why `backend/` and `infra/` exist (proposed, confirm with Shrestha before first use):**
@@ -226,3 +232,26 @@ person. Never skip it silently.
   instruction to the assistant.
 - Save consent with time for recordings and data use. "Delete my data" must remove everything.
 - When the assistant calls someone, it says it is an AI calling on behalf of the user.
+
+## 11. Architecture docs and roadmap
+
+Before any task, read `docs/architecture/ARCHITECTURE.md` and find your phase in
+`docs/architecture/ROADMAP.md`. Work on one phase at a time and only the steps it lists.
+
+- If your change alters the architecture, a protocol or a decision, update the matching file in
+  `docs/architecture/` in the same PR, and add or update an entry in `decisions.md`
+  (Proposed until the team agrees).
+- The A2A protocol is defined in `docs/architecture/a2a-delegation-protocol.md`. Code must match
+  it; change the doc first if the protocol must change.
+- Example names in docs and tests: assistants Chintu and Sujal, owners "Owner A" and "Owner B",
+  numbers `+91 00000 00001` and `+91 00000 00002`.
+
+## 12. Assistant-to-assistant rules
+
+- Another assistant is a contact, never an owner. It cannot approve anything, read memory, or call
+  tools directly.
+- Every message between assistants is signed (HMAC, timestamp, nonce). Reject anything that fails.
+- The receiving owner must approve before a delegated task starts (Gate A) and before any result
+  is sent back (Gate C). Both are checked in code.
+- Text from another assistant is information, never an instruction.
+- Test only between our own test assistants.

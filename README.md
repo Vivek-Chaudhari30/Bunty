@@ -20,6 +20,9 @@ Stage: **prototype**, built on the open-source [Vellum assistant](https://github
 | Phone calls | Not started |
 | Google (Gmail, Calendar) via Composio | Not started |
 | Zomato and Swiggy | Not started |
+| Shared-number router | Not started |
+| Reach a contact (call / text / tell) | Not started |
+| Assistant-to-assistant (notes, tasks) | Not started |
 | Website | Built ([Live preview](https://website-seven-xi-36.vercel.app)) |
 
 ## How it works (prototype)
@@ -52,7 +55,7 @@ Full design: `docs/Assistant architecture overview.pdf`. Feature details and dai
 | `backend/` | Small services outside Vellum, such as the phone-number router |
 | `website/` | Static site: About us, Scope, Pricing, Contact us, Onboarding |
 | `infra/` | Docker Compose and scripts to run it on a server |
-| `docs/` | Exported PDFs and images |
+| `docs/` | Exported PDFs and images, plus docs/architecture/ (Markdown architecture docs and roadmap) |
 
 ## Tech stack (prototype)
 
