@@ -2398,7 +2398,7 @@ describe("outbound Telegram verification", () => {
       GUARDIAN_VERIFY_TEMPLATE_KEYS.TELEGRAM_CHALLENGE_REQUEST,
       { code: "999999", expiresInMinutes: 10, assistantName: "MyBot" },
     );
-    expect(msg).toContain("Vellum assistant");
+    expect(msg).toContain("Bunty guardian verification");
     expect(msg).not.toContain("999999");
   });
 

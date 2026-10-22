@@ -306,7 +306,7 @@ describe("resolveLiveVoiceCredentialReadiness — managed (vellum) TTS", () => {
         kind: "tts",
         providerId: "vellum",
         reason:
-          'TTS provider "vellum" needs a Vellum platform connection for managed speech',
+          'TTS provider "vellum" needs a Bunty account connection for managed speech',
       },
     ]);
     expect(readiness.userMessage).toContain("assistant platform connect");

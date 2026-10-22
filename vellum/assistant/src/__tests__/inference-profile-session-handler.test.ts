@@ -418,7 +418,7 @@ describe("setInferenceProfileSession", () => {
         profile: "balanced",
         ttlSeconds: 300,
       });
-      await expect(promise).rejects.toThrow(/Not signed in to Vellum/);
+      await expect(promise).rejects.toThrow(/Not signed in to Bunty/);
       await expect(promise).rejects.toThrow(
         /assistant inference send --profile balanced "Reply with OK"/,
       );

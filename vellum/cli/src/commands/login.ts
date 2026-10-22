@@ -11,6 +11,7 @@ import {
   setActiveAssistant,
 } from "../lib/assistant-config";
 import { resolveAssistantApiKeyForInjection } from "../lib/assistant-api-key-resolution";
+import { BRAND_NAME } from "../lib/brand.js";
 import { computeDeviceId } from "../lib/guardian-token";
 import { openBrowser } from "../lib/open-browser";
 import {
@@ -302,7 +303,7 @@ export async function login(): Promise<void> {
   if (args.includes("--help") || args.includes("-h")) {
     console.log("Usage: vellum login [--token <session-token>] [--force]");
     console.log("");
-    console.log("Log in to the Vellum platform.");
+    console.log(`Log in to the ${BRAND_NAME} platform.`);
     console.log("");
     console.log("By default, opens a browser window for authentication.");
     console.log("Alternatively, pass a session token directly with --token.");
@@ -311,7 +312,7 @@ export async function login(): Promise<void> {
     console.log("lockfile so they appear in `vellum ps`.");
     console.log("");
     console.log("Options:");
-    console.log("  --token <token>    Session token from the Vellum platform");
+    console.log(`  --token <token>    Session token from the ${BRAND_NAME} platform`);
     console.log(
       "  --force, -f        Re-authenticate even if already logged in",
     );
@@ -484,7 +485,7 @@ export async function logout(): Promise<void> {
     console.log("Usage: vellum logout");
     console.log("");
     console.log(
-      "Log out of the Vellum platform, remove the stored session token,",
+      `Log out of the ${BRAND_NAME} platform, remove the stored session token,`,
     );
     console.log("and remove cloud-managed assistants from the local lockfile.");
     process.exit(0);
@@ -512,7 +513,7 @@ export async function whoami(): Promise<void> {
   if (args.includes("--help") || args.includes("-h")) {
     console.log("Usage: vellum whoami");
     console.log("");
-    console.log("Show the currently logged-in Vellum platform user.");
+    console.log(`Show the currently logged-in ${BRAND_NAME} platform user.`);
     process.exit(0);
   }
 

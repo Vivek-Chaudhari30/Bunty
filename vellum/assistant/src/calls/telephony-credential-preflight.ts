@@ -17,6 +17,7 @@
 import { getConfig } from "../config/loader.js";
 import type { TelephonySttCapability } from "../providers/speech-to-text/resolve.js";
 import { resolveTelephonySttCapability } from "../providers/speech-to-text/resolve.js";
+import { BRAND_NAME } from "../util/brand.js";
 import { findPlayableTelephonyTtsFallback } from "./resolve-call-tts-provider.js";
 import type { TelephonyTtsNotPlayableReason } from "./telephony-tts-capability.js";
 import { resolveTelephonyTtsCapability } from "./telephony-tts-capability.js";
@@ -111,7 +112,7 @@ function sttGapClause(
       // Connection-based providers are fixed by connecting the account,
       // not by entering an API key.
       if (capability.credentialProvider === "vellum") {
-        return `a Vellum platform connection for managed speech (run 'assistant platform connect')`;
+        return `a ${BRAND_NAME} account connection for managed speech (run 'assistant platform connect')`;
       }
       return `an API key for the speech-to-text provider "${providerId}"`;
     }
@@ -145,9 +146,9 @@ function ttsGap(
         gap: {
           kind: "tts",
           providerId,
-          reason: `Managed TTS has no usable Vellum platform connection and no playable fallback provider is available`,
+          reason: `Managed TTS has no usable ${BRAND_NAME} account connection and no playable fallback provider is available`,
         },
-        clause: `a Vellum platform connection for managed speech (run 'assistant platform connect'; no fallback provider has usable credentials)`,
+        clause: `a ${BRAND_NAME} account connection for managed speech (run 'assistant platform connect'; no fallback provider has usable credentials)`,
       };
     }
     case "missing-fish-audio-reference-id": {

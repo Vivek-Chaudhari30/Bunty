@@ -37,6 +37,7 @@ import type {
 import { notificationintentresultPost } from "@/generated/daemon/sdk.gen";
 import type { NotificationintentresultPostData } from "@/generated/daemon/types.gen";
 import { t } from "@/i18n";
+import { BRAND_NAME } from "@/lib/brand";
 import {
   ANDROID_ALERTS_CHANNEL_ID,
   ensureAndroidAlertsChannel,
@@ -1181,7 +1182,7 @@ export function postForegroundRemotePush(
   void postLocalNotification({
     // A data-only push carries no notification block, so the copy the OS
     // would have rendered lives in `data`.
-    title: text(notification.title) ?? text(data.title) ?? "Vellum",
+    title: text(notification.title) ?? text(data.title) ?? BRAND_NAME,
     body: text(notification.body) ?? text(data.body) ?? "",
     sourceEventName,
     assistantName: text(data.sender_name),

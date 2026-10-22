@@ -13,6 +13,7 @@ import {
   getManagedUpstream,
   parseVellumModel,
 } from "../../providers/vellum-model-routing.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import {
   AUTO_PROFILE_KEY,
   DEFAULT_PROFILE_KEYS,
@@ -179,7 +180,7 @@ export function routingIdentityModelIssue(
       return `Model "${model}" is an encoded routing string; store the native model id "${routed.model}".`;
     }
     return getManagedUpstream(model) === null
-      ? `Model "${model}" is not served by the Vellum managed route.`
+      ? `Model "${model}" is not served by the ${BRAND_NAME} managed route.`
       : null;
   }
   if (provider === "chatgpt") {

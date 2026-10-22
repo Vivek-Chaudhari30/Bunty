@@ -29,7 +29,8 @@ Bunty/
 │   ├── whatsapp/              Phase 2 (built-in channel, setup + docs)
 │   ├── calls/                 Phase 4 (built-in Twilio, setup + docs)
 │   ├── reach-contact/         Phase 5 (new tool: pick call / WhatsApp / assistant)
-│   └── a2a-delegation/        Phases 6-7 (new channel + tools: Chintu <-> Sujal)
+│   ├── a2a-delegation/        Phases 6-7 (new channel + tools: Chintu <-> Sujal)
+│   └── bunty-brand/           Branding: "Your name is Bunty" rules on every user-facing call (D-18)
 ├── backend/router/            Phase 3 (shared numbers -> the right person's assistant)
 └── infra/                     Docker Compose for N assistants + router on one server
 ```

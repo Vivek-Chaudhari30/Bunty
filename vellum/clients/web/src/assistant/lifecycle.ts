@@ -1,3 +1,4 @@
+import { BRAND_NAME } from "@/lib/brand";
 import { extractErrorMessage } from "@/utils/api-errors";
 
 import type { GetAssistantResult } from "@/assistant/api";
@@ -125,7 +126,7 @@ export function shouldRecoverFromHatchFailure(status?: number): boolean {
 export const PLATFORM_HOSTED_DISABLED_CODE = "platform_hosted_disabled";
 
 export const PLATFORM_HOSTED_DISABLED_MESSAGE =
-  "We are at capacity for Vellum Managed Assistants, more will be available soon!";
+  `We are at capacity for ${BRAND_NAME} Managed Assistants, more will be available soon!`;
 
 export function isPlatformHostedDisabled(
   status: number | undefined,

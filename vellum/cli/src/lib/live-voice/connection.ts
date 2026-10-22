@@ -32,6 +32,7 @@ import {
   resolveTargetAssistant,
   type AssistantEntry,
 } from "../assistant-config.js";
+import { BRAND_NAME } from "../brand.js";
 import { getPlatformUrl, readPlatformToken } from "../platform-client.js";
 import {
   guardianTokenDueForRenewal,
@@ -141,7 +142,7 @@ async function resolveCloudConnection(
   const sessionToken = readPlatformToken();
   if (!sessionToken) {
     throw new LiveVoiceConnectionError(
-      `${formatAssistantReference(entry)} is a Vellum cloud assistant, which ` +
+      `${formatAssistantReference(entry)} is a ${BRAND_NAME} cloud assistant, which ` +
         "needs a platform login. Run 'vellum login' and try again.",
     );
   }

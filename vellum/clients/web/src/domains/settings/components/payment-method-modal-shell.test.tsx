@@ -144,7 +144,7 @@ describe("PaymentMethodModalShell", () => {
       </PaymentMethodModalShell>,
     );
     expect(getByTestId("payment-method-modal-terms").textContent).toContain(
-      "Vellum can charge this card",
+      "Bunty can charge this card",
     );
   });
 

@@ -30,6 +30,7 @@ import { sendDiscordReply } from "../messaging/providers/discord/send.js";
 import { sendSlackReply } from "../messaging/providers/slack/send.js";
 import { sendTelegramReply } from "../messaging/providers/telegram-bot/send.js";
 import { getTelegramBotUsername } from "../telegram/bot-username.js";
+import { BRAND_NAME } from "../util/brand.js";
 import { getLogger } from "../util/logger.js";
 import { normalizePhoneNumber } from "../util/phone.js";
 import { DAEMON_INTERNAL_ASSISTANT_ID } from "./assistant-scope.js";
@@ -61,7 +62,7 @@ export const DESTINATION_RATE_WINDOW_MS = 3_600_000;
 /** Session TTL in seconds (matches challenge TTL of 10 minutes). */
 const SESSION_TTL_SECONDS = 600;
 
-const EMAIL_VERIFICATION_SUBJECT = "Vellum Assistant Guardian Verification";
+const EMAIL_VERIFICATION_SUBJECT = `${BRAND_NAME} Guardian Verification`;
 
 // ---------------------------------------------------------------------------
 // Telegram destination classification

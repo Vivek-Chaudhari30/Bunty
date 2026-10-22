@@ -10,6 +10,7 @@ import { SETUP_NAVIGATE } from "@/domains/onboarding/onboarding-navigation";
 import { setPendingProviderKey } from "@/domains/onboarding/provider-key";
 import { useOnboardingLogin } from "@/hooks/use-onboarding-login";
 import { clearGatewayToken } from "@/lib/auth/gateway-session";
+import { BRAND_NAME } from "@/lib/brand";
 import { setSelfHostedConnection } from "@/lib/self-hosted/connection";
 import { isElectron } from "@/runtime/is-electron";
 import { useHasPlatformSession } from "@/stores/auth-store";
@@ -45,9 +46,9 @@ function useHostingOptions(): HostingOption[] {
   return [
     {
       mode: "vellum-cloud",
-      label: "Vellum Cloud",
+      label: `${BRAND_NAME} Cloud`,
       subtitle:
-        "Always on, 24/7, even when your computer is off. Runs on Vellum's secure infrastructure.",
+        `Always on, 24/7, even when your computer is off. Runs on ${BRAND_NAME}'s secure infrastructure.`,
       icon: <Cloud className={ICON_CLASS} />,
       ...(cloudDisabled
         ? {

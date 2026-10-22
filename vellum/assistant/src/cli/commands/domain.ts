@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import type { Command } from "commander";
 
 import { cliIpcCall, exitFromIpcResult } from "../../ipc/cli-client.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { resolveBundledCliModule } from "../bundled-modules.js";
 import { applyCommandHelp, subcommand } from "../lib/cli-command-help.js";
 import { registerCommand } from "../lib/register-command.js";
@@ -55,7 +56,7 @@ export function registerDomainCommand(program: Command): void {
         "after",
         () => `
 Each assistant can register its own subdomain (e.g. velly.${envDomains().baseDomain})
-for email and web presence. DNS managed by the Vellum platform.
+for email and web presence. DNS managed by the ${BRAND_NAME} platform.
 
 Examples:
   $ assistant domain register velly
@@ -77,7 +78,7 @@ Options:
                                (e.g. --email-username hello → hello@velly.${baseDomain})
 
 Registers a subdomain at <subdomain>.${baseDomain}. DNS managed by the
-Vellum platform — no manual DNS changes needed.
+${BRAND_NAME} platform, no manual DNS changes needed.
 
 Examples:
   $ assistant domain register velly

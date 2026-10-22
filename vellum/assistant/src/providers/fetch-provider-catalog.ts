@@ -24,6 +24,8 @@
  * this catalog deliberately does NOT re-register it.
  */
 
+import { BRAND_NAME } from "../util/brand.js";
+
 export type FetchProviderKind = "builtin" | "byok";
 
 export interface FetchProviderCatalogEntry {
@@ -60,8 +62,8 @@ export const FETCH_PROVIDER_CATALOG: readonly FetchProviderCatalogEntry[] = [
     id: "default",
     // Display-only: fetching runs in the daemon, not through the platform
     // proxy. The id stays `default` until a managed fetch route exists.
-    displayName: "Vellum",
-    displayNameLong: "Vellum built-in fetcher",
+    displayName: BRAND_NAME,
+    displayNameLong: `${BRAND_NAME} built-in fetcher`,
     kind: "builtin",
   },
   {

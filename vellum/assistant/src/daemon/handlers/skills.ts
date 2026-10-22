@@ -81,6 +81,7 @@ import {
   resolveSkillSource,
   searchSkillsRegistry,
 } from "../../skills/skillssh-registry.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { getWorkspaceSkillsDir } from "../../util/platform.js";
 import { safeStringSlice } from "../../util/unicode.js";
 import { getConfigWatcher } from "../config-watcher.js";
@@ -509,7 +510,7 @@ interface SkillListFilter {
 function originDisplayLabel(origin: string): string {
   switch (origin) {
     case "vellum":
-      return "Vellum";
+      return BRAND_NAME;
     case "clawhub":
       return "Clawhub";
     case "skillssh":
@@ -1328,7 +1329,7 @@ export async function installSkill(spec: {
     if (spec.catalogOnly) {
       return {
         success: false,
-        error: `Skill "${spec.slug}" not found in the Vellum catalog`,
+        error: `Skill "${spec.slug}" not found in the ${BRAND_NAME} catalog`,
       };
     }
 

@@ -14,6 +14,7 @@ import {
   cliIpcCallStream,
   exitFromIpcResult,
 } from "../../ipc/cli-client.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { guessMimeType } from "../../util/mime-type.js";
 import { readStdinSync } from "../../util/read-stdin.js";
 import { resolveBundledCliModule } from "../bundled-modules.js";
@@ -87,7 +88,7 @@ export function registerEmailCommand(program: Command): void {
 Arguments:
   username   The local part of the email address (e.g. "mybot" → mybot@${assistantDomain()})
 
-Registers a new email address on the Vellum platform for the current
+Registers a new email address on the ${BRAND_NAME} platform for the current
 assistant. Each assistant can have one email address. The address is
 immediately active for receiving inbound email.
 

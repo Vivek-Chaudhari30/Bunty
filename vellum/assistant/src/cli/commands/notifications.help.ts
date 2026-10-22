@@ -1,5 +1,6 @@
 /** Declarative help for the `assistant notifications` command. */
 
+import { BRAND_NAME } from "../../util/brand.js";
 import type { CliCommandHelp } from "../lib/cli-command-help.js";
 
 export const NOTIFICATION_SOURCE_CHANNEL_VALUES = [
@@ -49,7 +50,7 @@ whether and where to deliver the notification based on connected channels,
 urgency, and user preferences.
 
 Minimal usage: only --message is required. Add --urgent for a push +
-visual flag in the Vellum Home feed. Source channel/event name fall back
+visual flag in the ${BRAND_NAME} Home feed. Source channel/event name fall back
 to assistant_tool / assistant.share when omitted.
 
 Examples:
@@ -71,13 +72,13 @@ Examples:
         {
           flags: "--urgent",
           description:
-            "Mark this notification as urgent (fires push + visual flag in Vellum Home)",
+            `Mark this notification as urgent (fires push + visual flag in ${BRAND_NAME} Home)`,
           defaultValue: false,
         },
         {
           flags: "--quiet",
           description:
-            "Keep this notification quiet: no OS banner even when the user banners every notification, and no mobile push added for a new From me chat. It still reaches its conversation and Vellum Home.",
+            `Keep this notification quiet: no OS banner even when the user banners every notification, and no mobile push added for a new From me chat. It still reaches its conversation and ${BRAND_NAME} Home.`,
           defaultValue: false,
         },
         {
@@ -201,7 +202,7 @@ Examples:
     {
       name: "list",
       description:
-        "List Vellum Home feed notifications surfaced by the assistant. Excludes dismissed items by default.",
+        `List ${BRAND_NAME} Home feed notifications surfaced by the assistant. Excludes dismissed items by default.`,
       options: [
         {
           flags: "--all",
@@ -256,9 +257,9 @@ Examples:
         },
       ],
       helpText: `
-Reads Vellum's Home feed at $VELLUM_WORKSPACE_DIR/data/home-feed.json.
+Reads ${BRAND_NAME}'s Home feed at $VELLUM_WORKSPACE_DIR/data/home-feed.json.
 Items are ordered by priority then recency, matching what the user sees
-in the macOS Home page. This is only the assistant's Vellum notification
+in the macOS Home page. This is only the assistant's ${BRAND_NAME} notification
 feed; it does not read email inboxes, Gmail, Outlook, or other external
 message providers. Use OAuth/provider-specific commands for external mail.
 

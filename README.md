@@ -53,6 +53,7 @@ under [Keys still empty](#keys-still-empty). Details: [CHANGES.md](CHANGES.md).
 | 6 | Assistant to assistant: pairing + notes | `integrations/a2a-delegation` | Built, tested end to end in one process |
 | 7 | Assistant to assistant: tasks with owner gates | `integrations/a2a-delegation` | Built, tested end to end in one process |
 | 8 | Hardening and server deploy | `backend/router`, `backend/deploy`, `infra`, plugins | Built and tested with mocks; voice replies not wired into Vellum |
+| - | Bunty branding (name, voice, dashboard, CLI) | `integrations/bunty-brand`, `infra/scripts/set-bunty-identity.ts`, `infra/scripts/check-brand.ts`, small `vellum/` edits (D-18) | Built, targeted tests pass; manual phone test not run yet |
 
 Not started: Google (Gmail, Calendar) via Composio; Zomato and Swiggy.
 Website: built in `website/` (plain static HTML, CSS and JS, hosted on Hostinger). The old
@@ -85,10 +86,11 @@ You need [Bun](https://bun.sh) (1.3.11 recommended; the tests also run on 1.2) a
 git clone <our repo URL>
 cd <repo>
 bun install                # dev dependencies only: typescript, @types/bun
-bun run check              # typecheck + all tests in backend/ and integrations/
+bun run check              # typecheck + all tests in backend/, integrations/, infra/ + brand check
 ```
 
-Expect `142 pass, 0 fail`. `bun run test` never runs Vellum's own tests; inside `vellum/` run only
+Expect `157 pass, 0 fail`, then `check-brand: ... 0 not allowed`. `bun run check:brand`
+fails if a user-facing "Vellum" comes back (see D-18). `bun run test` never runs Vellum's own tests; inside `vellum/` run only
 the test file you need (`bun test path/to/file.test.ts`).
 
 Everything runs with mocks by default (`BUNTY_ADAPTERS` unset). Set `BUNTY_ADAPTERS=real` only
@@ -167,7 +169,9 @@ store; nobody types them.
 | [CHANGES.md](CHANGES.md) | Everything built so far, by phase, with tests and decisions |
 | [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) | The target design |
 | [docs/architecture/ROADMAP.md](docs/architecture/ROADMAP.md) | Phases 0 to 8 with exit checks |
-| [docs/architecture/decisions.md](docs/architecture/decisions.md) | Decision log D-01 to D-14 |
+| [docs/architecture/decisions.md](docs/architecture/decisions.md) | Decision log D-01 to D-18 |
+| [docs/architecture/bunty-branding-inventory.md](docs/architecture/bunty-branding-inventory.md) | Every "Vellum" a user could see, its category, and every `vellum/` edit for the rebrand |
+| [docs/architecture/bunty-branding-manual-tests.md](docs/architecture/bunty-branding-manual-tests.md) | Phone and chat test script for the rebrand (4 languages) |
 | [docs/architecture/a2a-delegation-protocol.md](docs/architecture/a2a-delegation-protocol.md) | Assistant-to-assistant wire protocol |
 | [docs/architecture/channels-phone-whatsapp.md](docs/architecture/channels-phone-whatsapp.md) | Calls, WhatsApp and router behaviour |
 | [docs/architecture/MASTER-PROMPT.md](docs/architecture/MASTER-PROMPT.md) | Prompt for AI coding tools, one session per phase |

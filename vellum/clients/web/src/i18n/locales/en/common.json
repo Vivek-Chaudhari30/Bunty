@@ -185,7 +185,7 @@
       "title": "Make it easy to talk to me"
     },
     "meet": {
-      "body": "I stay on your desktop, even when Vellum isn’t visible."
+      "body": "I stay on your desktop, even when Bunty isn’t visible."
     },
     "mute": {
       "body": "Click the mic to mute yourself or the speaker to mute me",
@@ -209,7 +209,7 @@
     },
     "permission": {
       "microphoneAction": "Enable microphone",
-      "microphoneSettingsHint": "Turn on Vellum’s microphone switch in System Settings, then return here.",
+      "microphoneSettingsHint": "Turn on Bunty’s microphone switch in System Settings, then return here.",
       "microphonePromptHint": "macOS will ask you to allow microphone access.",
       "microphoneBody": "Let me use your microphone for voice conversations.",
       "shortcutBody": "Let me hear the shortcut while you use other apps.",
@@ -238,7 +238,7 @@
     "needsCredentialsFor": "Need credentials for {service}",
     "needsOkCount": "{count, plural, one {Need your OK on # thing} other {Need your OK on # things}}",
     "notNow": "Not Now",
-    "openApp": "Open Vellum",
+    "openApp": "Open Bunty",
     "pendingBadge": "{count, plural, one {# thing needs your OK} other {# things need your OK}}",
     "previewVoice": "Preview {voice}",
     "review": "Review",
@@ -281,9 +281,9 @@
     "offerNowhere": "Nowhere to put these",
     "offerPasteFailed": "Couldn't paste these",
     "offerQuit": "Quit {app}",
-    "offerUse": "Use Vellum's",
-    "offerVersion": "Vellum heard",
-    "openVellum": "Open Vellum",
+    "offerUse": "Use Bunty's",
+    "offerVersion": "Bunty heard",
+    "openVellum": "Open Bunty",
     "share": "Share",
     "sharePicker": "What to share",
     "showSummary": "Show summary",
@@ -369,7 +369,7 @@
     "stopRecording": "Stop recording"
   },
   "discordNudgeBanner": {
-    "ariaLabel": "Join the Vellum Discord community",
+    "ariaLabel": "Join the Bunty Discord community",
     "ctaLong": "Join Discord",
     "ctaShort": "Join",
     "subtitleLong": "Talk to the team - share feedback, request features, get answers faster",
@@ -462,11 +462,11 @@
     "tryAgain": "Try Again"
   },
   "githubNudgeBanner": {
-    "ariaLabel": "Vellum is open source on GitHub",
-    "ctaAriaLabel": "Star Vellum on GitHub",
+    "ariaLabel": "Bunty is open source on GitHub",
+    "ctaAriaLabel": "Star Bunty on GitHub",
     "ctaLabel": "Star us",
     "subtitle": "Star us on GitHub or contribute",
-    "title": "Vellum is open source"
+    "title": "Bunty is open source"
   },
   "lazyBoundary": {
     "loadError": "This section couldn't load. Reload the page to try again."
@@ -486,13 +486,13 @@
   },
   "nativeAppBanner": {
     "bannerAria": "Download the {appName} app",
-    "bannerAriaGeneric": "Download the Vellum mobile app",
+    "bannerAriaGeneric": "Download the Bunty mobile app",
     "download": "Download",
     "downloadAppAria": "Download {appName} app",
-    "downloadAppAriaGeneric": "Download Vellum mobile app",
+    "downloadAppAriaGeneric": "Download Bunty mobile app",
     "subtitle": "Push notifications · biometric login · haptics",
     "title": "Get the {appName} app",
-    "titleGeneric": "Get the Vellum app"
+    "titleGeneric": "Get the Bunty app"
   },
   "notFound": {
     "backToAssistant": "Back to your assistant",
@@ -538,8 +538,8 @@
     "created": "Profile \"{name}\" created"
   },
   "quickInputPage": {
-    "logoAlt": "Vellum",
-    "placeholder": "Ask Vellum anything...",
+    "logoAlt": "Bunty",
+    "placeholder": "Ask Bunty anything...",
     "send": "Send message"
   },
   "removeFromDeviceDialog": {
@@ -744,7 +744,7 @@
     "saveSuccess": "Speech-to-text settings saved",
     "spokenLanguage": "Spoken language",
     "spokenLanguageApplies": "Applies from your next spoken turn.",
-    "vellumTranscription": "Transcription runs through your Vellum account.",
+    "vellumTranscription": "Transcription runs through your Bunty account.",
     "windowsNativeDisplayName": "Windows Native Dictation",
     "windowsNativeSetupWarning": "Requires Basic speech recognition for your Windows display language: open Settings > Time & language > Language & region, select the three dots next to the display language, choose Language options, then under Language features download Basic speech recognition.",
     "windowsNativeSubtitle": "Windows on-device speech recognition, running locally through the Windows helper. Works offline and needs no API key."
@@ -869,7 +869,7 @@
     "available": "Update available. Starting download…",
     "closeAriaLabel": "Close",
     "downloading": "Downloading update…",
-    "ready": "Vellum {version} is ready.",
+    "ready": "Bunty {version} is ready.",
     "restartToInstall": "Restart to install",
     "versionFallback": "update"
   },
@@ -984,7 +984,7 @@
     "setupRequiredTitle": "This domain has not been provisioned with the email provider. It cannot send or receive email until setup is complete."
   },
   "managedServicesBanner": {
-    "body": "Managed services are metered and deducted from your Vellum account balance. <link>View pricing</link>"
+    "body": "Managed services are metered and deducted from your Bunty account balance. <link>View pricing</link>"
   },
   "serviceCard": {
     "managedLabel": "Managed",

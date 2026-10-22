@@ -8,6 +8,7 @@ import { renderCharacterPng } from "../avatar/png-renderer.js";
 import { getResvg, isResvgAvailable } from "../avatar/resvg-lazy.js";
 import { isTemplatePlaceholder } from "../daemon/handlers/identity.js";
 import { getAssistantName } from "../daemon/identity-helpers.js";
+import { BRAND_NAME } from "../util/brand.js";
 import { getLogger } from "../util/logger.js";
 import { getAvatarImagePath } from "../util/platform.js";
 import { escapeXmlContent } from "../util/xml.js";
@@ -19,7 +20,7 @@ function wallpaperWordmark(
 ): string {
   const normalized = name?.replace(/\s+/g, " ").trim();
   const label =
-    normalized && !isTemplatePlaceholder(normalized) ? normalized : "Vellum";
+    normalized && !isTemplatePlaceholder(normalized) ? normalized : BRAND_NAME;
   const text = `<text id="wordmark" font-family="Liberation Sans, Arial, sans-serif" font-size="64" font-weight="700" letter-spacing="1.5">${escapeXmlContent(`${label} OS`)}</text>`;
   const Resvg = getResvg();
   const bounds = new Resvg(

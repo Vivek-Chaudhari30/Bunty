@@ -25,6 +25,7 @@ import {
   clearGatewayToken,
   isRepairableGatewayTokenError,
 } from "@/lib/auth/gateway-session";
+import { BRAND_NAME } from "@/lib/brand";
 import {
   isCliWakeableAssistant,
   isLocalClient,
@@ -192,7 +193,7 @@ export function SelectAssistantScreen() {
   const [cloudOriginUrl, setCloudOriginUrl] = useState<string | null>(null);
   const cloudOrigin: OriginCardEntry | null =
     cloudOriginUrl !== null
-      ? { url: cloudOriginUrl, name: "Vellum Cloud" }
+      ? { url: cloudOriginUrl, name: `${BRAND_NAME} Cloud` }
       : null;
   // Stable dep for the selection effect: `cloudOrigin` is a fresh object each
   // render.

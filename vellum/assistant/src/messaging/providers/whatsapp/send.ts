@@ -9,6 +9,7 @@ import type { ApprovalUIMetadata } from "@vellumai/gateway-client";
 
 import { getAttachmentContent } from "../../../persistence/attachments-store.js";
 import type { RuntimeAttachmentMetadata } from "../../../runtime/http-types.js";
+import { applyBrand } from "../../../util/brand.js";
 import { getLogger } from "../../../util/logger.js";
 import { type AcknowledgedSend, acknowledgedSend } from "../send-result.js";
 import {
@@ -116,9 +117,10 @@ function sentMessageId(result: WhatsAppSendMessageResult): string | undefined {
  */
 export async function sendWhatsAppReply(
   to: string,
-  text: string,
+  rawText: string,
   approval?: ApprovalUIMetadata,
 ): Promise<AcknowledgedSend> {
+  const text = applyBrand(rawText);
   const ids: Array<string | undefined> = [];
   const record = (result: WhatsAppSendMessageResult): void => {
     ids.push(sentMessageId(result));

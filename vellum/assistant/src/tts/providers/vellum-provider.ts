@@ -26,6 +26,7 @@ import {
   probeVelayRejection,
   resolveSpeechRelayConnection,
 } from "../../providers/speech-to-text/vellum-speech-relay-connection.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { getLogger } from "../../util/logger.js";
 import type { TtsProviderDefinition } from "../provider-definition.js";
 import type {
@@ -71,12 +72,12 @@ function resolveManagedVoice(request: TtsSynthesisRequest): string | undefined {
 function synthesisError(failure: ManagedSpeechFailure): Error {
   if (failure.code === "insufficient_balance") {
     return new Error(
-      "Vellum credits are exhausted — add funds to your Vellum account to continue using managed speech.",
+      `${BRAND_NAME} credits are exhausted. Add funds to your ${BRAND_NAME} account to continue using managed speech.`,
     );
   }
   if (failure.kind === "unavailable") {
     return new Error(
-      `Managed speech is unavailable: ${failure.message} Run 'assistant platform connect' to connect your Vellum account.`,
+      `Managed speech is unavailable: ${failure.message} Run 'assistant platform connect' to connect your ${BRAND_NAME} account.`,
     );
   }
   return new Error(failure.message);
@@ -119,7 +120,7 @@ async function performStreamingSynthesis(
   const connection = await resolveSpeechRelayConnection();
   if (!connection) {
     throw new Error(
-      "Managed speech is unavailable: the assistant cannot reach its speech relay. Run 'assistant platform connect' to connect your Vellum account.",
+      `Managed speech is unavailable: the assistant cannot reach its speech relay. Run 'assistant platform connect' to connect your ${BRAND_NAME} account.`,
     );
   }
 
@@ -211,19 +212,19 @@ export function createVellumProvider(): TtsProvider {
  */
 export const vellumTtsProviderDefinition: TtsProviderDefinition = {
   id: "vellum",
-  displayName: "Vellum",
+  displayName: BRAND_NAME,
   subtitle:
-    "Text-to-speech through your Vellum account — billed to Vellum credits, no separate API key needed.",
+    `Text-to-speech through your ${BRAND_NAME} account, billed to ${BRAND_NAME} credits, no separate API key needed.`,
   // Advertises managed voice selection (`services.tts.providers.vellum.model`)
   // to clients; web gates its voice dropdown on this flag, so daemons that
   // predate the field never show a selector whose writes they would ignore.
   supportsVoiceSelection: true,
-  apiKeyPlaceholder: "Connected via your Vellum account",
+  apiKeyPlaceholder: `Connected via your ${BRAND_NAME} account`,
   credentialsGuide: {
     description:
-      "Connect this assistant to your Vellum account; managed speech uses that connection instead of a provider API key.",
+      `Connect this assistant to your ${BRAND_NAME} account; managed speech uses that connection instead of a provider API key.`,
     url: "https://platform.vellum.ai/",
-    linkLabel: "Open Vellum Platform",
+    linkLabel: `Open ${BRAND_NAME} Platform`,
   },
   callMode: "synthesized-play",
   allowNativeFallback: false,
@@ -236,7 +237,7 @@ export const vellumTtsProviderDefinition: TtsProviderDefinition = {
   secretRequirements: [
     {
       credentialStoreKey: "credential/vellum/assistant_api_key",
-      displayName: "Vellum account connection",
+      displayName: `${BRAND_NAME} account connection`,
       setCommand: "assistant platform connect",
     },
   ],

@@ -2,6 +2,7 @@ import { execFileSync } from "child_process";
 import { existsSync, readFileSync, unlinkSync } from "fs";
 import { platform } from "os";
 
+import { BRAND_NAME } from "./brand.js";
 import {
   httpHealthCheck,
   type HttpProbeEndpoint,
@@ -265,7 +266,7 @@ export async function resolveProcessState(
         }
       } else {
         console.log(
-          `Stale PID file (pid ${result.pid} is not a Vellum process) — cleaning up...`,
+          `Stale PID file (pid ${result.pid} is not a ${BRAND_NAME} process), cleaning up...`,
         );
       }
       removeFiles(pidFile);

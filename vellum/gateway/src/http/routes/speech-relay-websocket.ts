@@ -26,6 +26,7 @@ import { velayHostForPlatformHost } from "@vellumai/service-contracts/ingress";
 
 import { resolveScopeProfile } from "../../auth/scopes.js";
 import { validateEdgeToken } from "../../auth/token-exchange.js";
+import { BRAND_NAME } from "../../brand.js";
 import type { GatewayConfig } from "../../config.js";
 import type { CredentialCache } from "../../credential-cache.js";
 import { credentialKey } from "../../credential-key.js";
@@ -334,7 +335,7 @@ export function createSpeechRelayUpgradeHandler(
         return jsonError(
           401,
           "missing_platform_connection",
-          "no Vellum assistant API key is stored — connect the platform account",
+          `no ${BRAND_NAME} assistant API key is stored, connect the platform account`,
         );
       }
       const rejection = await probeVelay(
@@ -408,7 +409,7 @@ export function getSpeechRelayWebsocketHandlers() {
         sendRelayError(
           ws,
           "missing_platform_connection",
-          "no Vellum assistant API key is stored — connect the platform account",
+          `no ${BRAND_NAME} assistant API key is stored, connect the platform account`,
         );
         ws.close(1011, "missing_platform_connection");
         return;

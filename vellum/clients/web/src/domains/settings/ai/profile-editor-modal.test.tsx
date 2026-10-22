@@ -616,15 +616,15 @@ describe("ProfileEditorModal create mode — provider-first", () => {
     // upstreams it routes to); BYOK providers follow as connect-me entries.
     renderCreate([makeConnection("vellum-managed", "vellum")]);
     fireEvent.click(providerTrigger());
-    expect(optionRows()[0]).toEqual({ label: "Vellum", meta: "Managed" });
+    expect(optionRows()[0]).toEqual({ label: "Bunty", meta: "Managed" });
     expect(optionLabels()).toEqual([
-      "Vellum",
+      "Bunty",
       ...UNCONNECTED_PROVIDER_LABELS,
       "+ Create new provider",
     ]);
   });
 
-  test("selecting Vellum saves the model's managed upstream bound to the vellum connection", async () => {
+  test("selecting Bunty saves the model's managed upstream bound to the vellum connection", async () => {
     const saveCalls: { name: string; entry: Record<string, unknown> }[] = [];
     const onSave = (name: string, entry: unknown) => {
       saveCalls.push({ name, entry: entry as Record<string, unknown> });
@@ -632,7 +632,7 @@ describe("ProfileEditorModal create mode — provider-first", () => {
     };
     renderCreate([makeConnection("vellum-managed", "vellum")], onSave);
 
-    selectProvider("Vellum");
+    selectProvider("Bunty");
     selectModel("Claude Opus 4.8");
 
     await waitFor(() => {
@@ -648,7 +648,7 @@ describe("ProfileEditorModal create mode — provider-first", () => {
     expect(saveCalls[0].entry.provider_connection).toBe("vellum-managed");
   });
 
-  test("a Vellum fireworks-hosted model derives the fireworks upstream", async () => {
+  test("a Bunty fireworks-hosted model derives the fireworks upstream", async () => {
     const saveCalls: { name: string; entry: Record<string, unknown> }[] = [];
     const onSave = (name: string, entry: unknown) => {
       saveCalls.push({ name, entry: entry as Record<string, unknown> });
@@ -656,7 +656,7 @@ describe("ProfileEditorModal create mode — provider-first", () => {
     };
     renderCreate([makeConnection("vellum-managed", "vellum")], onSave);
 
-    selectProvider("Vellum");
+    selectProvider("Bunty");
     selectModel("GLM 5.3");
 
     await waitFor(() => {
@@ -748,7 +748,7 @@ describe("ProfileEditorModal create mode — provider-first", () => {
       };
       renderCreate([makeConnection("vellum-managed", "vellum")], onSave);
 
-      selectProvider("Vellum");
+      selectProvider("Bunty");
       selectModel("Claude Opus 4.8");
 
       await waitFor(() => {
@@ -779,7 +779,7 @@ describe("ProfileEditorModal create mode — provider-first", () => {
       };
       renderCreate([makeConnection("vellum-managed", "vellum")], onSave);
 
-      selectProvider("Vellum");
+      selectProvider("Bunty");
       selectModel("Claude Opus 4.8");
 
       await waitFor(() => {
@@ -837,7 +837,7 @@ describe("ProfileEditorModal create mode — provider-first", () => {
     });
   });
 
-  test("a legacy-shape managed profile presents as Vellum in edit mode", async () => {
+  test("a legacy-shape managed profile presents as Bunty in edit mode", async () => {
     // Managed profiles store their real upstream (anthropic) bound to the
     // vellum connection; the editor must present them as "Vellum".
     render(
@@ -864,12 +864,12 @@ describe("ProfileEditorModal create mode — provider-first", () => {
     );
 
     await waitFor(() => {
-      expect(optionLabel(providerTrigger())).toBe("Vellum");
+      expect(optionLabel(providerTrigger())).toBe("Bunty");
     });
     expect(document.body.textContent).not.toContain("Connection (optional)");
   });
 
-  test("editing a Vellum profile with a catalog-unknown model preserves the stored upstream", async () => {
+  test("editing a Bunty profile with a catalog-unknown model preserves the stored upstream", async () => {
     const saveCalls: { name: string; entry: Record<string, unknown> }[] = [];
     const onSave = (name: string, entry: unknown) => {
       saveCalls.push({ name, entry: entry as Record<string, unknown> });
@@ -911,7 +911,7 @@ describe("ProfileEditorModal create mode — provider-first", () => {
     expect(saveCalls[0].entry.provider_connection).toBe("vellum");
   });
 
-  test("a user-owned connection merely named 'vellum' does not trigger Vellum mode", async () => {
+  test("a user-owned connection merely named 'vellum' does not trigger Bunty mode", async () => {
     // The daemon's seeder preserves a user row named "vellum" whose provider
     // is not the sentinel; editing a profile bound to it must keep the real
     // provider and not corrupt the binding.
@@ -1042,9 +1042,9 @@ describe("ProfileEditorModal create mode — provider-first", () => {
     });
   });
 
-  test("Vellum hides the Connection sub-dropdown", () => {
+  test("Bunty hides the Connection sub-dropdown", () => {
     renderCreate([makeConnection("vellum-managed", "vellum")]);
-    selectProvider("Vellum");
+    selectProvider("Bunty");
     expect(document.body.textContent).not.toContain("Connection (optional)");
     expect(
       Array.from(document.querySelectorAll("label")).some((l) =>

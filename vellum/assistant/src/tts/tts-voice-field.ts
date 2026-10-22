@@ -15,6 +15,8 @@
  * rule is ElevenLabs-only.
  */
 
+import { BRAND_NAME } from "../util/brand.js";
+
 export interface TtsVoiceField {
   /** Canonical config path the voice id/model is written to. */
   path: string;
@@ -32,7 +34,7 @@ export const TTS_VOICE_FIELD_BY_PROVIDER: Record<string, TtsVoiceField> = {
   },
   vellum: {
     path: "services.tts.providers.vellum.model",
-    label: "Vellum managed voice",
+    label: `${BRAND_NAME} managed voice`,
     alphanumericOnly: false,
   },
   deepgram: {

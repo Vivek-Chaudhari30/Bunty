@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { TTS_PROVIDER_IDS } from "../../tts/types.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { baseLanguageSubtag } from "../../util/language-subtag.js";
 import {
   DEFAULT_ELEVENLABS_VOICE_ID,
@@ -285,7 +286,7 @@ const TtsVellumProviderConfigSchema = z
         "services.tts.providers.vellum.model.",
     ),
   })
-  .describe("Vellum managed provider configuration under services.tts");
+  .describe(`${BRAND_NAME} managed provider configuration under services.tts`);
 
 export type TtsVellumProviderConfig = z.infer<
   typeof TtsVellumProviderConfigSchema

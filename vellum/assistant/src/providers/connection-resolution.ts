@@ -35,6 +35,7 @@ import {
 import { unknownLlmProviderIssue } from "../config/schemas/llm.js";
 import { getDb } from "../persistence/db-connection.js";
 import { credentialKey } from "../security/credential-key.js";
+import { BRAND_NAME } from "../util/brand.js";
 import { ProviderNotConfiguredError } from "../util/errors.js";
 import { getLogger } from "../util/logger.js";
 import {
@@ -711,7 +712,7 @@ export async function preflightResolvedConfig(
       throw new ConnectionResolutionError(
         connectionName,
         "platform_unauthenticated",
-        "This assistant's platform credential is missing and must be re-provisioned on the Vellum platform.",
+        `This assistant's platform credential is missing and must be re-provisioned on the ${BRAND_NAME} platform.`,
         errorOptions,
       );
     }
@@ -719,7 +720,7 @@ export async function preflightResolvedConfig(
       throw new ConnectionResolutionError(
         connectionName,
         "platform_unauthenticated",
-        `provider_connection "${connectionName}" routes through the Vellum platform, but no platform login is available — log in or pick a different provider`,
+        `provider_connection "${connectionName}" routes through the ${BRAND_NAME} platform, but no platform login is available, log in or pick a different provider`,
         errorOptions,
       );
     }

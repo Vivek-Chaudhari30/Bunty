@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate } from "react-router";
 
 import { useTranslation } from "@/i18n";
 import { listAssistants } from "@/assistant/api";
+import { BRAND_NAME } from "@/lib/brand";
 import { syncPlatformAssistantsToLockfile } from "@/lib/local-mode";
 import { registerLocalPlatformSession } from "@/runtime/local-mode-host";
 import { setMenuPlatformSession } from "@/runtime/menu";
@@ -65,7 +66,7 @@ export function PlatformLoopbackPage() {
       const registered = await registerLocalPlatformSession(sessionToken);
       if (!registered) {
         setError(
-          "Login failed: couldn't reach the local Vellum server to store the " +
+          `Login failed: couldn't reach the local ${BRAND_NAME} server to store the ` +
             "session. Please try again.",
         );
         return;

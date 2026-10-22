@@ -1,3 +1,5 @@
+import { applyBrand } from "../util/brand.js";
+
 /**
  * Sanitizes text for TTS synthesis by stripping markdown formatting and emojis.
  *
@@ -5,7 +7,7 @@
  * (e.g. `my_var`), and Fish Audio S2 bracket annotations (e.g. `[laughter]`).
  */
 export function sanitizeForTts(text: string): string {
-  let result = text;
+  let result = applyBrand(text);
 
   // 1. Markdown links: [text](url) → text
   //    Only matches the full [...](...) pattern — plain brackets like

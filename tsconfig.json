@@ -13,6 +13,6 @@
     "noEmit": true,
     "resolveJsonModule": true
   },
-  "include": ["backend/**/*.ts", "integrations/**/*.ts"],
+  "include": ["backend/**/*.ts", "integrations/**/*.ts", "infra/**/*.ts"],
   "exclude": ["node_modules", "vellum"]
 }

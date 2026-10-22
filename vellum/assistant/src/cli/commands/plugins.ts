@@ -13,6 +13,7 @@ import type { Command } from "commander";
 
 import { cliIpcCall } from "../../ipc/cli-client.js";
 import { stripAnsiAndControlChars } from "../../util/ansi.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { getWorkspacePluginsDir } from "../../util/platform.js";
 import { truncate } from "../../util/truncate.js";
 import { resolveBundledCliModule } from "../bundled-modules.js";
@@ -1121,7 +1122,7 @@ function printUntrustedPluginWarning(
   const ref = source.ref === DEFAULT_DIRECT_REF ? "default branch" : source.ref;
   const lines = [
     `⚠ Installing "${name}" from an unreviewed GitHub source: ${location} @ ${ref}.`,
-    "  This plugin is NOT in the Vellum marketplace and has not been reviewed.",
+    `  This plugin is NOT in the ${BRAND_NAME} marketplace and has not been reviewed.`,
     "  Its hooks and tools run inside the assistant with full access — install it only if you trust the source.",
   ];
   console.error(yellow(lines.join("\n")));

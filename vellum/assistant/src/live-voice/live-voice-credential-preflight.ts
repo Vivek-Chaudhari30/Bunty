@@ -33,6 +33,7 @@ import type { SttProviderId } from "../stt/types.js";
 import type { TtsProviderCatalogEntry } from "../tts/provider-catalog.js";
 import { getCatalogProvider, getTtsProvider } from "../tts/provider-catalog.js";
 import type { TtsProviderId } from "../tts/types.js";
+import { BRAND_NAME } from "../util/brand.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -144,7 +145,7 @@ async function resolveSttGap(
       },
       clause:
         entry.credentialProvider === "vellum"
-          ? `a Vellum platform connection for managed speech (run 'assistant platform connect')`
+          ? `a ${BRAND_NAME} account connection for managed speech (run 'assistant platform connect')`
           : `an API key for the speech-to-text provider "${entry.id}"`,
     };
   }
@@ -207,9 +208,9 @@ async function resolveTtsGap(
         gap: {
           kind: "tts",
           providerId: entry.id,
-          reason: `TTS provider "${entry.id}" needs a Vellum platform connection for managed speech`,
+          reason: `TTS provider "${entry.id}" needs a ${BRAND_NAME} account connection for managed speech`,
         },
-        clause: `a Vellum platform connection for managed speech (run 'assistant platform connect')`,
+        clause: `a ${BRAND_NAME} account connection for managed speech (run 'assistant platform connect')`,
       };
     }
     return null;

@@ -16,6 +16,7 @@ import {
   resolveTargetAssistant,
 } from "../lib/assistant-config.js";
 import { parseAssistantTargetArg } from "../lib/assistant-target-args.js";
+import { BRAND_NAME } from "../lib/brand.js";
 import { loadGuardianToken, leaseGuardianToken } from "../lib/guardian-token";
 import { pollJobUntilDone } from "../lib/job-polling.js";
 import {
@@ -48,7 +49,7 @@ const TOKEN_EXPIRY_MARGIN_MS = 60 * 1000;
 function printHelp(): void {
   console.log(`Usage: vellum debug-bundle [name]
 
-Send Vellum staff a debug bundle of a self-hosted assistant so they can
+Send ${BRAND_NAME} staff a debug bundle of a self-hosted assistant so they can
 inspect a copy of it. The bundle holds the assistant's workspace, its
 logs, and the gateway's own database. It never holds credentials.
 
@@ -65,7 +66,7 @@ Requirements:
     staff clone them directly.
 
 Side effects:
-  - Uploads the bundle to Vellum's debug-bundle storage, where it is
+  - Uploads the bundle to ${BRAND_NAME}'s debug-bundle storage, where it is
     deleted after 7 days. Nothing on this machine changes.
   - Records a 'debug bundle exported' entry in your account's audit history.
   - Waits for the upload to finish (up to 60 minutes for a large workspace).
@@ -88,7 +89,7 @@ export async function debugBundle(): Promise<void> {
   const reference = formatAssistantReference(entry);
   if (entry.cloud === "vellum") {
     console.error(
-      `${reference} is hosted by Vellum, so staff can clone it directly. No bundle is needed.`,
+      `${reference} is hosted by ${BRAND_NAME}, so staff can clone it directly. No bundle is needed.`,
     );
     process.exit(1);
   }
@@ -150,7 +151,7 @@ export async function debugBundle(): Promise<void> {
   try {
     ({ jobId } = await localRuntimeExportToGcs(entry, accessToken, {
       uploadUrl,
-      description: "debug bundle for Vellum staff",
+      description: `debug bundle for ${BRAND_NAME} staff`,
       profile: "debug",
     }));
   } catch (err) {
@@ -179,7 +180,7 @@ export async function debugBundle(): Promise<void> {
     process.exit(1);
   }
   console.log(
-    "Debug bundle sent to Vellum. Staff can open it for the next 7 days.",
+    `Debug bundle sent to ${BRAND_NAME}. Staff can open it for the next 7 days.`,
   );
 }
 

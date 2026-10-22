@@ -8,6 +8,7 @@ import type {
   SttProviderId,
 } from "../../stt/types.js";
 import { SttError } from "../../stt/types.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { getLogger } from "../../util/logger.js";
 import {
   batchBoundaryGapReason,
@@ -783,7 +784,7 @@ async function createStreamingTranscriber(
  */
 export function sttCredentialGapReason(credentialProviderName: string): string {
   if (credentialProviderName === "vellum") {
-    return "No Vellum platform connection for managed speech — run 'assistant platform connect'";
+    return `No ${BRAND_NAME} account connection for managed speech. Run 'assistant platform connect'`;
   }
   return `No API key configured for credential provider "${credentialProviderName}"`;
 }

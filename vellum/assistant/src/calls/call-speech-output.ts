@@ -22,6 +22,7 @@ import {
   synthesizeAndEmit,
 } from "../tts/synthesis-stream.js";
 import type { TtsProvider, TtsProviderId } from "../tts/types.js";
+import { applyBrand } from "../util/brand.js";
 import { getLogger } from "../util/logger.js";
 import type { CallAudioFormat } from "./audio-store.js";
 import type { CallTransport } from "./call-transport.js";
@@ -55,9 +56,10 @@ const log = getLogger("call-speech-output");
  */
 export async function speakSystemPrompt(
   relay: CallTransport,
-  text: string,
+  rawText: string,
   signal?: AbortSignal,
 ): Promise<void> {
+  const text = applyBrand(rawText);
   // When the transport requires PCM (media-stream), request PCM so
   // the audio store entry contains raw PCM that audioBufferToFrames can
   // transcode to mu-law. Without this, compressed formats (mp3, opus)

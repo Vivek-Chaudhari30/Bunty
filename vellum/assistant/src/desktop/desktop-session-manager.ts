@@ -13,6 +13,7 @@ import { join } from "node:path";
 
 import { getIsContainerized } from "../config/env-registry.js";
 import { connectCdpWsTransport } from "../tools/browser/cdp-client/cdp-inspect/ws-transport.js";
+import { BRAND_NAME } from "../util/brand.js";
 import { terminateProcessTree } from "../util/host-process.js";
 import { getLogger } from "../util/logger.js";
 import { CHILD_OOM_SCORE_ADJ, withOomScoreAdj } from "../util/oom-priority.js";
@@ -916,7 +917,7 @@ function xServerCommand(executable: string): string[] {
     "-depth",
     "24",
     "-desktop",
-    "Vellum",
+    BRAND_NAME,
   ];
 }
 

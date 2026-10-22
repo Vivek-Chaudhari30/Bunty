@@ -18,6 +18,8 @@
  * writable while hiding the key would hand back the same key by another
  * route, pointed at a host of the writer's choosing.
  */
+import { BRAND_NAME } from "../../util/brand.js";
+
 const MANAGED_PROXY_CREDENTIALS = [
   { service: "vellum", field: "assistant_api_key" },
   { service: "vellum", field: "platform_base_url" },
@@ -44,5 +46,5 @@ export function platformManagedCredentialRefusal(
   const name = service && field ? `${service}:${field}` : "This credential";
   const verb =
     action === "read" ? "inspected or revealed" : "changed or deleted";
-  return `${name} is provisioned and owned by the Vellum platform. It cannot be ${verb} through the credentials API.`;
+  return `${name} is provisioned and owned by the ${BRAND_NAME} platform. It cannot be ${verb} through the credentials API.`;
 }

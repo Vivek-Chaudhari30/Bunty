@@ -238,7 +238,7 @@ describe("POST inference/profiles (create) validation", () => {
         },
       }),
     ).rejects.toThrow(
-      /"not-a-real-model" is not served by the Vellum managed route/,
+      /"not-a-real-model" is not served by the Bunty managed route/,
     );
   });
 

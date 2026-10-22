@@ -35,6 +35,7 @@ import {
   resolveAssistant,
   type AssistantEntry,
 } from "../lib/assistant-config.js";
+import { BRAND_NAME } from "../lib/brand.js";
 import { GATEWAY_PORT } from "../lib/constants.js";
 import { getCurrentEnvironment } from "../lib/environments/resolve.js";
 import { isLoopbackUrl, loopbackSafeFetch } from "../lib/loopback-fetch.js";
@@ -114,7 +115,7 @@ OPTIONS:
     --label <name>  Name for this pairing. Shown in the output, and used as the
                     assistant's name in the --app link.
     --app           Encode the QR as a <scheme>://connect link that opens the
-                    Vellum app directly. The https link is still printed as a
+                    ${BRAND_NAME} app directly. The https link is still printed as a
                     fallback for devices without the app.
     --app-scheme <scheme>
                     URL scheme for --app links; requires --app (default:
@@ -483,7 +484,7 @@ export async function pair(): Promise<void> {
   });
   console.log("");
   if (appUrl) {
-    console.log("The QR opens the Vellum app. App link:");
+    console.log(`The QR opens the ${BRAND_NAME} app. App link:`);
     console.log("");
     console.log(`  ${appUrl}`);
     console.log("");

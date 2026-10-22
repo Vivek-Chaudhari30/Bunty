@@ -18,6 +18,7 @@ import {
   remoteGatewayPublicBaseUrl,
   RemoteWebPairingError,
 } from "@/lib/auth/remote-gateway-session";
+import { BRAND_NAME } from "@/lib/brand";
 import {
   getRemoteGatewayAssistantName,
   getRemoteGatewayHubUrl,
@@ -54,8 +55,8 @@ function statusCopy(state: PairingState): { title: string; body: string } {
       };
     case "handoff_choice":
       return {
-        title: "Open in the Vellum app",
-        body: "Scanning from a phone with the Vellum app installed? Hand this pairing to the app.",
+        title: `Open in the ${BRAND_NAME} app`,
+        body: `Scanning from a phone with the ${BRAND_NAME} app installed? Hand this pairing to the app.`,
       };
     case "verifying":
       return {

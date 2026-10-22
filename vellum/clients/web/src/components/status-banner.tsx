@@ -39,6 +39,7 @@ import { assistantsMaintenanceModeExitCreate } from "@/generated/api/sdk.gen";
 import { useConnectivityState } from "@/hooks/use-connectivity-state";
 import { useNetworkStatus } from "@/hooks/use-network-status";
 import { useResumeGrace } from "@/hooks/use-resume-grace";
+import { BRAND_NAME } from "@/lib/brand";
 import { isCliWakeableAssistant } from "@/lib/local-mode";
 import { captureError } from "@/lib/sentry/capture-error";
 import { isElectron } from "@/runtime/is-electron";
@@ -873,7 +874,7 @@ function useAssistantBannerConfig(): BannerConfig | null {
           : "Your assistant runs locally",
       icon: <CloudOff className="h-4 w-4" aria-hidden="true" />,
       children:
-        "Open the Vellum desktop app or run vellum wake in your terminal to start it.",
+        `Open the ${BRAND_NAME} desktop app or run vellum wake in your terminal to start it.`,
     };
   }
 
@@ -926,7 +927,7 @@ function useAssistantBannerConfig(): BannerConfig | null {
   ) {
     return {
       tone: "error",
-      title: "Trying to reach Vellum…",
+      title: `Trying to reach ${BRAND_NAME}…`,
       icon: <CloudOff className="h-4 w-4" aria-hidden="true" />,
       actions: (
         <Button variant="outlined" size="compact" onClick={retryConnectivity}>

@@ -215,17 +215,17 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("ProvidersSection - rows and chips", () => {
-  test("renders Vellum first with a Managed chip and no open affordance", async () => {
+  test("renders Bunty first with a Managed chip and no open affordance", async () => {
     renderSection();
     await waitFor(() => {
       expect(rows().length).toBe(3);
     });
     const first = rows()[0];
-    expect(first.textContent).toContain("Vellum");
+    expect(first.textContent).toContain("Bunty");
     expect(first.textContent).toContain("Managed");
     expect(first.textContent).toContain("Included with your plan");
     expect(
-      document.querySelector('button[aria-label="Open provider Vellum"]'),
+      document.querySelector('button[aria-label="Open provider Bunty"]'),
     ).toBeNull();
   });
 
@@ -306,7 +306,7 @@ describe("ProvidersSection - kebab actions", () => {
     await waitFor(() => {
       expect(rows().length).toBe(3);
     });
-    const menu = await openKebab("Vellum");
+    const menu = await openKebab("Bunty");
     expect(menuItems(menu)).toEqual(["Set as default"]);
   });
 

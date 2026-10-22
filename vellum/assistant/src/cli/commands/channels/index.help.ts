@@ -5,6 +5,7 @@ import {
   CHANNEL_IDS,
 } from "@vellumai/service-contracts/channels";
 
+import { BRAND_NAME } from "../../../util/brand.js";
 import type { CliCommandHelp } from "../../lib/cli-command-help.js";
 
 /**
@@ -29,7 +30,7 @@ ${KNOWN_CHANNELS.join(", ")}. A channel without a built-in readiness probe
 reports as unsupported.
 
 ${CHANNELS_PLUGIN_SEARCH_HINT} Plugins can bundle additional channels
-from other Vellum users.
+from other ${BRAND_NAME} users.
 
 Two identities can reach a channel's platform. 'request' acts as the
 assistant's own bot on that channel (${BOT_CHANNELS}), resolving the bot

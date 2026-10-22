@@ -1,0 +1,12 @@
+{
+  "name": "bunty-brand",
+  "version": "0.0.1",
+  "private": true,
+  "displayName": "Bunty brand",
+  "description": "Keeps the assistant speaking as Bunty: its name, the who-made-you answer, and plain-language confirmations.",
+  "icon": "sparkles",
+  "peerDependencies": {
+    "@vellumai/plugin-api": "^0.12.6"
+  },
+  "vellum": {}
+}

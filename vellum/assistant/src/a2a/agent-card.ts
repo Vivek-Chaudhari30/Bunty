@@ -6,6 +6,7 @@
  * assistant name from workspace config.
  */
 
+import { BRAND_NAME } from "../util/brand.js";
 import { getAssistantName } from "../daemon/identity-helpers.js";
 import type { AgentCard } from "./protocol-types.js";
 
@@ -24,7 +25,7 @@ export function buildAgentCard(params: BuildAgentCardParams): AgentCard {
     name: params.assistantName,
     description:
       params.assistantDescription ??
-      `${params.assistantName} - a Vellum AI assistant`,
+      `${params.assistantName} - a ${BRAND_NAME} AI assistant`,
     version: "1.0.0",
     supported_interfaces: [],
     capabilities: {
@@ -47,6 +48,6 @@ export function buildAgentCard(params: BuildAgentCardParams): AgentCard {
 
 export function getAgentCard(): AgentCard {
   return buildAgentCard({
-    assistantName: getAssistantName() ?? "Vellum Assistant",
+    assistantName: getAssistantName() ?? BRAND_NAME,
   });
 }

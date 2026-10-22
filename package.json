@@ -4,9 +4,10 @@
   "description": "Bunty: our router service and Vellum plugins. Vellum itself lives in vellum/ with its own package.json.",
   "type": "module",
   "scripts": {
-    "test": "bun test ./backend ./integrations",
+    "test": "bun test ./backend ./integrations ./infra",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "check": "bun run typecheck && bun run test",
+    "check": "bun run typecheck && bun run test && bun run check:brand",
+    "check:brand": "bun infra/scripts/check-brand.ts",
     "router": "bun run backend/router/src/main.ts"
   },
   "devDependencies": {

@@ -30,6 +30,8 @@
  * trivial.
  */
 
+import { BRAND_NAME } from "../util/brand.js";
+
 export type SearchProviderKind = "managed" | "byok";
 
 export interface SearchProviderCatalogEntry {
@@ -90,8 +92,8 @@ export const SEARCH_PROVIDER_CATALOG: readonly SearchProviderCatalogEntry[] = [
   // vellum leads: it is the managed option, selected like any other provider.
   {
     id: "vellum",
-    displayName: "Vellum",
-    displayNameLong: "Vellum Managed Search",
+    displayName: BRAND_NAME,
+    displayNameLong: `${BRAND_NAME} Managed Search`,
     kind: "managed",
   },
   {

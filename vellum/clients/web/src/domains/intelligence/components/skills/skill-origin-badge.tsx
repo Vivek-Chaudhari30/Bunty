@@ -3,6 +3,7 @@ import { createElement } from "react";
 
 import type { SkillOrigin } from "@/domains/intelligence/skills/types";
 import { useTranslation } from "@/i18n";
+import { BRAND_NAME } from "@/lib/brand";
 import { Tag } from "@vellumai/design-library";
 
 const ORIGIN_ICON: Record<SkillOrigin, typeof Globe> = {
@@ -20,7 +21,7 @@ function brandOrCatalogLabel(
 ): string {
   switch (origin) {
     case "vellum":
-      return "Vellum";
+      return BRAND_NAME;
     case "clawhub":
       return "Clawhub";
     case "skillssh":

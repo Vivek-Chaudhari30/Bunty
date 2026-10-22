@@ -1,7 +1,7 @@
 {
   "name": "vellum-assistant",
   "owner": {
-    "name": "Vellum",
+    "name": "Bunty",
     "url": "https://github.com/vellum-ai/vellum-assistant"
   },
   "plugins": [
@@ -25,7 +25,7 @@
         "repo": "vellum-ai/agent-wrapped",
         "ref": "7e5e7971a38a90120cee9b1e393b733622e24d17"
       },
-      "description": "Your agent's year in review: conversations, days together, memories formed, swear count, top topics, and the receipt (total tokens + LLM calls). Works with Vellum agents and Claude Code. Presents the stats as data in chat and publishes a shareable page at agent-wrapped.com.",
+      "description": "Your agent's year in review: conversations, days together, memories formed, swear count, top topics, and the receipt (total tokens + LLM calls). Works with Bunty agents and Claude Code. Presents the stats as data in chat and publishes a shareable page at agent-wrapped.com.",
       "category": "creative",
       "license": "MIT",
       "submittedBy": "marina",
@@ -130,7 +130,7 @@
         "path": "integrations/vellum-assistant",
         "ref": "d79bd9a216c9f6d88d27694cc0b42a18b63dba88"
       },
-      "description": "Cognee knowledge graph memory for Vellum Assistant: session-aware storage, auto-routing recall, and persistent learning across sessions. Supports local mode and Cognee Cloud.",
+      "description": "Cognee knowledge graph memory for Bunty Assistant: session-aware storage, auto-routing recall, and persistent learning across sessions. Supports local mode and Cognee Cloud.",
       "category": "memory",
       "homepage": "https://github.com/topoteretes/cognee-integrations/tree/main/integrations/vellum-assistant",
       "icon": "\ud83d\udd78\ufe0f"
@@ -182,7 +182,7 @@
         "path": "plugins/creatorland-data",
         "ref": "9cdbb1553645bbb746918f43d60e0df17ae91fa0"
       },
-      "description": "Creatorland turns your Vellum assistant into an influencer marketer in a box: find the right creators, benchmark rates, analyze competitors, build campaign shortlists, and launch outreach from your brand context. The plugin kit includes guided workflows for brief-to-shortlist, transcript-to-shortlist, brief building, fair-price negotiation, one-number rate cards, and creator marketing onboarding.",
+      "description": "Creatorland turns your Bunty assistant into an influencer marketer in a box: find the right creators, benchmark rates, analyze competitors, build campaign shortlists, and launch outreach from your brand context. The plugin kit includes guided workflows for brief-to-shortlist, transcript-to-shortlist, brief building, fair-price negotiation, one-number rate cards, and creator marketing onboarding.",
       "category": "marketing",
       "homepage": "https://github.com/creatorland/creatorland-mcp-skills/tree/main/plugins/creatorland-data",
       "license": "MIT",
@@ -195,7 +195,7 @@
         "repo": "AnitaKirkovska/dynamic-notch",
         "ref": "9729c3685d60d00d1de73a183b03122b9fa1f8f4"
       },
-      "description": "Put your Vellum assistant inside your MacBook's notch: click to chat, hold Ctrl+Option to talk, and get a floating task bulb while it works, with live-streamed replies and per-sentence voice.",
+      "description": "Put your Bunty assistant inside your MacBook's notch: click to chat, hold Ctrl+Option to talk, and get a floating task bulb while it works, with live-streamed replies and per-sentence voice.",
       "category": "interface",
       "homepage": "https://github.com/AnitaKirkovska/dynamic-notch",
       "license": "MIT",
@@ -273,7 +273,7 @@
         "repo": "vellum-ai/imessage",
         "ref": "af3d9f79903817358084de74e056422e6ca91fe4"
       },
-      "description": "iMessage and SMS channel for the Vellum assistant, backed by a Photon line.",
+      "description": "iMessage and SMS channel for the Bunty assistant, backed by a Photon line.",
       "category": "productivity",
       "homepage": "https://github.com/vellum-ai/imessage",
       "license": "MIT",
@@ -312,7 +312,7 @@
         "repo": "simensgreen/ledger",
         "ref": "7fc04fd77b20ad4b27ccd51be22c101274b370f6"
       },
-      "description": "Structured storage for Vellum agents: tables via JSON Schema, query/aggregate via JSON, named saved queries.",
+      "description": "Structured storage for Bunty agents: tables via JSON Schema, query/aggregate via JSON, named saved queries.",
       "category": "developer",
       "homepage": "https://github.com/simensgreen/ledger",
       "license": "MIT",
@@ -351,7 +351,7 @@
         "repo": "simensgreen/markitdown-vellum",
         "ref": "5e5a4ecfd6c60d613778106442003a1ed302fc3c"
       },
-      "description": "Convert workspace documents (PDF, DOCX, PPTX, XLSX, images, MSG, \u2026) to markdown via @cognipeer/to-markdown, with Vellum vision OCR or Tesseract.",
+      "description": "Convert workspace documents (PDF, DOCX, PPTX, XLSX, images, MSG, \u2026) to markdown via @cognipeer/to-markdown, with Bunty vision OCR or Tesseract.",
       "category": "productivity",
       "homepage": "https://github.com/simensgreen/markitdown-vellum",
       "license": "MIT",
@@ -390,7 +390,7 @@
         "repo": "vellum-ai/natural",
         "ref": "e71880d144337d1b8b6d3e65ab98006b7d015ef6"
       },
-      "description": "Hosted MCP access to Natural payment operations for Vellum assistants.",
+      "description": "Hosted MCP access to Natural payment operations for Bunty assistants.",
       "category": "finance",
       "homepage": "https://www.natural.com",
       "license": "MIT",
@@ -546,7 +546,7 @@
         "repo": "vellum-ai/simple-memory",
         "ref": "ed09a4c01bf18e4ac8859faee94cb65c7cbd1ca3"
       },
-      "description": "Reference memory plugin that exercises the full plugin API with low-cost variants of Vellum's memory defaults.",
+      "description": "Reference memory plugin that exercises the full plugin API with low-cost variants of Bunty's memory defaults.",
       "category": "memory",
       "homepage": "https://github.com/vellum-ai/simple-memory",
       "license": "MIT",
