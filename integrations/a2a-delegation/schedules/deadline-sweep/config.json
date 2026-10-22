@@ -1,0 +1,5 @@
+{
+  "expression": "*/15 * * * *",
+  "description": "Assistant-to-assistant: tell the owner about delegated tasks past their deadline",
+  "quiet": true
+}

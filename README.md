@@ -22,7 +22,7 @@ Stage: **prototype**, built on the open-source [Vellum assistant](https://github
 | Zomato and Swiggy | Not started |
 | Shared-number router | Built and tested with mocks (`backend/router`); live needs Meta + Twilio |
 | Reach a contact (call / text / tell) | Plugin built and tested with mocks (`integrations/reach-contact`); live needs calls + WhatsApp |
-| Assistant-to-assistant (notes, tasks) | Not started |
+| Assistant-to-assistant (notes, tasks) | Plugin built and tested end to end in one process (`integrations/a2a-delegation`); live needs two running assistants |
 | Website | Built ([Live preview](https://website-seven-xi-36.vercel.app)) |
 
 ## How it works (prototype)

@@ -3,6 +3,7 @@
 import { join } from "node:path";
 import { A2ADb } from "./db.ts";
 import { DelegationService } from "./delegation.ts";
+import { WorkspaceFiles } from "./files.ts";
 import { VellumOwnerNotifier } from "./notifier.ts";
 import { VellumSecretStore } from "./secrets.ts";
 import { FetchTransport } from "./transport.ts";
@@ -33,6 +34,7 @@ export async function getService(): Promise<DelegationService> {
       return pairUrl.replace(/\/pair$/, "");
     },
     dataDir,
+    files: new WorkspaceFiles(api.getWorkspaceDir()),
     log: (msg, fields) => console.log(JSON.stringify({ plugin: "a2a-delegation", msg, ...fields })),
   });
   return cached;

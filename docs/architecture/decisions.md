@@ -37,6 +37,10 @@ Voice note in, voice note out; text in, text out. Per-user setting to turn voice
 ## D-08 · `.pptx` output · Open
 Sujal needs to produce PowerPoint files. Options: a skill using a Node library in the sandbox, or
 HTML decks from `app-builder` exported later. Ask before adding a dependency.
+Overnight (chosen overnight, revisit): **no library added**. Delegation sends any file type, so
+Phase 7 works with whatever Sujal produces (HTML decks from `app-builder` today). Recommendation
+for the team: a small skill using `pptxgenjs` (pure JavaScript, runs in the sandbox, MIT) pinned
+to an exact version, added in its own PR after a teammate agrees.
 
 ## D-09 · Gates checked with `ctx.approvedViaPrompt` · Proposed (chosen overnight, revisit)
 Phase 0 Spike B, checked in `vellum/` source: a plugin tool cannot declare `requireFreshApproval`.

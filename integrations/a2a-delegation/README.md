@@ -53,6 +53,18 @@ Differences from the layout above, all recorded in `docs/architecture/decisions.
   `BUNTY_OWNER_NAME`.
 - `test/harness.ts` runs Chintu and Sujal in one process, with a fake gateway that checks the
   same things the real one does.
+- Extra tools beyond the list above: `a2a_ask_requester` (question back while working),
+  `a2a_report_failure` (can't finish), `a2a_resume_peer` (after a security pause),
+  `a2a_deadline_sweep` (called by the schedule). Every tool is owner only; every tool that sends
+  something or changes trust is `high` risk and checks `ctx.approvedViaPrompt`.
+- Gate C as built: `release_delegation_result` hashes exactly the approved files and stores the
+  hash; `pushStatus` refuses any status push whose files do not match it, whatever called it.
+  Releasing from `working` moves through `input_required` (Gate C asked) to `completed` in one
+  owner action.
+- Files: up to 5 MB inline (`raw`), bigger ones by a signed 24 h link served by `GET file`
+  (the download is signed like every other request). Received files are saved under the plugin
+  data dir, `received/<taskId>/`. Only files inside the workspace can be released.
+- `.pptx`: no library added (decision D-08); any file type can be delegated.
 
 ## Secrets
 

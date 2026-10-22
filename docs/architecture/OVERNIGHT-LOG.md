@@ -201,3 +201,33 @@ plugin installed and its ingress approved in each, `BUNTY_ASSISTANT_ID` set. No 
 `ANTHROPIC_API_KEY`. Owner B seeing the note on WhatsApp also needs Phase 2.
 
 **`vellum/` edits:** none.
+
+## Phase 7: a2a-delegation part 2 (tasks and gates)
+
+**Built:** `src/delegation.ts`, `src/files.ts`, `src/state.ts`, tools, schedule.
+- Requester: `a2a_send_task` (Gate 0), `a2a_answer_question`, `a2a_cancel_task`; status pushes
+  update `delegations_outbound` and tell Owner A only on accepted, question, done, declined,
+  failed, canceled (D-06); results saved under `received/<taskId>/`.
+- Assignee: a task arrives as `input_required` (Gate A asked) and Owner B is told who, what,
+  deliverables and deadline; `accept_delegation` (Gate A), `a2a_ask_requester`,
+  `release_delegation_result` (Gate C), `a2a_report_failure`, cancel from the requester.
+- Gate B is Vellum's normal gating of Sujal's own tools while Owner B's assistant does the work
+  (no plugin code needed).
+- Gate C in code: the approved files' hash is stored; any status push with files that do not
+  match is refused. Only files inside the workspace can be released.
+- Files over 5 MB go by a signed 24 h link (`GET file`, signed request + URL signature).
+- `schedules/deadline-sweep` (every 15 minutes) runs `a2a_deadline_sweep`: Owner A is asked once
+  what to do about an overdue task (reminder, call, wait, cancel).
+
+**Decisions taken:** D-08 (no `.pptx` library tonight; recommendation recorded).
+
+**Tests:** 14 new. The roadmap scenario end to end: three presentations by tomorrow with accept,
+a question back and answer, Gate C release, files arriving intact; plus decline, release before
+accept refused, Gate A twice refused, Gate C bypass refused, path escape refused, cancel, missed
+deadline (once), failure, status for someone else's task refused, 5 MB+ file by signed link.
+The tool-gate test now covers all 15 tools. `bun run check`: 105 pass, 0 fail.
+
+**Needs real keys:** as Phase 6. The live exit check also needs Owner B's assistant to produce the
+decks (an LLM key) and, for files to reach Owner A on WhatsApp, Phase 2.
+
+**`vellum/` edits:** none.
