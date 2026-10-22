@@ -1,0 +1,52 @@
+# Copies only the contents of website/ onto the website-deploy branch whenever website/ changes
+# on main. Hostinger (hPanel, Advanced, GIT) deploys that branch into public_html.
+# README.md and _headers stay out; .htaccess goes in. Uses the built-in GITHUB_TOKEN, no secrets.
+name: Website deploy branch
+
+on:
+  push:
+    branches: [main]
+    paths: ["website/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: website-deploy
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update the website-deploy branch
+        run: |
+          set -e
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          deploy="$RUNNER_TEMP/deploy"
+
+          # Reuse the branch if it exists so Hostinger can pull it normally; otherwise start it empty.
+          if git ls-remote --exit-code --heads origin website-deploy > /dev/null; then
+            git fetch --depth 1 origin website-deploy
+            git worktree add -B website-deploy "$deploy" origin/website-deploy
+          else
+            git worktree add --detach "$deploy"
+            git -C "$deploy" checkout --orphan website-deploy
+          fi
+
+          cd "$deploy"
+          git rm -rq --ignore-unmatch .
+          cp -R "$GITHUB_WORKSPACE/website/." .
+          rm -f README.md _headers
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "website/ unchanged, nothing to publish"
+            exit 0
+          fi
+          git commit -q -m "Deploy website from $GITHUB_SHA"
+          git push origin website-deploy

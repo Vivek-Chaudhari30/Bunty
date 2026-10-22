@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { DelegationService } from "../src/delegation.ts";
 import { hashResultFiles, manifestHash, safeFilename, WorkspaceFiles } from "../src/files.ts";
 import { canMove } from "../src/state.ts";
@@ -89,7 +89,7 @@ describe("delegation: three presentations by tomorrow", () => {
     expect(done).toContain("Owner B sent the results");
     expect(done).toContain("3 file(s)");
     const saved = JSON.parse(p.chintu.db.getOutbound(sent.id)!.result_files_json!) as string[];
-    expect(saved.map((s) => s.split("/").pop())).toEqual(["presentation-1.pptx", "presentation-2.pptx", "presentation-3.pptx"]);
+    expect(saved.map((s) => basename(s))).toEqual(["presentation-1.pptx", "presentation-2.pptx", "presentation-3.pptx"]);
     expect(readFileSync(saved[1]!, "utf8")).toBe("deck 2 contents");
   });
 

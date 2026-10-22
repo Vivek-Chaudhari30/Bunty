@@ -49,7 +49,8 @@ unclear in a task, ask instead of guessing. Write every agreed decision into Not
 │   ├── _template/     Copy this to start a new integration.
 │   └── <app-name>/    Example: reminders, whatsapp, calls, google, zomato.
 ├── backend/           Our own small services that live outside Vellum (see below).
-├── website/           Static website: About us, Scope, Pricing, Contact us, Onboarding.
+├── website/           Static website (plain HTML, CSS, JS, no build step): a single
+│                      landing page.
 ├── infra/             How we run everything on a server: Docker Compose files, scripts.
 └── docs/              Exported PDFs and images, plus docs/architecture/ (Markdown that AI
                        tools must read: architecture, roadmap, protocols, decisions).
@@ -88,7 +89,7 @@ review it after the prototype, so don't build launch-target parts yet unless ask
 | Payments | Razorpay UPI payment requests (later) | User approves with their own UPI PIN | Same |
 | OTP | Decide when building onboarding (ask) | | MSG91 |
 | Router service (`backend/`) | Bun + TypeScript (proposed: same language as Vellum) | One language for the whole prototype | Part of own backend |
-| Website | Plain HTML + CSS (+ a little JS), Cloudflare Pages | Static, free, fast in India | Same |
+| Website | Plain HTML + CSS (+ a little JS), Hostinger (static files in `public_html`, `.htaccess` for headers) | Static, cheap, simple upload | Same |
 | Server | One cloud VM running Docker (`vellum hatch --remote docker`) | Simple; one container set per tester | AWS Mumbai |
 | Docs and standups | Notion (Features + Standup log) | One place the whole team reads | Same |
 | Code | GitHub, one repo | | Same |
