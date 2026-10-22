@@ -1,16 +1,11 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Contact us - Bunty</title>
-  <meta name="description" content="Get in touch with the team building Bunty. Inquiries, feedback, and early tester questions.">
-  <link rel="canonical" href="https://bunty.ai/contact.html">
-  <meta property="og:title" content="Contact us - Bunty">
-  <meta property="og:description" content="Reach the Bunty team directly via form or email.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://bunty.ai/contact.html">
-  <meta property="og:image" content="https://bunty.ai/og-image.png">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="Contact details for Bunty will be published when its service line is ready.">
+  <title>Contact | Bunty</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="css/tokens.css">
   <link rel="stylesheet" href="css/reset.css">
@@ -19,128 +14,64 @@
   <link rel="stylesheet" href="css/pages.css">
 </head>
 <body>
-  <a href="#main" class="skip-link">Skip to main content</a>
-
-  <!-- Header -->
-  <header class="header" role="banner">
-    <div class="container header__inner">
-      <a href="/" class="header__wordmark" aria-label="Bunty home">Bunty</a>
-
-      <button class="header__menu-btn" aria-expanded="false" aria-controls="main-nav" aria-label="Open menu">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <line x1="3" y1="6" x2="21" y2="6"/>
-          <line x1="3" y1="12" x2="21" y2="12"/>
-          <line x1="3" y1="18" x2="21" y2="18"/>
-        </svg>
-      </button>
-
-      <nav class="header__nav" id="main-nav" aria-label="Main navigation">
-        <ul class="header__nav-list">
-          <li><a href="/#capabilities">What Bunty does</a></li>
-          <li><a href="/#how-it-works">How it works</a></li>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <a class="wordmark" href="index.html" aria-label="Bunty home">Bunty</a>
+      <nav class="site-nav" aria-label="Main navigation">
+        <ul class="site-nav__list">
+          <li><a href="index.html#tasks">What it does</a></li>
           <li><a href="scope.html">Scope</a></li>
           <li><a href="pricing.html">Pricing</a></li>
+          <li><a href="onboarding.html">How to start</a></li>
           <li><a href="about.html">About us</a></li>
+          <li><a href="contact.html" aria-current="page">Contact</a></li>
         </ul>
       </nav>
-
-      <div class="header__actions">
-        <a href="https://wa.me/910000000000" class="btn btn--primary btn--sm header__cta">Chat on WhatsApp</a>
-      </div>
+      <p class="header-note">Prototype<br>India</p>
     </div>
   </header>
-
   <main id="main">
-    <div class="page-header">
-      <div class="container container--narrow">
-        <h1 class="page-header__title">Contact us</h1>
-        <p class="page-header__subtitle">Questions about testing, feedback, or partnerships.</p>
+    <header class="page-intro">
+      <div class="container page-intro__grid">
+        <span class="section-number">01</span>
+        <div><h1>Contact</h1><p>There is no public phone number, WhatsApp link, or email address to share yet.</p></div>
       </div>
-    </div>
-
+    </header>
     <section class="section">
-      <div class="container container--narrow">
-        <form class="contact-form" novalidate>
-          <div class="form-field">
-            <label for="contact-name" class="form-field__label">Your name</label>
-            <input type="text" id="contact-name" name="name" class="form-field__input" required autocomplete="name">
+      <div class="container grid-12">
+        <div class="section-heading">
+          <span class="section-number">02</span>
+          <h2 class="section-title">Service contact is not configured.</h2>
+        </div>
+        <div class="about-note">
+          <div class="contact-status">
+            <p>Call and WhatsApp contact options will be added here when the public service line is confirmed.</p>
+            <p>Nothing is submitted or stored on this website. We have not added a contact form because there is no confirmed destination for your message.</p>
           </div>
-
-          <div class="form-field">
-            <label for="contact-email" class="form-field__label">Email address</label>
-            <input type="email" id="contact-email" name="email" class="form-field__input" required autocomplete="email">
-          </div>
-
-          <div class="form-field">
-            <label for="contact-message" class="form-field__label">Message</label>
-            <textarea id="contact-message" name="message" class="form-field__textarea" required></textarea>
-          </div>
-
-          <div class="form-field">
-            <button type="submit" class="btn btn--primary">Send message</button>
-          </div>
-
-          <div id="form-status-loading" class="form-status form-status--loading" role="status" hidden>
-            <p>Preparing message...</p>
-          </div>
-
-          <div id="form-status-success" class="form-status form-status--success" role="status" tabindex="-1" hidden>
-            <p>Thank you. Your message draft has been generated. You can also write to us directly at <a href="mailto:hello@example.com">hello@example.com</a>.</p>
-          </div>
-
-          <div id="form-status-error" class="form-status form-status--error" role="alert" tabindex="-1" hidden>
-            <p>Please check your information and try again.</p>
-          </div>
-        </form>
-
-        <div style="margin-top: 3rem; padding-top: 2rem; border-top: 1px solid var(--color-rule);">
-          <h2 style="font-size: var(--text-lg); margin-bottom: 0.5rem;">Direct contact</h2>
-          <p style="color: var(--color-ink-muted);">Email: <a href="mailto:hello@example.com">hello@example.com</a></p>
-          <p style="color: var(--color-ink-muted);">Location: Bunty AI Assistant, San Francisco, USA</p>
         </div>
       </div>
     </section>
   </main>
-
-  <!-- Footer -->
-  <footer class="footer" role="contentinfo">
-    <div class="container footer__inner">
-      <div class="footer__col">
-        <p class="footer__heading">Pages</p>
-        <a href="about.html" class="footer__link">About us</a>
-        <a href="scope.html" class="footer__link">Scope</a>
-        <a href="pricing.html" class="footer__link">Pricing</a>
-        <a href="contact.html" class="footer__link">Contact us</a>
-        <a href="onboarding.html" class="footer__link">How to start</a>
+  <footer class="site-footer">
+    <div class="container">
+      <div class="site-footer__grid">
+        <section class="footer-group" aria-labelledby="footer-pages">
+          <h2 id="footer-pages">Pages</h2>
+          <ul class="footer-links"><li><a href="about.html">About us</a></li><li><a href="scope.html">Scope</a></li><li><a href="pricing.html">Pricing</a></li><li><a href="onboarding.html">How to start</a></li><li><a href="contact.html">Contact</a></li></ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-legal">
+          <h2 id="footer-legal">Legal drafts</h2>
+          <ul class="footer-links"><li><a href="privacy.html">Privacy policy</a></li><li><a href="terms.html">Terms of service</a></li></ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-contact">
+          <h2 id="footer-contact">Contact</h2>
+          <ul class="footer-links"><li><a href="contact.html">No public contact details</a></li></ul>
+        </section>
+        <p class="footer-note">Bunty is a prototype. Your data is used to carry out a request and is not collected through this site.</p>
       </div>
-      <div class="footer__col">
-        <p class="footer__heading">Legal</p>
-        <a href="privacy.html" class="footer__link">Privacy Policy</a>
-        <a href="terms.html" class="footer__link">Terms of Service</a>
-      </div>
-      <div class="footer__col">
-        <p class="footer__heading">Contact</p>
-        <a href="mailto:hello@example.com" class="footer__link">hello@example.com</a>
-        <span class="footer__link">+91 00000 00000</span>
-      </div>
-      <div class="footer__bottom">
-        <p>Bunty AI Assistant, San Francisco, USA. Prototype: not all features are available yet.</p>
-      </div>
+      <div class="footer-bottom"><span>Bunty · Prototype in development</span><span>India · 2026</span></div>
     </div>
   </footer>
-
-  <script src="js/contact-form.js" defer></script>
-  <script>
-    (function() {
-      var btn = document.querySelector('.header__menu-btn');
-      var nav = document.querySelector('.header__nav');
-      if (!btn || !nav) return;
-      btn.addEventListener('click', function() {
-        var open = btn.getAttribute('aria-expanded') === 'true';
-        btn.setAttribute('aria-expanded', String(!open));
-        nav.classList.toggle('header__nav--open');
-      });
-    })();
-  </script>
 </body>
 </html>

@@ -1,17 +1,11 @@
-<!-- Draft for legal review -->
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Privacy Policy - Bunty</title>
-  <meta name="description" content="Privacy Policy for Bunty AI Assistant. Details on consent, data use, audio logs, and deletion rights.">
-  <link rel="canonical" href="https://bunty.ai/privacy.html">
-  <meta property="og:title" content="Privacy Policy - Bunty">
-  <meta property="og:description" content="How Bunty handles data, consent, and user privacy.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://bunty.ai/privacy.html">
-  <meta property="og:image" content="https://bunty.ai/og-image.png">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="Draft privacy policy for the Bunty prototype. It needs review by an India-qualified lawyer before use.">
+  <title>Privacy policy draft | Bunty</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="css/tokens.css">
   <link rel="stylesheet" href="css/reset.css">
@@ -20,129 +14,98 @@
   <link rel="stylesheet" href="css/pages.css">
 </head>
 <body>
-  <a href="#main" class="skip-link">Skip to main content</a>
-
-  <!-- Header -->
-  <header class="header" role="banner">
-    <div class="container header__inner">
-      <a href="/" class="header__wordmark" aria-label="Bunty home">Bunty</a>
-
-      <button class="header__menu-btn" aria-expanded="false" aria-controls="main-nav" aria-label="Open menu">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <line x1="3" y1="6" x2="21" y2="6"/>
-          <line x1="3" y1="12" x2="21" y2="12"/>
-          <line x1="3" y1="18" x2="21" y2="18"/>
-        </svg>
-      </button>
-
-      <nav class="header__nav" id="main-nav" aria-label="Main navigation">
-        <ul class="header__nav-list">
-          <li><a href="/#capabilities">What Bunty does</a></li>
-          <li><a href="/#how-it-works">How it works</a></li>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <a class="wordmark" href="index.html" aria-label="Bunty home">Bunty</a>
+      <nav class="site-nav" aria-label="Main navigation">
+        <ul class="site-nav__list">
+          <li><a href="index.html#tasks">What it does</a></li>
           <li><a href="scope.html">Scope</a></li>
           <li><a href="pricing.html">Pricing</a></li>
+          <li><a href="onboarding.html">How to start</a></li>
           <li><a href="about.html">About us</a></li>
+          <li><a href="contact.html">Contact</a></li>
         </ul>
       </nav>
-
-      <div class="header__actions">
-        <a href="https://wa.me/910000000000" class="btn btn--primary btn--sm header__cta">Chat on WhatsApp</a>
-      </div>
+      <p class="header-note">Prototype<br>India</p>
     </div>
   </header>
-
   <main id="main">
-    <div class="page-header">
-      <div class="container container--narrow">
-        <h1 class="page-header__title">Privacy Policy</h1>
-        <p class="page-header__subtitle">First draft for prototype stage. Subject to legal review.</p>
+    <header class="page-intro">
+      <div class="container page-intro__grid">
+        <span class="section-number">01</span>
+        <div>
+          <h1>Privacy policy</h1>
+          <p>Draft for the Bunty prototype, written for people in India.</p>
+        </div>
       </div>
-    </div>
-
+    </header>
     <section class="section">
-      <div class="container container--narrow prose">
-        <p><strong>Notice:</strong> This draft outlines how Bunty AI Assistant collects, uses, and protects personal information during our prototype testing phase. This document is a preliminary draft and must be reviewed by qualified legal counsel prior to commercial launch.</p>
+      <div class="container">
+        <article class="prose">
+          <span class="legal-draft">Draft · lawyer review required</span>
+          <p>This is a working draft about the intended handling of personal data under the Digital Personal Data Protection Act, 2023 (DPDP Act). It is not legal advice and does not claim that the prototype is compliant. An India-qualified lawyer must review it, and the responsible legal entity and contact details must be confirmed before launch.</p>
 
-        <h2>1. Information we collect</h2>
-        <p>Bunty operates over phone calls and WhatsApp messaging. In providing this assistance, we process:</p>
-        <ul>
-          <li><strong>Contact details:</strong> Your mobile phone number used for WhatsApp messaging and voice calls, and your chosen display name.</li>
-          <li><strong>Conversation and audio records:</strong> Transcripts of text conversations and audio recordings of telephone interactions with the assistant.</li>
-          <li><strong>Assistant memory:</strong> Contextual facts you instruct Bunty to remember (such as requested reminders, preferred language, and appointment times) to avoid repetitive queries.</li>
-          <li><strong>External account tokens:</strong> When you connect third-party integrations like Google Workspace, tokens are handled via dedicated credential executors without exposing master passwords to conversational models.</li>
-        </ul>
+          <h2>1. Who is responsible</h2>
+          <p>Data fiduciary / legal entity: [TBD]. Registered address: [TBD]. Privacy contact and grievance contact: [TBD]. The public phone and WhatsApp service lines are not configured at this time.</p>
 
-        <h2>2. Explicit consent and timestamps</h2>
-        <p>Data processing occurs solely upon your explicit consent. When you first interact with Bunty, your agreement to audio processing and conversational memory is logged with a verifiable timestamp. You may review or revoke your consent at any time.</p>
+          <h2>2. Data the service may process</h2>
+          <p>When the service is available, it may process your phone number, name, language, messages and call transcripts, audio if recording is enabled, and details needed to carry out a task. If you connect another service, it may also process the data needed to use that connection.</p>
+          <p>This website has no contact form and does not ask you to enter personal information.</p>
 
-        <h2>3. Purpose of data use</h2>
-        <p>We process your data strictly to execute requested assistant tasks:</p>
-        <ul>
-          <li>Scheduling and dispatching reminders via WhatsApp or phone calls.</li>
-          <li>Transcribing and understanding verbal requests in Hindi, English, Hinglish, and Gujarati.</li>
-          <li>Contacting designated third parties or booking services upon your explicit verbal or text instruction.</li>
-        </ul>
+          <h2>3. Separate purposes and consent</h2>
+          <p>Bunty should explain each purpose in clear language and ask for a separate, affirmative choice where consent is required. A choice about one purpose must not be treated as consent to another.</p>
+          <ul>
+            <li><strong>Task handling:</strong> information needed to understand and carry out the request you made.</li>
+            <li><strong>Memory:</strong> information you ask Bunty to remember for later requests.</li>
+            <li><strong>Call recording:</strong> audio recording for the stated service purpose. Bunty should explain whether a call will be recorded and obtain consent before recording begins.</li>
+            <li><strong>Connected services:</strong> access to a Google or other account, requested separately and limited to the task and access granted.</li>
+          </ul>
+          <p>The service should record the consent choice, its purpose, and the time it was given. You should be able to withdraw a choice using a simple route that is no harder than giving it.</p>
 
-        <h2>4. Safety and human control principles</h2>
-        <p>Our processing architecture enforces the following human-in-the-loop safeguards:</p>
-        <ul>
-          <li><strong>Explicit confirmation:</strong> Bunty reads back actions involving third parties, bookings, or expenses, and waits for a distinct confirmation ("yes") before initiating any action.</li>
-          <li><strong>No automated payments:</strong> Bunty does not have direct access to your banking credentials. When a financial transaction is necessary, you approve a payment request directly in your UPI application using your private UPI PIN.</li>
-          <li><strong>Caller identification:</strong> When calling external numbers on your behalf, Bunty explicitly announces that it is an artificial intelligence calling for you.</li>
-          <li><strong>Treating external content as information:</strong> Inbound text from third-party emails, websites, or call recipients is treated as data for review, never as executable instructions for the assistant.</li>
-        </ul>
+          <h2>4. How data is used</h2>
+          <p>Data is intended to help understand your request, remember details you chose to save, perform a confirmed task, and send you a result. Messages, bookings, calls, or other external actions must be read back and approved by you before code carries them out. The AI does not make the final decision about money, bookings, or changes to your data.</p>
+          <p>When Bunty calls another person for you, it must say that it is an AI calling on your behalf.</p>
 
-        <h2>5. Data retention and deletion ("Delete my data")</h2>
-        <p>During the prototype testing phase, data is retained for [RETENTION PERIOD placeholder: to be determined by legal review] or until you request deletion. You retain total ownership of your personal records. Saying "delete my data" or sending that request via WhatsApp or email permanently purges your conversations, contact profile, and memory records from our active stores.</p>
+          <h2>5. Providers and sharing</h2>
+          <p>Some service providers may process information to support calls, messaging, speech, AI responses, or connected tools. Before launch, the responsible team must identify these providers, explain what each receives, confirm where data is processed, and document the applicable safeguards. Provider list and retention details: [TBD].</p>
 
-        <h2>6. Grievance redressal and legal entity</h2>
-        <p>Entity: [LEGAL ENTITY NAME placeholder: Bunty AI Assistant]</p>
-        <p>Address: [REGISTERED ADDRESS placeholder: San Francisco, USA]</p>
-        <p>Grievance Officer: [GRIEVANCE OFFICER NAME placeholder]</p>
-        <p>Grievance Email: [GRIEVANCE OFFICER EMAIL placeholder: hello@example.com]</p>
-        <p>Jurisdiction: [JURISDICTION placeholder: Subject to applicable laws]</p>
+          <h2>6. Retention and deletion</h2>
+          <p>Retention periods are not set: [TBD]. The service should keep personal data only for a stated purpose and period, subject to applicable law. You may ask for deletion of your profile, memory, transcripts, recordings, and connected credentials, subject to any legal retention requirement. The service must confirm what was deleted and explain any information it must keep.</p>
+          <p>The intended request is “delete my data” in a call or WhatsApp chat. Those service channels are not available yet, so the request method and response time must be confirmed before this policy is used.</p>
+
+          <h2>7. Security and children</h2>
+          <p>The team should use reasonable technical and organisational safeguards, limit access to authorised people, and explain how it will handle a personal data breach. Security contact and incident process: [TBD]. Rules for children and any required parent or guardian consent must be reviewed before the service is offered to children.</p>
+
+          <h2>8. Your choices and complaints</h2>
+          <p>You may ask to access or correct your information, withdraw consent, request deletion, or raise a grievance, subject to applicable law. Grievance contact, response period, and any required escalation details: [TBD]. These details must be supplied and checked by counsel before launch.</p>
+
+          <h2>9. Changes to this draft</h2>
+          <p>This draft is dated 22 October 2026. The final policy should state when it changes and how users will be told about material changes.</p>
+        </article>
       </div>
     </section>
   </main>
-
-  <!-- Footer -->
-  <footer class="footer" role="contentinfo">
-    <div class="container footer__inner">
-      <div class="footer__col">
-        <p class="footer__heading">Pages</p>
-        <a href="about.html" class="footer__link">About us</a>
-        <a href="scope.html" class="footer__link">Scope</a>
-        <a href="pricing.html" class="footer__link">Pricing</a>
-        <a href="contact.html" class="footer__link">Contact us</a>
-        <a href="onboarding.html" class="footer__link">How to start</a>
+  <footer class="site-footer">
+    <div class="container">
+      <div class="site-footer__grid">
+        <section class="footer-group" aria-labelledby="footer-pages">
+          <h2 id="footer-pages">Pages</h2>
+          <ul class="footer-links"><li><a href="about.html">About us</a></li><li><a href="scope.html">Scope</a></li><li><a href="pricing.html">Pricing</a></li><li><a href="onboarding.html">How to start</a></li><li><a href="contact.html">Contact</a></li></ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-legal">
+          <h2 id="footer-legal">Legal drafts</h2>
+          <ul class="footer-links"><li><a href="privacy.html" aria-current="page">Privacy policy</a></li><li><a href="terms.html">Terms of service</a></li></ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-contact">
+          <h2 id="footer-contact">Contact</h2>
+          <ul class="footer-links"><li><a href="contact.html">Contact details not published</a></li></ul>
+        </section>
+        <p class="footer-note">This site has no forms. The privacy policy is a draft and needs legal review.</p>
       </div>
-      <div class="footer__col">
-        <p class="footer__heading">Legal</p>
-        <a href="privacy.html" class="footer__link">Privacy Policy</a>
-        <a href="terms.html" class="footer__link">Terms of Service</a>
-      </div>
-      <div class="footer__col">
-        <p class="footer__heading">Contact</p>
-        <a href="mailto:hello@example.com" class="footer__link">hello@example.com</a>
-        <span class="footer__link">+91 00000 00000</span>
-      </div>
-      <div class="footer__bottom">
-        <p>Bunty AI Assistant, San Francisco, USA. Prototype: not all features are available yet.</p>
-      </div>
+      <div class="footer-bottom"><span>Bunty · Prototype in development</span><span>India · 2026</span></div>
     </div>
   </footer>
-
-  <script>
-    (function() {
-      var btn = document.querySelector('.header__menu-btn');
-      var nav = document.querySelector('.header__nav');
-      if (!btn || !nav) return;
-      btn.addEventListener('click', function() {
-        var open = btn.getAttribute('aria-expanded') === 'true';
-        btn.setAttribute('aria-expanded', String(!open));
-        nav.classList.toggle('header__nav--open');
-      });
-    })();
-  </script>
 </body>
 </html>

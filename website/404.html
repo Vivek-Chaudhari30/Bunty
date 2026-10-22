@@ -1,10 +1,10 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Page not found - Bunty</title>
-  <meta name="robots" content="noindex">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Page not found | Bunty</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="css/tokens.css">
   <link rel="stylesheet" href="css/reset.css">
@@ -13,69 +13,60 @@
   <link rel="stylesheet" href="css/pages.css">
 </head>
 <body>
-  <a href="#main" class="skip-link">Skip to main content</a>
-
-  <!-- Header -->
-  <header class="header" role="banner">
-    <div class="container header__inner">
-      <a href="/" class="header__wordmark" aria-label="Bunty home">Bunty</a>
-
-      <nav class="header__nav" aria-label="Main navigation">
-        <ul class="header__nav-list">
-          <li><a href="/#capabilities">What Bunty does</a></li>
-          <li><a href="/#how-it-works">How it works</a></li>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <a class="wordmark" href="index.html" aria-label="Bunty home">Bunty</a>
+      <nav class="site-nav" aria-label="Main navigation">
+        <ul class="site-nav__list">
+          <li><a href="index.html#tasks">What it does</a></li>
           <li><a href="scope.html">Scope</a></li>
           <li><a href="pricing.html">Pricing</a></li>
+          <li><a href="onboarding.html">How to start</a></li>
           <li><a href="about.html">About us</a></li>
+          <li><a href="contact.html">Contact</a></li>
         </ul>
       </nav>
-
-      <div class="header__actions">
-        <a href="https://wa.me/910000000000" class="btn btn--primary btn--sm header__cta">Chat on WhatsApp</a>
-      </div>
+      <p class="header-note">Prototype<br>India</p>
     </div>
   </header>
-
   <main id="main">
-    <div class="page-header">
-      <div class="container container--narrow">
-        <h1 class="page-header__title">Page not found</h1>
-        <p class="page-header__subtitle">The page you requested could not be located.</p>
+    <header class="page-intro">
+      <div class="container page-intro__grid">
+        <span class="section-number">404</span>
+        <div>
+          <h1>Page not found</h1>
+          <p>The address may be wrong or the page may have moved.</p>
+        </div>
       </div>
-    </div>
-
+    </header>
     <section class="section">
-      <div class="container container--narrow">
-        <p style="margin-bottom: 2rem; color: var(--color-ink-muted);">Please check the address or return to the main home page.</p>
-        <a href="/" class="btn btn--primary">Return to home</a>
+      <div class="container grid-12">
+        <div class="section-heading">
+          <span class="section-number">01</span>
+          <h2 class="section-title"><a href="index.html">Return to the home page.</a></h2>
+        </div>
       </div>
     </section>
   </main>
-
-  <!-- Footer -->
-  <footer class="footer" role="contentinfo">
-    <div class="container footer__inner">
-      <div class="footer__col">
-        <p class="footer__heading">Pages</p>
-        <a href="about.html" class="footer__link">About us</a>
-        <a href="scope.html" class="footer__link">Scope</a>
-        <a href="pricing.html" class="footer__link">Pricing</a>
-        <a href="contact.html" class="footer__link">Contact us</a>
-        <a href="onboarding.html" class="footer__link">How to start</a>
+  <footer class="site-footer">
+    <div class="container">
+      <div class="site-footer__grid">
+        <section class="footer-group" aria-labelledby="footer-pages">
+          <h2 id="footer-pages">Pages</h2>
+          <ul class="footer-links"><li><a href="about.html">About us</a></li><li><a href="scope.html">Scope</a></li><li><a href="pricing.html">Pricing</a></li><li><a href="onboarding.html">How to start</a></li><li><a href="contact.html">Contact</a></li></ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-legal">
+          <h2 id="footer-legal">Legal drafts</h2>
+          <ul class="footer-links"><li><a href="privacy.html">Privacy policy</a></li><li><a href="terms.html">Terms of service</a></li></ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-contact">
+          <h2 id="footer-contact">Contact</h2>
+          <ul class="footer-links"><li><a href="contact.html">Contact details not published</a></li></ul>
+        </section>
+        <p class="footer-note">Bunty is a prototype. This website has no forms.</p>
       </div>
-      <div class="footer__col">
-        <p class="footer__heading">Legal</p>
-        <a href="privacy.html" class="footer__link">Privacy Policy</a>
-        <a href="terms.html" class="footer__link">Terms of Service</a>
-      </div>
-      <div class="footer__col">
-        <p class="footer__heading">Contact</p>
-        <a href="mailto:hello@example.com" class="footer__link">hello@example.com</a>
-        <span class="footer__link">+91 00000 00000</span>
-      </div>
-      <div class="footer__bottom">
-        <p>Bunty AI Assistant, San Francisco, USA. Prototype: not all features are available yet.</p>
-      </div>
+      <div class="footer-bottom"><span>Bunty · Prototype in development</span><span>India · 2026</span></div>
     </div>
   </footer>
 </body>

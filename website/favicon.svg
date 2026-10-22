@@ -1,4 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="2" fill="#1E5B45"/>
-  <text x="16" y="24" text-anchor="middle" font-family="Georgia, serif" font-size="22" font-weight="700" fill="#F4F1EA">B</text>
+  <style>
+    :root {
+      --ink: #1A1915;
+      --paper: #F1EEE6;
+    }
+  </style>
+  <rect width="32" height="32" fill="var(--ink)"/>
+  <path d="M10 6h9a6 6 0 0 1 2 11.7A6 6 0 0 1 19 29h-9V6Zm5 4v6h4a3 3 0 1 0 0-6h-4Zm0 10v5h4a2.5 2.5 0 1 0 0-5h-4Z" fill="var(--paper)"/>
 </svg>

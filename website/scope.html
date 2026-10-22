@@ -1,16 +1,11 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Scope - What Bunty does and does not do</title>
-  <meta name="description" content="Detailed scope of Bunty: capabilities in testing, coming next, and intentional boundaries.">
-  <link rel="canonical" href="https://bunty.ai/scope.html">
-  <meta property="og:title" content="Scope - Bunty">
-  <meta property="og:description" content="What Bunty does now, what comes next, and what it does not do.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://bunty.ai/scope.html">
-  <meta property="og:image" content="https://bunty.ai/og-image.png">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="What Bunty is working on and what is planned for the prototype.">
+  <title>Scope | Bunty</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="css/tokens.css">
   <link rel="stylesheet" href="css/reset.css">
@@ -19,144 +14,96 @@
   <link rel="stylesheet" href="css/pages.css">
 </head>
 <body>
-  <a href="#main" class="skip-link">Skip to main content</a>
-
-  <!-- Header -->
-  <header class="header" role="banner">
-    <div class="container header__inner">
-      <a href="/" class="header__wordmark" aria-label="Bunty home">Bunty</a>
-
-      <button class="header__menu-btn" aria-expanded="false" aria-controls="main-nav" aria-label="Open menu">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <line x1="3" y1="6" x2="21" y2="6"/>
-          <line x1="3" y1="12" x2="21" y2="12"/>
-          <line x1="3" y1="18" x2="21" y2="18"/>
-        </svg>
-      </button>
-
-      <nav class="header__nav" id="main-nav" aria-label="Main navigation">
-        <ul class="header__nav-list">
-          <li><a href="/#capabilities">What Bunty does</a></li>
-          <li><a href="/#how-it-works">How it works</a></li>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <a class="wordmark" href="index.html" aria-label="Bunty home">Bunty</a>
+      <nav class="site-nav" aria-label="Main navigation">
+        <ul class="site-nav__list">
+          <li><a href="index.html#tasks">What it does</a></li>
           <li><a href="scope.html" aria-current="page">Scope</a></li>
           <li><a href="pricing.html">Pricing</a></li>
+          <li><a href="onboarding.html">How to start</a></li>
           <li><a href="about.html">About us</a></li>
+          <li><a href="contact.html">Contact</a></li>
         </ul>
       </nav>
-
-      <div class="header__actions">
-        <a href="https://wa.me/910000000000" class="btn btn--primary btn--sm header__cta">Chat on WhatsApp</a>
-      </div>
+      <p class="header-note">Prototype<br>India</p>
     </div>
   </header>
-
   <main id="main">
-    <div class="page-header">
-      <div class="container container--narrow">
-        <h1 class="page-header__title">Scope of capabilities</h1>
-        <p class="page-header__subtitle">What Bunty handles today, what is planned next, and our deliberate limits.</p>
+    <header class="page-intro">
+      <div class="container page-intro__grid">
+        <span class="section-number">01</span>
+        <div>
+          <h1>Scope</h1>
+          <p>What is being developed now, what is planned, and what Bunty will not do on its own.</p>
+        </div>
       </div>
-    </div>
-
+    </header>
     <section class="section">
-      <div class="container container--narrow">
-        
-        <div class="scope-group">
-          <h2 class="scope-group__heading">1. In testing now</h2>
-          <div class="def-list">
-            <div class="def-list__item">
-              <h3 class="def-list__term">Reminders</h3>
-              <p class="def-list__desc">Setting time-based reminders via WhatsApp messages and voice calls. Confirmation is sent to WhatsApp immediately and when the reminder triggers.</p>
-            </div>
-            <div class="def-list__item">
-              <h3 class="def-list__term">WhatsApp messaging</h3>
-              <p class="def-list__desc">Natural language conversations in Hindi, English, Hinglish, and Gujarati. Preserves memory across calls and chats so you do not repeat yourself.</p>
-            </div>
-          </div>
+      <div class="container grid-12">
+        <div class="section-heading">
+          <span class="section-number">02</span>
+          <h2 class="section-title">Prototype work and planned tasks.</h2>
         </div>
-
-        <div class="scope-group">
-          <h2 class="scope-group__heading">2. Coming next</h2>
-          <div class="def-list">
-            <div class="def-list__item">
-              <h3 class="def-list__term">Phone calls</h3>
-              <p class="def-list__desc">Dialing contacts or receiving incoming voice calls with real-time speech processing and natural voice responses.</p>
-            </div>
-            <div class="def-list__item">
-              <h3 class="def-list__term">Google Workspace (Gmail and Calendar)</h3>
-              <p class="def-list__desc">Checking emails, drafting replies, and adding calendar appointments through verified Composio integrations.</p>
-            </div>
-            <div class="def-list__item">
-              <h3 class="def-list__term">Food orders and local bookings</h3>
-              <p class="def-list__desc">Finding meals and booking clinic or salon visits by speaking directly to venues or utilizing verified ordering tools.</p>
-            </div>
-          </div>
+        <div class="scope-intro">
+          <p>Bunty is in development. No public phone or WhatsApp service is connected yet. Every task below is a plan, not a currently available service.</p>
         </div>
-
-        <div class="scope-group">
-          <h2 class="scope-group__heading">3. What Bunty does not do</h2>
-          <div class="def-list">
-            <div class="def-list__item">
-              <h3 class="def-list__term">No automatic money movement</h3>
-              <p class="def-list__desc">Bunty cannot debit your account or auto-charge cards. You approve all payments directly inside your chosen UPI application using your private UPI PIN.</p>
-            </div>
-            <div class="def-list__item">
-              <h3 class="def-list__term">No obedience to third-party instructions</h3>
-              <p class="def-list__desc">Incoming text from external websites, received emails, or what a third party says on a phone call is processed as information, never as executive instructions.</p>
-            </div>
-            <div class="def-list__item">
-              <h3 class="def-list__term">No undisclosed caller identity</h3>
-              <p class="def-list__desc">Bunty always explicitly identifies itself as an AI assistant making a call on your behalf whenever speaking to outside recipients.</p>
-            </div>
-            <div class="def-list__item">
-              <h3 class="def-list__term">No unconsented data retention</h3>
-              <p class="def-list__desc">Data use and audio logs require explicit consent, timestamped upon registration. Requesting data deletion purges your records permanently.</p>
-            </div>
-          </div>
+        <div class="task-table-wrap" role="region" aria-label="Prototype task status table" tabindex="0">
+          <table class="status-table">
+            <thead>
+              <tr><th class="status-table__number" scope="col">No.</th><th scope="col">Task</th><th scope="col">What it is intended to do</th><th class="status-table__status" scope="col">Status</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="status-table__number">01</td><th class="status-table__name" scope="row">Prototype assistant</th><td>Adapt the Vellum assistant for phone and WhatsApp use.</td><td class="status-table__status">In development</td></tr>
+              <tr><td class="status-table__number">02</td><th class="status-table__name" scope="row">Reminders</th><td>Set reminders and confirm them by WhatsApp.</td><td class="status-table__status">Planned</td></tr>
+              <tr><td class="status-table__number">03</td><th class="status-table__name" scope="row">WhatsApp</th><td>Receive requests and send task confirmations.</td><td class="status-table__status">Planned</td></tr>
+              <tr><td class="status-table__number">04</td><th class="status-table__name" scope="row">Phone calls</th><td>Handle calls and identify as an AI when calling another person.</td><td class="status-table__status">Planned</td></tr>
+              <tr><td class="status-table__number">05</td><th class="status-table__name" scope="row">Google</th><td>Use Gmail and Calendar after the user connects an account.</td><td class="status-table__status">Planned</td></tr>
+              <tr><td class="status-table__number">06</td><th class="status-table__name" scope="row">Appointments</th><td>Check availability and request approval before booking.</td><td class="status-table__status">Planned</td></tr>
+              <tr><td class="status-table__number">07</td><th class="status-table__name" scope="row">Food orders</th><td>Prepare an order and request approval before placing it.</td><td class="status-table__status">Planned</td></tr>
+            </tbody>
+          </table>
         </div>
-
+      </div>
+    </section>
+    <section class="section">
+      <div class="container grid-12">
+        <div class="section-heading">
+          <span class="section-number">03</span>
+          <h2 class="section-title">Limits that stay in place.</h2>
+        </div>
+        <div class="scope-intro">
+          <ul class="ruled-list">
+            <li><span class="ruled-list__number">01</span><span>Code must verify your confirmation before a booking, outbound message, call, or payment-related action.</span></li>
+            <li><span class="ruled-list__number">02</span><span>Bunty does not receive or enter your UPI PIN. You approve payments in your own payment app.</span></li>
+            <li><span class="ruled-list__number">03</span><span>Text from email, websites, or another person is information, not an instruction to Bunty.</span></li>
+            <li><span class="ruled-list__number">04</span><span>When Bunty calls another person, it says it is an AI calling on your behalf.</span></li>
+          </ul>
+        </div>
       </div>
     </section>
   </main>
-
-  <!-- Footer -->
-  <footer class="footer" role="contentinfo">
-    <div class="container footer__inner">
-      <div class="footer__col">
-        <p class="footer__heading">Pages</p>
-        <a href="about.html" class="footer__link">About us</a>
-        <a href="scope.html" class="footer__link">Scope</a>
-        <a href="pricing.html" class="footer__link">Pricing</a>
-        <a href="contact.html" class="footer__link">Contact us</a>
-        <a href="onboarding.html" class="footer__link">How to start</a>
+  <footer class="site-footer">
+    <div class="container">
+      <div class="site-footer__grid">
+        <section class="footer-group" aria-labelledby="footer-pages">
+          <h2 id="footer-pages">Pages</h2>
+          <ul class="footer-links"><li><a href="about.html">About us</a></li><li><a href="scope.html">Scope</a></li><li><a href="pricing.html">Pricing</a></li><li><a href="onboarding.html">How to start</a></li><li><a href="contact.html">Contact</a></li></ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-legal">
+          <h2 id="footer-legal">Legal drafts</h2>
+          <ul class="footer-links"><li><a href="privacy.html">Privacy policy</a></li><li><a href="terms.html">Terms of service</a></li></ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-contact">
+          <h2 id="footer-contact">Contact</h2>
+          <ul class="footer-links"><li><a href="contact.html">Contact details not published</a></li></ul>
+        </section>
+        <p class="footer-note">Bunty is a prototype. Your data is used to carry out a request and is not collected through this site.</p>
       </div>
-      <div class="footer__col">
-        <p class="footer__heading">Legal</p>
-        <a href="privacy.html" class="footer__link">Privacy Policy</a>
-        <a href="terms.html" class="footer__link">Terms of Service</a>
-      </div>
-      <div class="footer__col">
-        <p class="footer__heading">Contact</p>
-        <a href="mailto:hello@example.com" class="footer__link">hello@example.com</a>
-        <span class="footer__link">+91 00000 00000</span>
-      </div>
-      <div class="footer__bottom">
-        <p>Bunty AI Assistant, San Francisco, USA. Prototype: not all features are available yet.</p>
-      </div>
+      <div class="footer-bottom"><span>Bunty · Prototype in development</span><span>India · 2026</span></div>
     </div>
   </footer>
-
-  <script>
-    (function() {
-      var btn = document.querySelector('.header__menu-btn');
-      var nav = document.querySelector('.header__nav');
-      if (!btn || !nav) return;
-      btn.addEventListener('click', function() {
-        var open = btn.getAttribute('aria-expanded') === 'true';
-        btn.setAttribute('aria-expanded', String(!open));
-        nav.classList.toggle('header__nav--open');
-      });
-    })();
-  </script>
 </body>
 </html>

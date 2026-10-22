@@ -1,16 +1,11 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Pricing - Bunty</title>
-  <meta name="description" content="Bunty pricing details. Currently free during testing phase, pricing announced later.">
-  <link rel="canonical" href="https://bunty.ai/pricing.html">
-  <meta property="og:title" content="Pricing - Bunty">
-  <meta property="og:description" content="Bunty is free during testing. Pricing will be announced later.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://bunty.ai/pricing.html">
-  <meta property="og:image" content="https://bunty.ai/og-image.png">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="Bunty pricing has not been decided. See current placeholders.">
+  <title>Pricing | Bunty</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="css/tokens.css">
   <link rel="stylesheet" href="css/reset.css">
@@ -19,94 +14,69 @@
   <link rel="stylesheet" href="css/pages.css">
 </head>
 <body>
-  <a href="#main" class="skip-link">Skip to main content</a>
-
-  <!-- Header -->
-  <header class="header" role="banner">
-    <div class="container header__inner">
-      <a href="/" class="header__wordmark" aria-label="Bunty home">Bunty</a>
-
-      <button class="header__menu-btn" aria-expanded="false" aria-controls="main-nav" aria-label="Open menu">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <line x1="3" y1="6" x2="21" y2="6"/>
-          <line x1="3" y1="12" x2="21" y2="12"/>
-          <line x1="3" y1="18" x2="21" y2="18"/>
-        </svg>
-      </button>
-
-      <nav class="header__nav" id="main-nav" aria-label="Main navigation">
-        <ul class="header__nav-list">
-          <li><a href="/#capabilities">What Bunty does</a></li>
-          <li><a href="/#how-it-works">How it works</a></li>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <a class="wordmark" href="index.html" aria-label="Bunty home">Bunty</a>
+      <nav class="site-nav" aria-label="Main navigation">
+        <ul class="site-nav__list">
+          <li><a href="index.html#tasks">What it does</a></li>
           <li><a href="scope.html">Scope</a></li>
           <li><a href="pricing.html" aria-current="page">Pricing</a></li>
+          <li><a href="onboarding.html">How to start</a></li>
           <li><a href="about.html">About us</a></li>
+          <li><a href="contact.html">Contact</a></li>
         </ul>
       </nav>
-
-      <div class="header__actions">
-        <a href="https://wa.me/910000000000" class="btn btn--primary btn--sm header__cta">Chat on WhatsApp</a>
-      </div>
+      <p class="header-note">Prototype<br>India</p>
     </div>
   </header>
-
   <main id="main">
-    <div class="page-header">
-      <div class="container container--narrow">
-        <h1 class="page-header__title">Pricing</h1>
-        <p class="page-header__subtitle">Honest terms while Bunty is in development.</p>
+    <header class="page-intro">
+      <div class="container page-intro__grid">
+        <span class="section-number">01</span>
+        <div><h1>Pricing</h1><p>Prices have not been set. Values below are placeholders, not offers.</p></div>
       </div>
-    </div>
-
+    </header>
     <section class="section">
-      <div class="container container--narrow">
-        <div class="pricing-notice">
-          <h2 class="pricing-notice__title">Pricing announced later</h2>
-          <p class="pricing-notice__text">Bunty is entirely free during our current prototype and testing period. Everyone invited to test the assistant receives full access to all available capabilities at no cost.</p>
-          <p class="pricing-notice__text" style="margin-top: 1rem;">Pricing details and plans for our public launch will be announced on this page. If you have questions about testing or would like to be notified when pricing is confirmed, please <a href="contact.html">reach out to us</a>.</p>
+      <div class="container grid-12">
+        <div class="section-heading">
+          <span class="section-number">02</span>
+          <h2 class="section-title">Price list · draft</h2>
+        </div>
+        <div class="task-table-wrap" role="region" aria-label="Draft pricing table" tabindex="0">
+          <table class="status-table pricing-table">
+            <thead><tr><th scope="col">Item</th><th scope="col">Price</th><th scope="col">Status</th></tr></thead>
+            <tbody>
+              <tr><th class="status-table__name" scope="row">Prototype access</th><td>[TBD]</td><td class="status-table__status">Not set</td></tr>
+              <tr><th class="status-table__name" scope="row">Monthly service</th><td>[TBD]</td><td class="status-table__status">Not set</td></tr>
+              <tr><th class="status-table__name" scope="row">Phone call charges</th><td>[TBD]</td><td class="status-table__status">Not set</td></tr>
+              <tr><th class="status-table__name" scope="row">Third-party service charges</th><td>[TBD]</td><td class="status-table__status">Not set</td></tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </section>
   </main>
-
-  <!-- Footer -->
-  <footer class="footer" role="contentinfo">
-    <div class="container footer__inner">
-      <div class="footer__col">
-        <p class="footer__heading">Pages</p>
-        <a href="about.html" class="footer__link">About us</a>
-        <a href="scope.html" class="footer__link">Scope</a>
-        <a href="pricing.html" class="footer__link">Pricing</a>
-        <a href="contact.html" class="footer__link">Contact us</a>
-        <a href="onboarding.html" class="footer__link">How to start</a>
+  <footer class="site-footer">
+    <div class="container">
+      <div class="site-footer__grid">
+        <section class="footer-group" aria-labelledby="footer-pages">
+          <h2 id="footer-pages">Pages</h2>
+          <ul class="footer-links"><li><a href="about.html">About us</a></li><li><a href="scope.html">Scope</a></li><li><a href="pricing.html">Pricing</a></li><li><a href="onboarding.html">How to start</a></li><li><a href="contact.html">Contact</a></li></ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-legal">
+          <h2 id="footer-legal">Legal drafts</h2>
+          <ul class="footer-links"><li><a href="privacy.html">Privacy policy</a></li><li><a href="terms.html">Terms of service</a></li></ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-contact">
+          <h2 id="footer-contact">Contact</h2>
+          <ul class="footer-links"><li><a href="contact.html">Contact details not published</a></li></ul>
+        </section>
+        <p class="footer-note">Bunty is a prototype. Your data is used to carry out a request and is not collected through this site.</p>
       </div>
-      <div class="footer__col">
-        <p class="footer__heading">Legal</p>
-        <a href="privacy.html" class="footer__link">Privacy Policy</a>
-        <a href="terms.html" class="footer__link">Terms of Service</a>
-      </div>
-      <div class="footer__col">
-        <p class="footer__heading">Contact</p>
-        <a href="mailto:hello@example.com" class="footer__link">hello@example.com</a>
-        <span class="footer__link">+91 00000 00000</span>
-      </div>
-      <div class="footer__bottom">
-        <p>Bunty AI Assistant, San Francisco, USA. Prototype: not all features are available yet.</p>
-      </div>
+      <div class="footer-bottom"><span>Bunty · Prototype in development</span><span>India · 2026</span></div>
     </div>
   </footer>
-
-  <script>
-    (function() {
-      var btn = document.querySelector('.header__menu-btn');
-      var nav = document.querySelector('.header__nav');
-      if (!btn || !nav) return;
-      btn.addEventListener('click', function() {
-        var open = btn.getAttribute('aria-expanded') === 'true';
-        btn.setAttribute('aria-expanded', String(!open));
-        nav.classList.toggle('header__nav--open');
-      });
-    })();
-  </script>
 </body>
 </html>

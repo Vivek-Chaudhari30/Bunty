@@ -20,7 +20,7 @@ Stage: **prototype**, built on the open-source [Vellum assistant](https://github
 | Phone calls | Not started |
 | Google (Gmail, Calendar) via Composio | Not started |
 | Zomato and Swiggy | Not started |
-| Website | Built ([Live preview](https://website-seven-xi-36.vercel.app)) |
+| Website | Static redesign complete; public preview is not configured |
 
 ## How it works (prototype)
 
@@ -34,7 +34,7 @@ flowchart LR
     G --> A[Vellum assistant<br/>Claude + memory + reminders]
     A --> I[integrations/<br/>one plugin per app]
     I --> X[Composio, Zomato, Swiggy ...]
-    S[website/] -.->|Call / WhatsApp buttons| U
+    S[website/] -.->|Service links when configured| U
 ```
 
 - Each tester gets their own Vellum assistant (one owner per assistant).
@@ -101,12 +101,12 @@ Each integration's own README lists the secrets it needs and how to test it.
 
 ### 4. Website
 
-Live preview: https://website-seven-xi-36.vercel.app
-
 ```bash
 cd website
 python3 -m http.server 8080   # open http://localhost:8080
 ```
+
+Deploy `website/` as the Cloudflare Pages root. Public contact links and indexing stay disabled until the phone/WhatsApp numbers and domain are confirmed.
 
 ### Phone calls and WhatsApp
 

@@ -1,16 +1,11 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bunty - Your personal assistant on a phone call or WhatsApp</title>
-  <meta name="description" content="Bunty is a personal assistant you reach by phone call or WhatsApp. Set reminders, send messages, book appointments, order food. No app needed. Hindi, English, Hinglish, Gujarati.">
-  <link rel="canonical" href="https://bunty.ai/">
-  <meta property="og:title" content="Bunty - Your personal assistant on a phone call or WhatsApp">
-  <meta property="og:description" content="Set reminders, send messages, book appointments, order food. No app to download.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://bunty.ai/">
-  <meta property="og:image" content="https://bunty.ai/og-image.png">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="Bunty is a personal assistant designed for phone calls and WhatsApp.">
+  <title>Bunty | A personal assistant by phone or WhatsApp</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="css/tokens.css">
   <link rel="stylesheet" href="css/reset.css">
@@ -19,432 +14,295 @@
   <link rel="stylesheet" href="css/pages.css">
 </head>
 <body>
-  <a href="#main" class="skip-link">Skip to main content</a>
-
-  <!-- Header -->
-  <header class="header" role="banner">
-    <div class="container header__inner">
-      <a href="/" class="header__wordmark" aria-label="Bunty home">Bunty</a>
-
-      <button class="header__menu-btn" aria-expanded="false" aria-controls="main-nav" aria-label="Open menu">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <line x1="3" y1="6" x2="21" y2="6"/>
-          <line x1="3" y1="12" x2="21" y2="12"/>
-          <line x1="3" y1="18" x2="21" y2="18"/>
-        </svg>
-      </button>
-
-      <nav class="header__nav" id="main-nav" aria-label="Main navigation">
-        <ul class="header__nav-list">
-          <li><a href="#capabilities" data-i18n="nav.capabilities">What Bunty does</a></li>
-          <li><a href="#how-it-works" data-i18n="nav.how">How it works</a></li>
-          <li><a href="scope.html" data-i18n="nav.scope">Scope</a></li>
-          <li><a href="pricing.html" data-i18n="nav.pricing">Pricing</a></li>
-          <li><a href="about.html" data-i18n="nav.about">About us</a></li>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <a class="wordmark" href="index.html" aria-label="Bunty home">Bunty</a>
+      <nav class="site-nav" aria-label="Main navigation">
+        <ul class="site-nav__list">
+          <li><a href="#tasks" aria-current="page">What it does</a></li>
+          <li><a href="scope.html">Scope</a></li>
+          <li><a href="pricing.html">Pricing</a></li>
+          <li><a href="onboarding.html">How to start</a></li>
+          <li><a href="about.html">About us</a></li>
+          <li><a href="contact.html">Contact</a></li>
         </ul>
       </nav>
-
-      <div class="header__actions">
-        <div class="lang-switcher" role="group" aria-label="Language">
-          <button class="lang-switcher__btn lang-switcher__btn--active" data-lang="en" aria-pressed="true">EN</button>
-          <button class="lang-switcher__btn" data-lang="hi" aria-pressed="false">हिन्दी</button>
-          <button class="lang-switcher__btn" data-lang="gu" aria-pressed="false">ગુજરાતી</button>
-        </div>
-        <a href="https://wa.me/910000000000" class="btn btn--primary btn--sm header__cta" data-i18n="nav.cta">Chat on WhatsApp</a>
-      </div>
+      <p class="header-note">Prototype<br>India</p>
     </div>
   </header>
 
   <main id="main">
-
-    <!-- Section 1: Hero -->
-    <section class="hero" aria-labelledby="hero-heading">
-      <div class="container hero__inner">
-        <div class="hero__content">
-          <h1 id="hero-heading" class="hero__headline" data-i18n="hero.headline">Bunty is your personal assistant on a phone call or WhatsApp.</h1>
-          <p class="hero__subtext" data-i18n="hero.subtext">Set reminders, send messages, make calls, book appointments, order food. No app to download. Works in Hindi, English, Hinglish and Gujarati.</p>
-          <div class="hero__actions">
-            <a href="https://wa.me/910000000000" class="btn btn--primary">
-              <svg class="btn__icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                <path d="M10 1.5A8.5 8.5 0 0 0 2.6 14l-1.1 4 4.1-1.1A8.5 8.5 0 1 0 10 1.5Z" stroke="currentColor" stroke-width="1.5"/>
-                <path d="M7 8.5c.3.9.8 1.7 1.5 2.3.7.7 1.5 1.1 2.3 1.3l.7-.9c.2-.2.4-.2.6-.1l1.4.8c.2.1.3.3.3.5 0 .6-.3 1.1-.7 1.4-.5.3-1 .4-1.6.3a7 7 0 0 1-3.2-1.7A7 7 0 0 1 6.6 9c-.1-.6 0-1.1.3-1.6.3-.4.8-.7 1.4-.7.2 0 .4.1.5.3l.8 1.4c.1.2.1.4-.1.6L7 8.5Z" fill="currentColor"/>
-              </svg>
-              <span data-i18n="hero.cta_whatsapp">Chat on WhatsApp</span>
-            </a>
-            <div class="hero__call">
-              <a href="tel:+910000000000" class="btn btn--secondary">
-                <svg class="btn__icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                  <path d="M4.3 2.7C4.5 2.3 5 2 5.5 2c.3 0 .5.1.7.3l2 2.5c.2.3.2.6 0 .9L7 7.3c-.1.2-.1.4 0 .5.6 1.2 1.3 2.2 2.2 3 .8.9 1.8 1.6 3 2.2.1.1.3.1.5 0l1.6-1.2c.3-.2.6-.2.9 0l2.5 2c.2.2.3.4.3.7 0 .5-.3 1-.7 1.2l-1.7 1c-.8.5-1.8.5-2.7.2A15 15 0 0 1 6 9.2a15 15 0 0 1-2.7-6c-.3-.9-.3-1.9.2-2.7l1-1.7Z" stroke="currentColor" stroke-width="1.5"/>
-                </svg>
-                <span data-i18n="hero.cta_call">Call Bunty</span>
-              </a>
-              <span class="hero__phone" data-i18n="config.phone_number">+91 00000 00000</span>
-            </div>
+    <section class="hero">
+      <div class="container grid-12">
+        <div class="hero__copy">
+          <p class="eyebrow">A phone line that gets things done</p>
+          <h1>A personal assistant, by call or WhatsApp.</h1>
+          <p class="hero__description">Bunty is designed to remember what you share, help with everyday tasks, and confirm completion on WhatsApp.</p>
+          <div class="button-row hero__actions" aria-label="Ways to reach Bunty">
+            <button class="button button--primary" type="button" disabled aria-describedby="contact-status">Chat on WhatsApp</button>
+            <button class="button" type="button" disabled aria-describedby="contact-status">Call Bunty</button>
           </div>
-          <div class="qr-placeholder" aria-label="QR code to chat on WhatsApp">
-            <div class="qr-placeholder__box">
-              <span class="qr-placeholder__text">QR code: scan to chat on WhatsApp</span>
+          <p class="hero__availability" id="contact-status">The phone and WhatsApp lines are not configured yet.</p>
+          <div class="hero__qr">
+            <div class="qr-placeholder" role="img" aria-label="WhatsApp QR code not available yet">
+              <p class="meta">WhatsApp QR</p>
+              <p>Available when the service number is set.</p>
             </div>
           </div>
         </div>
+
         <div class="hero__demo">
-          <!-- Demo: WhatsApp-style conversation panel -->
-          <div class="demo" aria-label="Example conversation showing how Bunty works">
-            <p class="demo__label">Example conversation</p>
+          <div class="artifact-grid" aria-label="Example request shown as a WhatsApp conversation and a call transcript">
+            <article class="artifact">
+              <header class="artifact__head">
+                <h2>WhatsApp thread</h2>
+                <span class="meta">Example 01</span>
+              </header>
+              <div class="artifact__body">
+                <div class="message">
+                  <span class="message__meta">You · 10:14</span>
+                  <p lang="hi-Latn">Doctor appointment book kar do, Dr. Sharma ke paas Thursday 11 baje.</p>
+                </div>
+                <div class="message message--assistant">
+                  <span class="message__meta">Bunty · 10:15</span>
+                  <p>Dr. Sharma, Thursday at 11:00. Shall I book it?</p>
+                </div>
+                <div class="message">
+                  <span class="message__meta">You · 10:15</span>
+                  <p>Haan, book kar do.</p>
+                </div>
+                <div class="message message--assistant message--confirmation">
+                  <span class="message__meta">Bunty · 10:15</span>
+                  <p>Done: Dr. Sharma, Thu 11:00</p>
+                  <span class="confirmation-mark">Confirmed after your yes</span>
+                </div>
+              </div>
+            </article>
 
-            <div class="demo__tabs" role="tablist" aria-label="Conversation format">
-              <button class="demo__tab demo__tab--active" role="tab" aria-selected="true" data-demo-mode="chat" id="tab-chat" aria-controls="panel-chat">Chat</button>
-              <button class="demo__tab" role="tab" aria-selected="false" data-demo-mode="call" id="tab-call" aria-controls="panel-call">Call transcript</button>
-            </div>
-
-            <div class="demo__lang-tabs" role="tablist" aria-label="Conversation language">
-              <button class="demo__lang-tab demo__lang-tab--active" role="tab" aria-selected="true" data-demo-lang="en" id="ltab-en" aria-controls="conv-chat-en">English</button>
-              <button class="demo__lang-tab" role="tab" aria-selected="false" data-demo-lang="hi" id="ltab-hi" aria-controls="conv-chat-hi">Hinglish</button>
-              <button class="demo__lang-tab" role="tab" aria-selected="false" data-demo-lang="gu" id="ltab-gu" aria-controls="conv-chat-gu">Gujarati</button>
-            </div>
-
-            <!-- Chat - English (default, visible without JS) -->
-            <div class="demo__conversation" role="tabpanel" id="conv-chat-en" data-demo-mode="chat" data-demo-lang="en" aria-labelledby="tab-chat ltab-en">
-              <div class="demo__message demo__message--user">
-                <p class="demo__sender">You</p>
-                <p>Remind me to take my medicine tomorrow at 8 am.</p>
+            <article class="artifact">
+              <header class="artifact__head">
+                <h2>Call transcript</h2>
+                <span class="meta">Same request</span>
+              </header>
+              <div class="artifact__body transcript">
+                <div class="transcript-line">
+                  <time class="transcript-line__time" datetime="PT0S">00:00</time>
+                  <div>
+                    <span class="transcript-line__speaker">You</span>
+                    <p lang="hi-Latn">Doctor appointment book kar do, Dr. Sharma ke paas Thursday 11 baje.</p>
+                  </div>
+                </div>
+                <div class="transcript-line">
+                  <time class="transcript-line__time" datetime="PT5S">00:05</time>
+                  <div>
+                    <span class="transcript-line__speaker">Bunty</span>
+                    <p>Dr. Sharma, Thursday at 11:00. Shall I book it?</p>
+                  </div>
+                </div>
+                <div class="transcript-line">
+                  <time class="transcript-line__time" datetime="PT9S">00:09</time>
+                  <div>
+                    <span class="transcript-line__speaker">You</span>
+                    <p>Yes, book it.</p>
+                  </div>
+                </div>
+                <div class="transcript-line">
+                  <time class="transcript-line__time" datetime="PT11S">00:11</time>
+                  <div>
+                    <span class="transcript-line__speaker">Bunty</span>
+                    <p>Done: Dr. Sharma, Thu 11:00</p>
+                  </div>
+                </div>
               </div>
-              <div class="demo__message demo__message--bunty">
-                <p class="demo__sender">Bunty</p>
-                <p>Reminder for tomorrow, 8:00 am: medicine. Shall I set it? Say yes to confirm.</p>
-              </div>
-              <div class="demo__message demo__message--user">
-                <p class="demo__sender">You</p>
-                <p>Yes.</p>
-              </div>
-              <div class="demo__message demo__message--bunty">
-                <p class="demo__sender">Bunty</p>
-                <p>Done. Medicine reminder set for tomorrow, 8:00 am.</p>
-              </div>
-            </div>
-
-            <!-- Chat - Hinglish -->
-            <div class="demo__conversation" role="tabpanel" id="conv-chat-hi" data-demo-mode="chat" data-demo-lang="hi" aria-labelledby="tab-chat ltab-hi" hidden>
-              <div class="demo__message demo__message--user">
-                <p class="demo__sender">You</p>
-                <p>Kal subah 8 baje medicine ki reminder laga do.</p>
-              </div>
-              <div class="demo__message demo__message--bunty">
-                <p class="demo__sender">Bunty</p>
-                <p>Reminder kal subah 8:00 baje: medicine. Set kar doon? Haan bolo confirm karne ke liye.</p>
-              </div>
-              <div class="demo__message demo__message--user">
-                <p class="demo__sender">You</p>
-                <p>Haan.</p>
-              </div>
-              <div class="demo__message demo__message--bunty">
-                <p class="demo__sender">Bunty</p>
-                <p>Ho gaya. Medicine reminder set hai kal subah 8:00 baje ke liye.</p>
-              </div>
-            </div>
-
-            <!-- Chat - Gujarati -->
-            <div class="demo__conversation" role="tabpanel" id="conv-chat-gu" data-demo-mode="chat" data-demo-lang="gu" aria-labelledby="tab-chat ltab-gu" hidden>
-              <div class="demo__message demo__message--user" lang="gu">
-                <p class="demo__sender">You</p>
-                <p>કાલે સવારે 8 વાગ્યે દવાની રીમાઇન્ડર મૂકો.</p>
-              </div>
-              <div class="demo__message demo__message--bunty" lang="gu">
-                <p class="demo__sender">Bunty</p>
-                <p>રીમાઇન્ડર કાલે સવારે 8:00 વાગ્યે: દવા. સેટ કરું? હા કહો.</p>
-              </div>
-              <div class="demo__message demo__message--user" lang="gu">
-                <p class="demo__sender">You</p>
-                <p>હા.</p>
-              </div>
-              <div class="demo__message demo__message--bunty" lang="gu">
-                <p class="demo__sender">Bunty</p>
-                <p>થઈ ગયું. દવાની રીમાઇન્ડર કાલે સવારે 8:00 વાગ્યે સેટ છે.</p>
-              </div>
-            </div>
-
-            <!-- Call transcript - English -->
-            <div class="demo__conversation" role="tabpanel" id="conv-call-en" data-demo-mode="call" data-demo-lang="en" aria-labelledby="tab-call ltab-en" hidden>
-              <div class="demo__message demo__message--user">
-                <p class="demo__sender">You</p>
-                <p>Remind me to take my medicine tomorrow at 8 am.</p>
-              </div>
-              <div class="demo__message demo__message--bunty">
-                <p class="demo__sender">Bunty</p>
-                <p>Sure. I will set a reminder for tomorrow at 8 am for medicine. Should I go ahead?</p>
-              </div>
-              <div class="demo__message demo__message--user">
-                <p class="demo__sender">You</p>
-                <p>Yes, go ahead.</p>
-              </div>
-              <div class="demo__message demo__message--bunty">
-                <p class="demo__sender">Bunty</p>
-                <p>Done. Your medicine reminder is set for tomorrow at 8 am. I will send you a message on WhatsApp when it is time.</p>
-              </div>
-            </div>
-
-            <!-- Call transcript - Hinglish -->
-            <div class="demo__conversation" role="tabpanel" id="conv-call-hi" data-demo-mode="call" data-demo-lang="hi" aria-labelledby="tab-call ltab-hi" hidden>
-              <div class="demo__message demo__message--user">
-                <p class="demo__sender">You</p>
-                <p>Kal subah 8 baje medicine ki reminder laga do.</p>
-              </div>
-              <div class="demo__message demo__message--bunty">
-                <p class="demo__sender">Bunty</p>
-                <p>Theek hai. Kal subah 8 baje medicine ki reminder set karunga. Kar doon?</p>
-              </div>
-              <div class="demo__message demo__message--user">
-                <p class="demo__sender">You</p>
-                <p>Haan, kar do.</p>
-              </div>
-              <div class="demo__message demo__message--bunty">
-                <p class="demo__sender">Bunty</p>
-                <p>Ho gaya. Medicine reminder kal subah 8 baje set hai. Time hone par WhatsApp par message bhejunga.</p>
-              </div>
-            </div>
-
-            <!-- Call transcript - Gujarati -->
-            <div class="demo__conversation" role="tabpanel" id="conv-call-gu" data-demo-mode="call" data-demo-lang="gu" aria-labelledby="tab-call ltab-gu" hidden>
-              <div class="demo__message demo__message--user" lang="gu">
-                <p class="demo__sender">You</p>
-                <p>કાલે સવારે 8 વાગ્યે દવાની રીમાઇન્ડર મૂકો.</p>
-              </div>
-              <div class="demo__message demo__message--bunty" lang="gu">
-                <p class="demo__sender">Bunty</p>
-                <p>ભલે. કાલે સવારે 8 વાગ્યે દવાની રીમાઇન્ડર સેટ કરું. કરું?</p>
-              </div>
-              <div class="demo__message demo__message--user" lang="gu">
-                <p class="demo__sender">You</p>
-                <p>હા, કરો.</p>
-              </div>
-              <div class="demo__message demo__message--bunty" lang="gu">
-                <p class="demo__sender">Bunty</p>
-                <p>થઈ ગયું. દવાની રીમાઇન્ડર કાલે સવારે 8 વાગ્યે સેટ છે. સમય થશે ત્યારે WhatsApp પર મેસેજ મોકલીશ.</p>
-              </div>
-            </div>
-
+            </article>
+            <p class="artifact-grid__note">Illustrative example only. No appointment is being made.</p>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- Section 2: What Bunty can do -->
-    <section class="capabilities" id="capabilities" aria-labelledby="cap-heading">
-      <div class="container">
-        <h2 id="cap-heading" class="capabilities__heading" data-i18n="capabilities.heading">What Bunty can do</h2>
-        <div class="capabilities__list">
-
-          <div class="capability">
-            <h3 class="capability__name" data-i18n="capabilities.reminders.name">Reminders</h3>
-            <p class="capability__desc" data-i18n="capabilities.reminders.desc">Tell Bunty to remind you about anything, at any time. It confirms on WhatsApp when the reminder is set and again when it is due.</p>
-            <span class="status-label capability__status" data-i18n="capabilities.reminders.status">Coming next</span>
+    <section class="section" id="how-it-works" aria-labelledby="flow-title">
+      <div class="container grid-12">
+        <div class="section-heading">
+          <span class="section-number">01</span>
+          <h2 class="section-title" id="flow-title">A request, checked before action.</h2>
+        </div>
+        <div class="flow-intro">
+          <div class="flow-labels" aria-label="Responsibility key">
+            <span>AI interprets and replies</span>
+            <span>Code checks and acts</span>
           </div>
+        </div>
+        <ol class="flow-diagram" aria-label="Hear, identify, understand, check rules, do and reply">
+          <li class="flow-step">
+            <span class="flow-step__number">01</span>
+            <span class="flow-step__name">Hear</span>
+            <span class="flow-step__owner">AI</span>
+          </li>
+          <li class="flow-step">
+            <span class="flow-step__number">02</span>
+            <span class="flow-step__name">Identify</span>
+            <span class="flow-step__owner">AI</span>
+          </li>
+          <li class="flow-step">
+            <span class="flow-step__number">03</span>
+            <span class="flow-step__name">Understand</span>
+            <span class="flow-step__owner">AI</span>
+          </li>
+          <li class="flow-step">
+            <span class="flow-step__number">04</span>
+            <span class="flow-step__name">Check rules</span>
+            <span class="flow-step__owner">Code</span>
+          </li>
+          <li class="flow-step">
+            <span class="flow-step__number">05</span>
+            <span class="flow-step__name">Do and reply</span>
+            <span class="flow-step__owner">Code + AI</span>
+          </li>
+        </ol>
+        <p class="flow-legend">The service is intended to match your phone number to your assistant. AI can understand and suggest. Code checks permissions and your confirmation before carrying out a task. The AI never has the final say on money, bookings, or changes to your data.</p>
+      </div>
+    </section>
 
-          <div class="capability">
-            <h3 class="capability__name" data-i18n="capabilities.messages.name">Messages and calls</h3>
-            <p class="capability__desc" data-i18n="capabilities.messages.desc">Ask Bunty to send a message or make a call to someone in your contacts. Bunty reads back what it will send, and waits for your "yes".</p>
-            <span class="status-label capability__status" data-i18n="capabilities.messages.status">Coming next</span>
-          </div>
-
-          <div class="capability">
-            <h3 class="capability__name" data-i18n="capabilities.appointments.name">Appointments</h3>
-            <p class="capability__desc" data-i18n="capabilities.appointments.desc">Tell Bunty to book an appointment. It calls the place, finds a time, and confirms with you before booking.</p>
-            <span class="status-label capability__status" data-i18n="capabilities.appointments.status">Coming next</span>
-          </div>
-
-          <div class="capability">
-            <h3 class="capability__name" data-i18n="capabilities.food.name">Food orders</h3>
-            <p class="capability__desc" data-i18n="capabilities.food.desc">Tell Bunty what you want to eat. It finds options, reads them to you, and places the order after you say yes.</p>
-            <span class="status-label capability__status" data-i18n="capabilities.food.status">Coming next</span>
-          </div>
-
-          <div class="capability">
-            <h3 class="capability__name" data-i18n="capabilities.google.name">Gmail and Calendar</h3>
-            <p class="capability__desc" data-i18n="capabilities.google.desc">Bunty reads your new emails, replies on your behalf, and adds events to your Google Calendar. Requires one-time Google sign-in through Composio.</p>
-            <span class="status-label capability__status" data-i18n="capabilities.google.status">Coming next</span>
-          </div>
-
+    <section class="section" id="tasks" aria-labelledby="tasks-title">
+      <div class="container grid-12">
+        <div class="section-heading">
+          <span class="section-number">02</span>
+          <h2 class="section-title" id="tasks-title">Tasks in the prototype plan.</h2>
+        </div>
+        <p class="section-copy">The assistant is in development. These tasks are not available to the public yet.</p>
+        <div class="task-table-wrap" role="region" aria-label="Task availability table" tabindex="0">
+          <table class="status-table">
+            <thead>
+              <tr>
+                <th class="status-table__number" scope="col">No.</th>
+                <th scope="col">Task</th>
+                <th scope="col">What it is for</th>
+                <th class="status-table__status" scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="status-table__number">01</td>
+                <th class="status-table__name" scope="row">Reminders</th>
+                <td>Set a reminder by speaking or sending a WhatsApp message.</td>
+                <td class="status-table__status">Planned</td>
+              </tr>
+              <tr>
+                <td class="status-table__number">02</td>
+                <th class="status-table__name" scope="row">Messages</th>
+                <td>Prepare a message, read it back, then send after your confirmation.</td>
+                <td class="status-table__status">Planned</td>
+              </tr>
+              <tr>
+                <td class="status-table__number">03</td>
+                <th class="status-table__name" scope="row">Phone calls</th>
+                <td>Call someone on your behalf and identify itself as an AI.</td>
+                <td class="status-table__status">Planned</td>
+              </tr>
+              <tr>
+                <td class="status-table__number">04</td>
+                <th class="status-table__name" scope="row">Appointments</th>
+                <td>Check a time and ask you before making a booking.</td>
+                <td class="status-table__status">Planned</td>
+              </tr>
+              <tr>
+                <td class="status-table__number">05</td>
+                <th class="status-table__name" scope="row">Google data</th>
+                <td>Help with Gmail and Calendar after you connect an account.</td>
+                <td class="status-table__status">Planned</td>
+              </tr>
+              <tr>
+                <td class="status-table__number">06</td>
+                <th class="status-table__name" scope="row">Food orders</th>
+                <td>Prepare an order and ask before placing it.</td>
+                <td class="status-table__status">Planned</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </section>
 
-    <!-- Section 3: How it works -->
-    <section class="steps" id="how-it-works" aria-labelledby="steps-heading">
-      <div class="container">
-        <h2 id="steps-heading" class="steps__heading" data-i18n="steps.heading">How it works</h2>
-        <div class="steps__list">
-
-          <div class="step">
-            <span class="step__number" aria-hidden="true">1</span>
-            <div class="step__content">
-              <h3 class="step__title" data-i18n="steps.s1.title">You ask by call or WhatsApp.</h3>
-              <p class="step__desc" data-i18n="steps.s1.desc">Tell Bunty what you need, in your own words, in any of the four supported languages.</p>
-            </div>
+    <section class="section" aria-labelledby="language-title">
+      <div class="container grid-12">
+        <div class="section-heading">
+          <span class="section-number">03</span>
+          <h2 class="section-title" id="language-title">Use your own words.</h2>
+        </div>
+        <div class="language-list">
+          <div class="language-sample">
+            <span class="language-sample__label">English</span>
+            <p class="language-sample__text">Remind me to take my medicine tomorrow at 8 am.</p>
           </div>
-
-          <div class="step">
-            <span class="step__number" aria-hidden="true">2</span>
-            <div class="step__content">
-              <h3 class="step__title" data-i18n="steps.s2.title">Bunty reads it back.</h3>
-              <p class="step__desc" data-i18n="steps.s2.desc">Before doing anything, Bunty repeats what it understood and asks you to confirm.</p>
-            </div>
+          <div class="language-sample">
+            <span class="language-sample__label">Hinglish</span>
+            <p class="language-sample__text" lang="hi-Latn">Kal subah 8 baje medicine ki reminder laga do.</p>
           </div>
-
-          <div class="step">
-            <span class="step__number" aria-hidden="true">3</span>
-            <div class="step__content">
-              <h3 class="step__title" data-i18n="steps.s3.title">You say yes.</h3>
-              <p class="step__desc" data-i18n="steps.s3.desc">Nothing happens until you agree. Bunty never books, calls, messages or spends money on its own.</p>
-            </div>
+          <div class="language-sample">
+            <span class="language-sample__label">Hindi</span>
+            <p class="language-sample__text" lang="hi">कल सुबह 8 बजे दवाई की रिमाइंडर लगा दो।</p>
           </div>
-
-          <div class="step">
-            <span class="step__number" aria-hidden="true">4</span>
-            <div class="step__content">
-              <h3 class="step__title" data-i18n="steps.s4.title">Bunty does it and confirms on WhatsApp.</h3>
-              <p class="step__desc" data-i18n="steps.s4.desc">Once it is done, you get a confirmation message on WhatsApp with the details.</p>
-            </div>
+          <div class="language-sample">
+            <span class="language-sample__label">Gujarati</span>
+            <p class="language-sample__text" lang="gu">કાલે સવારે 8 વાગ્યે દવાની રીમાઇન્ડર મૂકો.</p>
           </div>
-
         </div>
       </div>
     </section>
 
-    <!-- Section 4: Languages -->
-    <section class="languages" id="languages" aria-labelledby="lang-heading">
-      <div class="container">
-        <h2 id="lang-heading" class="languages__heading" data-i18n="languages.heading">Works in your language</h2>
-        <div class="languages__list">
-          <div class="language-example">
-            <span class="language-example__label">English</span>
-            <p lang="en">"Remind me to take my medicine tomorrow at 8 am."</p>
-          </div>
-          <div class="language-example">
-            <span class="language-example__label">Hinglish</span>
-            <p>"Kal subah 8 baje medicine ki reminder laga do."</p>
-          </div>
-          <div class="language-example">
-            <span class="language-example__label">Hindi</span>
-            <p lang="hi">"कल सुबह 8 बजे दवाई की रिमाइंडर लगा दो।"</p>
-          </div>
-          <div class="language-example">
-            <span class="language-example__label">Gujarati</span>
-            <p lang="gu">"કાલે સવારે 8 વાગ્યે દવાની રીમાઇન્ડર મૂકો."</p>
-          </div>
+    <section class="section" aria-labelledby="start-title">
+      <div class="container grid-12">
+        <div class="section-heading">
+          <span class="section-number">04</span>
+          <h2 class="section-title" id="start-title">Start with a call or message.</h2>
         </div>
-        <p class="languages__note" data-i18n="languages.note">Bunty picks up your language from your first words. No settings to change.</p>
-      </div>
-    </section>
-
-    <!-- Section 5: You stay in control -->
-    <section class="trust" id="trust" aria-labelledby="trust-heading">
-      <div class="container">
-        <h2 id="trust-heading" class="trust__heading" data-i18n="trust.heading">You stay in control</h2>
-        <div class="trust__list">
-
-          <div class="trust__item">
-            <h3 class="trust__item-title" data-i18n="trust.ask.title">Bunty always asks first.</h3>
-            <p class="trust__item-desc" data-i18n="trust.ask.desc">Before it books, calls, messages or spends money, Bunty reads the task back and waits for your clear "yes".</p>
+        <div class="home-cta">
+          <p>Bunty is not connected to a public phone or WhatsApp number yet. No information is collected on this website.</p>
+          <div class="button-row" aria-label="Ways to reach Bunty">
+            <button class="button button--primary" type="button" disabled>Chat on WhatsApp</button>
+            <button class="button" type="button" disabled>Call Bunty</button>
           </div>
-
-          <div class="trust__item">
-            <h3 class="trust__item-title" data-i18n="trust.payments.title">Payments are yours to approve.</h3>
-            <p class="trust__item-desc" data-i18n="trust.payments.desc">Bunty never moves money on its own. When a payment is needed, you get a payment request and approve it with your own UPI PIN, in your UPI app or in WhatsApp.</p>
-          </div>
-
-          <div class="trust__item">
-            <h3 class="trust__item-title" data-i18n="trust.calls.title">Calls on your behalf are honest.</h3>
-            <p class="trust__item-desc" data-i18n="trust.calls.desc">When Bunty calls someone for you, it says it is an AI calling on your behalf.</p>
-          </div>
-
-          <div class="trust__item">
-            <h3 class="trust__item-title" data-i18n="trust.external.title">Outside text is information, not instructions.</h3>
-            <p class="trust__item-desc" data-i18n="trust.external.desc">Emails, web pages and what someone says on a call are treated as information for you. Bunty does not follow instructions from those sources.</p>
-          </div>
-
-          <div class="trust__item">
-            <h3 class="trust__item-title" data-i18n="trust.data.title">Your data belongs to you.</h3>
-            <p class="trust__item-desc">Recordings and data use need your consent, saved with the time. Say "delete my data" and everything is removed. <a href="privacy.html" data-i18n="trust.data.link">Read the Privacy Policy</a></p>
-          </div>
-
+          <p class="home-cta__note">QR code and contact buttons will be enabled when the service line is confirmed.</p>
         </div>
       </div>
     </section>
-
-    <!-- Section 6: Start now -->
-    <section class="cta" id="start" aria-labelledby="cta-heading">
-      <div class="container">
-        <h2 id="cta-heading" class="cta__heading" data-i18n="cta.heading">Start now</h2>
-        <div class="cta__actions">
-          <a href="https://wa.me/910000000000" class="btn btn--primary">
-            <svg class="btn__icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-              <path d="M10 1.5A8.5 8.5 0 0 0 2.6 14l-1.1 4 4.1-1.1A8.5 8.5 0 1 0 10 1.5Z" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M7 8.5c.3.9.8 1.7 1.5 2.3.7.7 1.5 1.1 2.3 1.3l.7-.9c.2-.2.4-.2.6-.1l1.4.8c.2.1.3.3.3.5 0 .6-.3 1.1-.7 1.4-.5.3-1 .4-1.6.3a7 7 0 0 1-3.2-1.7A7 7 0 0 1 6.6 9c-.1-.6 0-1.1.3-1.6.3-.4.8-.7 1.4-.7.2 0 .4.1.5.3l.8 1.4c.1.2.1.4-.1.6L7 8.5Z" fill="currentColor"/>
-            </svg>
-            <span data-i18n="cta.whatsapp">Chat on WhatsApp</span>
-          </a>
-          <div class="cta__call">
-            <a href="tel:+910000000000" class="btn btn--secondary">
-              <svg class="btn__icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                <path d="M4.3 2.7C4.5 2.3 5 2 5.5 2c.3 0 .5.1.7.3l2 2.5c.2.3.2.6 0 .9L7 7.3c-.1.2-.1.4 0 .5.6 1.2 1.3 2.2 2.2 3 .8.9 1.8 1.6 3 2.2.1.1.3.1.5 0l1.6-1.2c.3-.2.6-.2.9 0l2.5 2c.2.2.3.4.3.7 0 .5-.3 1-.7 1.2l-1.7 1c-.8.5-1.8.5-2.7.2A15 15 0 0 1 6 9.2a15 15 0 0 1-2.7-6c-.3-.9-.3-1.9.2-2.7l1-1.7Z" stroke="currentColor" stroke-width="1.5"/>
-              </svg>
-              <span data-i18n="cta.call">Call Bunty</span>
-            </a>
-            <span class="cta__phone" data-i18n="config.phone_number">+91 00000 00000</span>
-          </div>
-        </div>
-        <div class="qr-placeholder" aria-label="QR code to chat on WhatsApp">
-          <div class="qr-placeholder__box">
-            <span class="qr-placeholder__text">QR code: scan to chat on WhatsApp</span>
-          </div>
-        </div>
-        <p class="cta__note" data-i18n="cta.note">Bunty asks for a one-time code sent to your number, your name, and your consent. That is all. Nothing is typed on this website.</p>
-      </div>
-    </section>
-
   </main>
 
-  <!-- Footer -->
-  <footer class="footer" role="contentinfo">
-    <div class="container footer__inner">
-      <div class="footer__col">
-        <p class="footer__heading">Pages</p>
-        <a href="about.html" class="footer__link">About us</a>
-        <a href="scope.html" class="footer__link">Scope</a>
-        <a href="pricing.html" class="footer__link">Pricing</a>
-        <a href="contact.html" class="footer__link">Contact us</a>
-        <a href="onboarding.html" class="footer__link">How to start</a>
+  <footer class="site-footer">
+    <div class="container">
+      <div class="site-footer__grid">
+        <section class="footer-group" aria-labelledby="footer-pages">
+          <h2 id="footer-pages">Pages</h2>
+          <ul class="footer-links">
+            <li><a href="about.html">About us</a></li>
+            <li><a href="scope.html">Scope</a></li>
+            <li><a href="pricing.html">Pricing</a></li>
+            <li><a href="onboarding.html">How to start</a></li>
+            <li><a href="contact.html">Contact</a></li>
+          </ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-legal">
+          <h2 id="footer-legal">Legal drafts</h2>
+          <ul class="footer-links">
+            <li><a href="privacy.html">Privacy policy</a></li>
+            <li><a href="terms.html">Terms of service</a></li>
+          </ul>
+        </section>
+        <section class="footer-group" aria-labelledby="footer-contact">
+          <h2 id="footer-contact">Contact</h2>
+          <ul class="footer-links">
+            <li><a href="contact.html">Contact details not published</a></li>
+          </ul>
+        </section>
+        <p class="footer-note">Bunty is a prototype. Your data is used to carry out a request and is not collected through this site.</p>
       </div>
-      <div class="footer__col">
-        <p class="footer__heading">Legal</p>
-        <a href="privacy.html" class="footer__link">Privacy Policy</a>
-        <a href="terms.html" class="footer__link">Terms of Service</a>
-      </div>
-      <div class="footer__col">
-        <p class="footer__heading">Contact</p>
-        <a href="mailto:hello@example.com" class="footer__link" data-i18n="config.email">hello@example.com</a>
-        <span class="footer__link" data-i18n="config.phone_number">+91 00000 00000</span>
-      </div>
-      <div class="footer__bottom">
-        <p>Bunty AI Assistant, San Francisco, USA. Prototype: not all features are available yet.</p>
+      <div class="footer-bottom">
+        <span>Bunty · Prototype in development</span>
+        <span>India · 2026</span>
       </div>
     </div>
   </footer>
-
-  <script src="js/demo.js" defer></script>
-  <script src="js/lang.js" defer></script>
-  <script>
-    /* Mobile nav toggle */
-    (function() {
-      var btn = document.querySelector('.header__menu-btn');
-      var nav = document.querySelector('.header__nav');
-      if (!btn || !nav) return;
-      btn.addEventListener('click', function() {
-        var open = btn.getAttribute('aria-expanded') === 'true';
-        btn.setAttribute('aria-expanded', String(!open));
-        nav.classList.toggle('header__nav--open');
-      });
-    })();
-  </script>
 </body>
 </html>
