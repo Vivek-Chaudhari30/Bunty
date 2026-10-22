@@ -1,12 +1,11 @@
-# Copies only the contents of website/ onto the website-deploy branch whenever website/ changes
-# on main. Hostinger (hPanel, Advanced, GIT) deploys that branch into public_html.
-# README.md and _headers stay out; .htaccess goes in. Uses the built-in GITHUB_TOKEN, no secrets.
+# Copies only the contents of website/ onto the website-deploy branch.
+# Hostinger (hPanel > Advanced > GIT) deploys that branch into public_html.
 name: Website deploy branch
 
 on:
   push:
     branches: [main]
-    paths: ["website/**"]
+    paths: ["website/**", ".github/workflows/website-deploy.yml"]
   workflow_dispatch:
 
 permissions:
@@ -20,33 +19,37 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - name: Update the website-deploy branch
+      - name: Publish website/ to website-deploy
         run: |
           set -e
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          deploy="$RUNNER_TEMP/deploy"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Reuse the branch if it exists so Hostinger can pull it normally; otherwise start it empty.
-          if git ls-remote --exit-code --heads origin website-deploy > /dev/null; then
-            git fetch --depth 1 origin website-deploy
-            git worktree add -B website-deploy "$deploy" origin/website-deploy
+          # Keep a copy of the site before switching branches. README.md and _headers are not served.
+          SITE="$RUNNER_TEMP/site"
+          rm -rf "$SITE" && mkdir -p "$SITE"
+          cp -a website/. "$SITE/"
+          rm -f "$SITE/README.md" "$SITE/_headers"
+
+          # Switch to the deploy branch, or start it empty the first time.
+          if git ls-remote --exit-code --heads origin website-deploy >/dev/null; then
+            git checkout -B website-deploy origin/website-deploy
           else
-            git worktree add --detach "$deploy"
-            git -C "$deploy" checkout --orphan website-deploy
+            git checkout --orphan website-deploy
           fi
 
-          cd "$deploy"
-          git rm -rq --ignore-unmatch .
-          cp -R "$GITHUB_WORKSPACE/website/." .
-          rm -f README.md _headers
-
+          # Replace everything on the branch with the site files only.
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a "$SITE/." .
           git add -A
-          if git diff --cached --quiet; then
-            echo "website/ unchanged, nothing to publish"
+
+          if git rev-parse --verify -q HEAD >/dev/null && git diff --cached --quiet; then
+            echo "Website unchanged, nothing to deploy."
             exit 0
           fi
-          git commit -q -m "Deploy website from $GITHUB_SHA"
+          git commit -m "Deploy website from ${GITHUB_SHA::7}"
           git push origin website-deploy
