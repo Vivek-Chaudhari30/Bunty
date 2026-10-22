@@ -1,0 +1,11 @@
+{
+  "name": "reach-contact",
+  "version": "0.0.1",
+  "private": true,
+  "displayName": "Reach a contact",
+  "description": "Call, WhatsApp or message someone's assistant for the owner, after reading the plan back and getting a yes.",
+  "peerDependencies": {
+    "@vellumai/plugin-api": "^0.8.0"
+  },
+  "vellum": {}
+}

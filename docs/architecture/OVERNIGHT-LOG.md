@@ -137,3 +137,36 @@ stored via the `twilio-setup` skill), `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` +
 `ANTHROPIC_API_KEY`, a public URL. Then guardian phone verification and the 10 test calls.
 
 **`vellum/` edits:** none.
+
+**Incident (Phase 4):** commit `86e4522` was pushed to `overnight/phases` with a typecheck error
+(tests passed). My commit command chained on `grep`, not on the check's exit code. Fixed in the
+next commit (`ae62c23`). From then on every phase ships through `infra/ship-phase.sh`, which
+commits and pushes only when `bun run check` passes. `main` was never touched.
+
+## Phase 5: integrations/reach-contact
+
+**Built:** the `reach-contact` plugin.
+- `reach_contact_plan` (low risk, owner only): picks the route (call, WhatsApp, A2A note, A2A task)
+  with `src/route-policy.ts`, refuses emergency/helpline numbers (Vellum's list plus India's 100,
+  101, 102, 108, 1091, 1098), saves the plan and returns the read-back for the owner.
+- `reach_contact` (high risk, owner only): sends only an approved plan. Checks
+  `ctx.approvedViaPrompt` (D-09), one-time use, 30-minute expiry, and a digest so the words cannot
+  change after approval. Tells the router about non-users (`/outbound-hint`, signed). Returns the
+  exact Vellum tool call to make (plugins cannot call Vellum tools directly).
+- `skills/reach-contact/SKILL.md`: the steps and wording rules.
+
+**Files touched:** `integrations/reach-contact/**`, `.env.example` (`BUNTY_ASSISTANT_ID`,
+`BUNTY_ROUTER_URL`), `README.md`.
+
+**Tests:** 22 new. `bun run check`: 67 pass, 0 fail.
+
+**Decisions taken:** two tools (plan, then send) so the owner approves a fixed plan; text to a
+Bunty user goes A2A or is refused until paired (D-05). Known friction: `call_start` and
+`messaging_send` have their own Vellum prompts, so the owner may approve twice. Template messages
+for first WhatsApp contact (outside the 24 h window) are not built: they need an approved Meta
+template, which needs a Meta account.
+
+**Needs real keys:** everything Phase 2 and 4 need, plus `BUNTY_ROUTER_URL` and
+`ROUTER_INTERNAL_HMAC_KEY` in each assistant with `BUNTY_ADAPTERS=real`.
+
+**`vellum/` edits:** none.

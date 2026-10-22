@@ -21,7 +21,7 @@ Stage: **prototype**, built on the open-source [Vellum assistant](https://github
 | Google (Gmail, Calendar) via Composio | Not started |
 | Zomato and Swiggy | Not started |
 | Shared-number router | Built and tested with mocks (`backend/router`); live needs Meta + Twilio |
-| Reach a contact (call / text / tell) | Not started |
+| Reach a contact (call / text / tell) | Plugin built and tested with mocks (`integrations/reach-contact`); live needs calls + WhatsApp |
 | Assistant-to-assistant (notes, tasks) | Not started |
 | Website | Built ([Live preview](https://website-seven-xi-36.vercel.app)) |
 
