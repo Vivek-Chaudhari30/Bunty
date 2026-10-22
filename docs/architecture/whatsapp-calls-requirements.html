@@ -1,0 +1,290 @@
+<title>WhatsApp and Calls Requirements</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Public+Sans:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: summary counts first, then one section per kind of work; each item is a row with an ID, owner and status chip so the team can split it up. */
+:root {
+  --paper: #f6f7f4; --sheet: #ffffff; --ink: #17201c; --muted: #5b665f; --line: #dde2dc;
+  --accent: #2c4bd1; --accent-soft: #e6ebfb;
+  --ok: #1d7a4b; --ok-bg: #e2f2e8; --warn: #9a5a00; --warn-bg: #fbeed6; --stop: #b0322a; --stop-bg: #f8e1df;
+  --display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --body: "Public Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --paper: #121715; --sheet: #1a201d; --ink: #e7ece8; --muted: #9aa69f; --line: #2c3530;
+  --accent: #8ea4ff; --accent-soft: #232b48;
+  --ok: #6fd39c; --ok-bg: #173226; --warn: #f0b85c; --warn-bg: #3a2c12; --stop: #f19189; --stop-bg: #3d1d1a;
+  color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --paper: #121715; --sheet: #1a201d; --ink: #e7ece8; --muted: #9aa69f; --line: #2c3530;
+  --accent: #8ea4ff; --accent-soft: #232b48;
+  --ok: #6fd39c; --ok-bg: #173226; --warn: #f0b85c; --warn-bg: #3a2c12; --stop: #f19189; --stop-bg: #3d1d1a;
+  color-scheme: dark;
+}
+body { background: var(--paper); color: var(--ink); font-family: var(--body); font-size: 16px; line-height: 1.6; }
+.wrap { max-width: 1000px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 40px 72px; display: grid; gap: 52px; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; line-height: 1.15; margin: 0; }
+h1 { font-size: clamp(2rem, 5vw, 2.9rem); letter-spacing: -0.01em; }
+h2 { font-size: 1.55rem; }
+h3 { font-size: 1.08rem; }
+p { margin: 0; max-width: 70ch; }
+a { color: var(--accent); }
+code { font-family: var(--mono); font-size: 0.85em; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.eyebrow { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.muted { color: var(--muted); }
+header, section { display: grid; gap: 16px; min-width: 0; }
+.lede { font-size: 1.12rem; }
+
+.counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.counts a { text-decoration: none; color: inherit; background: var(--sheet); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: grid; gap: 2px; }
+.counts a:hover, .counts a:focus-visible { border-color: var(--accent); outline: none; }
+.counts b { font-family: var(--display); font-size: 1.9rem; line-height: 1; font-variant-numeric: tabular-nums; }
+.counts span { font-size: 0.88rem; color: var(--muted); }
+.counts .hot b { color: var(--stop); }
+
+.stop { display: grid; gap: 12px; }
+.stopper { border-left: 3px solid var(--stop); background: var(--stop-bg); border-radius: 0 8px 8px 0; padding: 14px 18px; display: grid; gap: 6px; }
+.stopper h3 { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.stopper p { color: var(--ink); }
+.id { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); font-weight: 500; }
+
+.tablebox { overflow-x: auto; background: var(--sheet); border: 1px solid var(--line); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; min-width: 700px; font-size: 0.92rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 500; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+td:first-child { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); white-space: nowrap; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.chip { display: inline-block; font-family: var(--mono); font-size: 0.7rem; font-weight: 500; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.c-crit { color: var(--stop); background: var(--stop-bg); }
+.c-need { color: var(--warn); background: var(--warn-bg); }
+.c-later { color: var(--muted); background: var(--accent-soft); }
+.c-ok { color: var(--ok); background: var(--ok-bg); }
+
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; }
+.panel { background: var(--sheet); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.panel ol, .panel ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+pre.cmd { margin: 0; background: var(--sheet); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; overflow-x: auto; font-family: var(--mono); font-size: 0.82rem; line-height: 1.55; }
+.note { font-size: 0.88rem; color: var(--muted); }
+.fix { border-left: 3px solid var(--ok); background: var(--ok-bg); border-radius: 0 8px 8px 0; padding: 12px 16px; }
+footer { font-size: 0.84rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; display: grid; gap: 8px; }
+footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+</style>
+
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">Bunty · research · 22 Oct 2026</span>
+  <h1>Everything WhatsApp and calling need</h1>
+  <p class="lede">I researched three things: what Meta and the phone companies require in India, what Vellum's code actually does, and what our router and plugins still lack. Short version: the code side is about 3 to 4 weeks of focused work. The bigger risks are not code. Meta's new AI policy, Indian phone numbers, and company registration decide whether real users can be on WhatsApp and Indian numbers at all.</p>
+</header>
+
+<section>
+  <div class="counts">
+    <a class="hot" href="#stoppers"><b>4</b><span>show-stoppers to decide first</span></a>
+    <a href="#accounts"><b>11</b><span>accounts and keys to get</span></a>
+    <a href="#vellum"><b>9</b><span>changes inside <code>vellum/</code></span></a>
+    <a href="#ours"><b>7</b><span>changes in our code</span></a>
+    <a href="#setup"><b>10</b><span>setup steps per assistant</span></a>
+    <a href="#decisions"><b>6</b><span>team decisions</span></a>
+  </div>
+</section>
+
+<section id="stoppers">
+  <h2>Show-stoppers: decide these before building</h2>
+  <div class="stop">
+    <div class="stopper">
+      <h3><span class="id">S1</span> Meta's WhatsApp terms ban "general-purpose AI assistants"</h3>
+      <p>Section 4.7 "AI Providers" of the Meta Terms for WhatsApp Business Platform (checked today, last modified 23 Sep 2026) bars businesses whose <em>primary</em> function is offering AI or general-purpose assistants from using the platform. Meta decides who that covers. It applied to new businesses from 15 Oct 2025 and to everyone from 15 Jan 2026. Meta says it targets AI model providers, not businesses using AI for customer service. Bunty is an AI assistant reached over WhatsApp, so it sits close to the line. Italy and the EU forced exemptions. Nothing similar exists for India.</p>
+      <p><b>Risk:</b> the WhatsApp number or business account gets banned. <b>Options:</b> describe and build Bunty on WhatsApp as a task service (reminders, bookings, calls made for you) rather than open chat; ask a Meta partner manager or a Business Solution Provider for a ruling; keep phone calls as the channel that can't be switched off. Calls aren't affected by this policy.</p>
+    </div>
+    <div class="stopper">
+      <h3><span class="id">S2</span> Twilio can't give us an Indian phone number</h3>
+      <p>Twilio sells no Indian local or mobile numbers. Its only Indian number type is toll-free, and that only receives calls. Its India rules say outbound calls to India must use a <em>non-Indian</em> caller ID. Indian phones now label those calls "International Call", and spoofed Indian caller IDs are blocked. Users calling a US number pay international rates (about ₹2/min with an ISD pack, more without).</p>
+      <p><b>Meaning:</b> Twilio works for a team-only prototype. Real users need an Indian provider: <b>Exotel</b> (real-time audio streaming, Mumbai region, audio format close to Twilio's) or <b>Plivo</b> (India data region). That means a new channel adapter, because Vellum only speaks Twilio.</p>
+    </div>
+    <div class="stopper">
+      <h3><span class="id">S3</span> Both of those need a registered Indian company</h3>
+      <p>Exotel and Plivo KYC need GST or a Certificate of Incorporation plus PAN. Meta business verification needs GST, a Certificate of Incorporation or PAN, with the legal name matching exactly. Without verification we're capped at 2 numbers and 250 business-started conversations a day. That's fine for a prototype, but not for launch.</p>
+    </div>
+    <div class="stopper">
+      <h3><span class="id">S4</span> Bunty can't WhatsApp a clinic or shop first</h3>
+      <p>Meta's messaging policy only allows messaging people who gave their number and opted in to <em>us</em>. A clinic that never opted in to Bunty isn't an allowed recipient, even with an approved template. Outside the 24-hour reply window only templates can be sent at all. So <code>reach_contact</code> should <b>call</b> non-users, and use WhatsApp only for people who messaged us in the last 24 hours.</p>
+    </div>
+  </div>
+</section>
+
+<section id="accounts">
+  <h2>Accounts and keys</h2>
+  <p class="muted">Everything here needs you or the team: sign-ups, payment methods, documents. The secrets go into each assistant with <code>assistant credentials set</code>, never into chat or Git.</p>
+  <div class="tablebox"><table>
+    <thead><tr><th>ID</th><th>What</th><th>Gives us</th><th>When</th><th>Linear</th></tr></thead>
+    <tbody>
+      <tr><td>K1</td><td>Anthropic API key</td><td>The model. Nothing runs without it.</td><td><span class="chip c-crit">now</span></td><td>BUN-7</td></tr>
+      <tr><td>K2</td><td>Meta developer app, Business portfolio, WhatsApp Business Account, test number</td><td><code>phone_number_id</code>, <code>app_secret</code>, a verify token we choose. The test number messages up to about 5 added numbers.</td><td><span class="chip c-crit">now</span></td><td>BUN-9</td></tr>
+      <tr><td>K3</td><td>Meta system user with a permanent access token</td><td>The dashboard token expires in about 24 hours. A system-user token with <code>whatsapp_business_messaging</code> and <code>whatsapp_business_management</code> doesn't.</td><td><span class="chip c-crit">now</span></td><td>BUN-9</td></tr>
+      <tr><td>K4</td><td>Twilio upgraded account plus one US number</td><td>Prototype calls in and out. Trial accounts play a banner and can only call verified numbers.</td><td><span class="chip c-crit">now</span></td><td>BUN-12</td></tr>
+      <tr><td>K5</td><td>Deepgram API key</td><td>Live speech-to-text. Nova-3 <code>multi</code> handles Hindi and English mixed together. Gujarati works only as a single-language mode.</td><td><span class="chip c-crit">now</span></td><td>BUN-12</td></tr>
+      <tr><td>K6</td><td>ElevenLabs API key and voice ids</td><td>Text-to-speech. Flash v2.5 does Hindi and English fast. It has <b>no Gujarati</b>; only v3 has it, and that's slower.</td><td><span class="chip c-crit">now</span></td><td>BUN-12, BUN-27</td></tr>
+      <tr><td>K7</td><td>Public HTTPS URL for each assistant (ngrok now, a domain later)</td><td>Meta and Twilio must reach the router and each gateway.</td><td><span class="chip c-crit">now</span></td><td>BUN-24, BUN-13</td></tr>
+      <tr><td>K8</td><td>Sarvam AI key</td><td>Gujarati speech in and out (Saaras v3, Bulbul v3), built for Indian accents. New provider, needs a decision.</td><td><span class="chip c-need">Phase 4</span></td><td>BUN-46</td></tr>
+      <tr><td>K9</td><td>A real WhatsApp number plus display name approval</td><td>The number must not be on the WhatsApp app (delete that account first). Display name review takes about 1 to 2 days.</td><td><span class="chip c-need">before testers</span></td><td>new</td></tr>
+      <tr><td>K10</td><td>Meta business verification</td><td>More than 2 numbers and more than 250 business-started conversations a day. Needs company documents (S3).</td><td><span class="chip c-later">launch</span></td><td>new</td></tr>
+      <tr><td>K11</td><td>Exotel (or Plivo) account with KYC and an Indian number, server in AWS Mumbai</td><td>Indian numbers, a call path that stays inside India, lower latency.</td><td><span class="chip c-later">launch</span></td><td>BUN-50</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="vellum">
+  <h2>Changes inside <code>vellum/</code></h2>
+  <p class="muted">Checked in Vellum's source. Each one needs the team's OK (AGENTS.md section 5) and gets listed in Notion. BUN-10 asked about 3 changes; the real list is longer.</p>
+  <div class="tablebox"><table>
+    <thead><tr><th>ID</th><th>Change</th><th>Why it blocks us</th><th>Where</th><th>Priority</th></tr></thead>
+    <tbody>
+      <tr><td>V1</td><td>Let Vellum's notifications go to WhatsApp</td><td>WhatsApp has <code>deliveryEnabled: false</code> and no notification adapter. So <b>reminders</b>, owner questions during calls, and "someone wants access" requests never reach WhatsApp. Reminders are our first feature.</td><td><code>assistant/src/channels/config.ts:37</code>, <code>notifications/destination-resolver.ts</code>, new adapter in <code>notifications/adapters/</code></td><td><span class="chip c-crit">critical</span></td></tr>
+      <tr><td>V2</td><td>Turn off Twilio webhook auto-sync</td><td>Each assistant points the <b>shared</b> Twilio number's voice URL at itself whenever its credentials or URL change. The last assistant to start "wins", so the router is skipped.</td><td><code>gateway/src/twilio/webhook-sync.ts:101</code>, <code>daemon/handlers/config-ingress.ts</code>, <code>skills/twilio-setup/SKILL.md</code></td><td><span class="chip c-crit">critical</span></td></tr>
+      <tr><td>V3</td><td>WhatsApp template messages</td><td>A reminder that fires more than 24 hours after the user's last message can only be sent as an approved template. Vellum has no template send at all.</td><td><code>messaging/providers/whatsapp/api.ts</code>, <code>send.ts</code></td><td><span class="chip c-crit">critical</span></td></tr>
+      <tr><td>V4</td><td>Block Indian emergency numbers</td><td>The blocklist has 911, 112, 999, 000, 110, 119. India's 100, 101, 102 and 108 can be dialled.</td><td><code>assistant/src/calls/call-constants.ts:4</code></td><td><span class="chip c-crit">critical (safety)</span></td></tr>
+      <tr><td>V5</td><td>Send voice notes</td><td>Audio goes out as a document. A voice-note bubble needs OGG/Opus, <code>"voice": true</code>, and 512 KB or less.</td><td><code>whatsapp/send.ts:41</code>, <code>api.ts:165</code></td><td><span class="chip c-need">Phase 8</span></td></tr>
+      <tr><td>V6</td><td>Let non-users who reply on WhatsApp in</td><td>WhatsApp's admission setting is hidden and fixed at "trusted contacts", so a clinic's reply is refused. On phone it can be changed.</td><td><code>packages/gateway-client/src/admission-policy-contract.ts:87</code>, <code>gateway/src/db/seed-admission-policy.ts</code></td><td><span class="chip c-need">Phase 5</span></td></tr>
+      <tr><td>V7</td><td>Read Indian numbers correctly</td><td>The number normaliser assumes US numbers for 10 digits. Meta sends Indian numbers as <code>91XXXXXXXXXX</code> with no <code>+</code>.</td><td><code>gateway/src/verification/identity.ts:22</code></td><td><span class="chip c-need">Phase 2</span></td></tr>
+      <tr><td>V8</td><td>Sarvam as a speech provider</td><td>Vellum's speech-to-text and text-to-speech providers don't include Sarvam, and Gujarati needs it.</td><td><code>config/schemas/stt.ts</code>, <code>tts/types.ts</code> and providers</td><td><span class="chip c-need">Phase 4</span></td></tr>
+      <tr><td>V9</td><td>Exotel calls (channel adapter)</td><td>Vellum only speaks Twilio Media Streams. Exotel's audio format is close, so the adapter is mostly a translation layer.</td><td><code>calls/</code>, <code>gateway/src/twilio/</code> equivalents</td><td><span class="chip c-later">launch</span></td></tr>
+    </tbody>
+  </table></div>
+  <div class="fix"><b>Good news:</b> owner recognition on WhatsApp may need <b>no</b> code change. <code>assistant channel-verification-sessions create --channel whatsapp</code> creates a code the owner sends from WhatsApp, and that binds them as owner. Their approvals then show as WhatsApp buttons in their own chat. <code>supportsVerification: false</code> only changes what the app shows. This hasn't been run live yet; it's the first thing to test. My earlier pipeline page said this needed a <code>vellum/</code> change, which was wrong.</div>
+</section>
+
+<section id="ours">
+  <h2>Changes in our code</h2>
+  <div class="tablebox"><table>
+    <thead><tr><th>ID</th><th>Change</th><th>Why</th><th>Where</th></tr></thead>
+    <tbody>
+      <tr><td>B1</td><td>Answer Meta right away, forward in the background</td><td>The router waits for the gateway, and the gateway downloads media before answering. Slow voice notes can cause Meta timeouts and retries.</td><td><code>backend/router/src/app.ts</code></td></tr>
+      <tr><td>B2</td><td>Refuse a router user whose URL doesn't match the assistant's <code>ingress.publicBaseUrl</code> exactly</td><td>Twilio signs the redirect URL. A different host, scheme or trailing path means the call is rejected with 403.</td><td><code>backend/router</code>, <code>scripts/add-user.ts</code></td></tr>
+      <tr><td>B3</td><td><code>reach_contact</code>: call non-users, add <code>confidence</code>, handle the 24-hour window</td><td>S4, plus <code>messaging_send</code> requires <code>confidence</code>, which our instructions don't mention.</td><td><code>integrations/reach-contact/src/core.ts:73</code></td></tr>
+      <tr><td>B4</td><td>Store owner WhatsApp numbers as digits with no <code>+</code></td><td>That's the form Meta sends and Vellum matches on.</td><td>onboarding, provisioning</td></tr>
+      <tr><td>B5</td><td>Provisioning script for each assistant</td><td>About 15 credential and config commands per assistant. One script avoids mistakes.</td><td><code>infra/</code> (BUN-35)</td></tr>
+      <tr><td>B6</td><td>Voice replies: convert to OGG/Opus and connect to V5</td><td>Our adapter produces MP3, which WhatsApp shows as a file, not a voice note. Converting needs a tool such as ffmpeg (new dependency).</td><td><code>integrations/whatsapp/src/voice-reply.ts</code></td></tr>
+      <tr><td>B7</td><td>Sign-up: website form, OTP, hatch, router row, consent</td><td>No path exists today for a new user to get an assistant.</td><td><code>website/</code>, <code>backend/</code> (BUN-28, BUN-11)</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="setup">
+  <h2>Setup for each assistant</h2>
+  <p class="muted">Run from an operator shell, not by the assistant itself (Vellum refuses <code>credentials set</code> from the agent's own shell). Values come from K1 to K7. The Meta, Twilio, Deepgram and ElevenLabs values are the same on every assistant.</p>
+<pre class="cmd">assistant credentials set --service anthropic  --field api_key              &lt;key&gt;
+assistant credentials set --service whatsapp   --field phone_number_id      &lt;id&gt;
+assistant credentials set --service whatsapp   --field access_token         &lt;system user token&gt;
+assistant credentials set --service whatsapp   --field app_secret           &lt;app secret&gt;
+assistant credentials set --service whatsapp   --field webhook_verify_token &lt;token&gt;
+assistant credentials set --service twilio     --field auth_token           &lt;token&gt;
+assistant config set twilio.accountSid   &lt;AC...&gt;
+assistant config set twilio.phoneNumber  &lt;+1 shared number&gt;
+assistant credentials set --service deepgram   --field api_key &lt;key&gt;
+assistant credentials set --service elevenlabs --field api_key &lt;key&gt;
+assistant config set ingress.enabled true
+assistant config set ingress.publicBaseUrl https://chintu.example.com
+assistant config set services.stt.language multi
+assistant config set calls.disclosure.enabled true
+assistant channel-verification-sessions create --channel whatsapp   # owner sends the code from WhatsApp
+# owner on phone: verify with an outbound code call to +91 00000 00001</pre>
+  <ul class="note">
+    <li>Also: in Meta, point the app's webhook at the router <code>/whatsapp</code> and subscribe to <code>messages</code>; set the app to Live mode. In Twilio, point the number's voice URL at the router <code>/twilio/voice</code> (only after V2, or an assistant will overwrite it).</li>
+    <li>Set each owner's voices in <code>services.tts.providers.elevenlabs.languageVoices</code> (BUN-27). Set the phone admission floor to <code>strangers</code> if non-users should be able to call back.</li>
+    <li>Do not set <code>VELAY_BASE_URL</code> on our server; leave Vellum's managed tunnel off.</li>
+  </ul>
+</section>
+
+<section id="decisions">
+  <h2>Team decisions</h2>
+  <div class="tablebox"><table>
+    <thead><tr><th>ID</th><th>Question</th><th>My recommendation</th></tr></thead>
+    <tbody>
+      <tr><td>D1</td><td>How do we handle Meta's AI-provider ban (S1)?</td><td>Position WhatsApp as a task service, ask a Meta partner or BSP for a ruling before inviting outside testers, and make phone calls work fully so we're never WhatsApp-only.</td></tr>
+      <tr><td>D2</td><td>When do we register the company (S3)?</td><td>Start now. Meta verification, Exotel KYC and Plivo all wait on it, and each takes days to weeks after.</td></tr>
+      <tr><td>D3</td><td>Prototype telephony: Twilio US number now, Exotel at launch?</td><td>Yes. Vellum already speaks Twilio, so the team can test this month. Build the Exotel adapter (V9) once KYC clears.</td></tr>
+      <tr><td>D4</td><td>Go-ahead for <code>vellum/</code> changes V1 to V4 (replaces the 3 in BUN-10)?</td><td>Yes for V1 to V4 now; V5 to V8 in their phases. Each is small and listed in Notion.</td></tr>
+      <tr><td>D5</td><td>Add Sarvam for Gujarati?</td><td>Yes, after a 20-call side-by-side with Deepgram and ElevenLabs in Phase 4.</td></tr>
+      <tr><td>D6</td><td>Legal review before outside testers?</td><td>Yes: TRAI rules on automated calls (which number series), the DPDP consent notice (obligations apply from 13 May 2027), and the AI disclosure script.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>Running costs (prototype, rough)</h2>
+  <p class="muted">From the providers' own pricing pages where possible, checked today. Third-party figures are marked. Verify before budgeting.</p>
+  <div class="tablebox"><table>
+    <thead><tr><th>Item</th><th>Price</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>Twilio US number</td><td class="num">≈ $1.15 / month</td><td>From memory; check Twilio US pricing</td></tr>
+      <tr><td>Twilio call to an Indian mobile</td><td class="num">$0.0496 / min</td><td>Plus $0.0044 / min for live audio streaming</td></tr>
+      <tr><td>Deepgram Nova-3 multilingual, streaming</td><td class="num">≈ $0.006–0.009 / min</td><td>Third-party figure</td></tr>
+      <tr><td>Sarvam speech-to-text (Saaras v3)</td><td class="num">₹0.49 / min</td><td>sarvam.ai pricing page</td></tr>
+      <tr><td>Sarvam text-to-speech (Bulbul v3)</td><td class="num">₹3 / 1,000 chars</td><td>sarvam.ai pricing page</td></tr>
+      <tr><td>WhatsApp replies inside 24 h</td><td class="num">1,000 free / number / month</td><td>Charged beyond that since 1 Oct 2026; India rate not found yet</td></tr>
+      <tr><td>WhatsApp utility template (e.g. a reminder)</td><td class="num">≈ ₹0.115 each</td><td>Third-party, 2026; check Meta's rate card</td></tr>
+      <tr><td>WhatsApp marketing template</td><td class="num">≈ ₹0.86 each</td><td>Third-party, 2026</td></tr>
+      <tr><td>Meta billing currency</td><td class="num">INR by 31 Dec 2026</td><td>Accounts not on INR can't send from 1 Jan 2027</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">A 3-minute outbound call is roughly $0.16 for Twilio plus about $0.03 for speech plus model tokens, so around ₹15 to ₹20 a call. Latency target: under 1.5 s to the first reply. Twilio has no Indian edge, so prototype audio likely travels through the US; host the prototype server in US East and measure it.</p>
+</section>
+
+<section>
+  <h2>Order of work</h2>
+  <div class="cols">
+    <div class="panel">
+      <h3>Week 1: keys and first light</h3>
+      <ol>
+        <li>K1 to K7. Hatch Chintu and Sujal, run the setup above.</li>
+        <li>Meta webhook straight at Chintu. Test text, Hindi voice note, photo, PDF.</li>
+        <li>Test owner verification on WhatsApp with the CLI code. Test approval buttons.</li>
+      </ol>
+    </div>
+    <div class="panel">
+      <h3>Week 2: the <code>vellum/</code> must-haves</h3>
+      <ol>
+        <li>V4 emergency numbers, V2 webhook-sync switch, V7 Indian numbers.</li>
+        <li>V1 notifications to WhatsApp, so reminders arrive.</li>
+        <li>V3 templates, plus one utility template submitted to Meta.</li>
+      </ol>
+    </div>
+    <div class="panel">
+      <h3>Week 3: calls</h3>
+      <ol>
+        <li>Twilio number, India voices, owner phone verification.</li>
+        <li>10-call exit check: latency, Hindi, Hinglish, Gujarati (BUN-42).</li>
+        <li>Sarvam comparison if Gujarati is weak.</li>
+      </ol>
+    </div>
+    <div class="panel">
+      <h3>Week 4: shared number</h3>
+      <ol>
+        <li>B1, B2, B4, B5. Meta webhook and Twilio number pointed at the router.</li>
+        <li>Two teammates, one number, each reaches their own assistant (BUN-32).</li>
+        <li>B3 reach_contact rules, then V5, V6 and voice replies.</li>
+      </ol>
+    </div>
+  </div>
+  <p class="note">This assumes the keys arrive in week 1 and the team approves the <code>vellum/</code> changes. Company registration, Meta verification and Exotel KYC run alongside and gate outside testers, not the team prototype.</p>
+</section>
+
+<footer>
+  <span>Sources (checked 22 Oct 2026)</span>
+  <ul>
+    <li>Meta: <a href="https://www.facebook.com/legal/Meta-Terms-for-WhatsApp-Business-Platform">WhatsApp Business Platform terms §4.7</a>, <a href="https://whatsappbusiness.com/policy/">Business Messaging Policy</a>, <a href="https://developers.facebook.com/docs/whatsapp/messaging-limits">messaging limits</a>, <a href="https://developers.facebook.com/docs/whatsapp/pricing">pricing</a>, <a href="https://developers.facebook.com/docs/whatsapp/cloud-api/messages/audio-messages">audio messages</a></li>
+    <li>Twilio: <a href="https://www.twilio.com/en-us/guidelines/in/voice">India voice guidelines</a>, <a href="https://www.twilio.com/en-us/voice/pricing/in">India pricing</a>, <a href="https://support.twilio.com/hc/en-us/articles/22550748886043">no Indian local or mobile numbers</a></li>
+    <li>Indian providers: <a href="https://docs.exotel.com/exotel-agentstream/bidirectional-streaming">Exotel AgentStream</a>, <a href="https://developer.exotel.com/docs/getting-started/kyc-verification">Exotel KYC</a>, <a href="https://plivo.com/docs/voice-agents/sip-trunking/deploy/calling-in-india">Plivo India</a></li>
+    <li>Speech: <a href="https://deepgram.com/changelog/nova-3-multilingual-ga">Deepgram Nova-3 multilingual</a>, <a href="https://elevenlabs.io/docs/help-center/other/what-languages-do-you-support">ElevenLabs languages</a>, <a href="https://www.sarvam.ai/api-pricing">Sarvam pricing</a></li>
+    <li>Rules: <a href="https://cms.trai.gov.in/sites/default/files/2025-02/PR_No.11of2025.pdf">TRAI TCCCPR amendment (Feb 2025)</a>, <a href="https://static.pib.gov.in/WriteReadData/specificdocs/documents/2025/nov/doc20251117695301.pdf">DPDP Rules 2025</a></li>
+    <li>Vellum source: file references in the tables above. Not legal advice; S1, S4 and D6 need a lawyer or Meta's own answer.</li>
+  </ul>
+</footer>
+
+</div>

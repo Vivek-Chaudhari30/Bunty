@@ -175,6 +175,7 @@ Full text: [docs/architecture/decisions.md](docs/architecture/decisions.md).
 | D-15 | Deadline sweep runs on a timer, not a schedule | Proposed (agreed with Vivek) |
 | D-16 | Rate limits and A2A nonces stored in SQLite | Proposed (agreed with Vivek) |
 | D-17 | CI on GitHub Actions | Proposed (agreed with Vivek) |
+| D-18 | Model access through AICredits, GPT-6 Luna first | Proposed (Vivek) |
 
 ## Proposed `vellum/` changes (not made)
 
