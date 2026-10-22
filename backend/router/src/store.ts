@@ -43,7 +43,46 @@ export class RouterStore {
         phone_e164 TEXT PRIMARY KEY,
         sent_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS audit (
+        at INTEGER NOT NULL,
+        action TEXT NOT NULL,
+        target_last4 TEXT NOT NULL,
+        assistant_id TEXT
+      );
     `);
+  }
+
+  /** Outward actions the router itself takes (onboarding replies, deletes). Last 4 digits only. */
+  audit(action: string, targetE164: string, assistantId: string | null = null, now = Date.now()): void {
+    this.db
+      .query("INSERT INTO audit (at, action, target_last4, assistant_id) VALUES (?1, ?2, ?3, ?4)")
+      .run(now, action, targetE164.slice(-4), assistantId);
+  }
+
+  listAudit(limit = 100): Array<{ at: number; action: string; target_last4: string; assistant_id: string | null }> {
+    return this.db.query("SELECT * FROM audit ORDER BY at DESC LIMIT ?1").all(limit) as Array<{
+      at: number;
+      action: string;
+      target_last4: string;
+      assistant_id: string | null;
+    }>;
+  }
+
+  /**
+   * "Delete my data": the user's routing row, consent, onboarding record, and every sticky
+   * route that points at their assistant or their number. Returns the removed assistant id,
+   * so the operator can delete that assistant's workspace too.
+   */
+  deleteUser(phone: string): string | null {
+    const user = this.getUser(phone);
+    this.db.transaction(() => {
+      if (user) this.db.query("DELETE FROM sticky_routes WHERE assistant_id = ?1").run(user.assistant_id);
+      this.db.query("DELETE FROM sticky_routes WHERE counterparty_e164 = ?1").run(phone);
+      this.db.query("DELETE FROM users WHERE phone_e164 = ?1").run(phone);
+      this.db.query("DELETE FROM consent WHERE phone_e164 = ?1").run(phone);
+      this.db.query("DELETE FROM onboarding_replies WHERE phone_e164 = ?1").run(phone);
+    })();
+    return user?.assistant_id ?? null;
   }
 
   upsertUser(u: Omit<UserRow, "created_at" | "status"> & { status?: UserRow["status"] }, now = Date.now()): void {

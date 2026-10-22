@@ -86,6 +86,9 @@ export class A2ADb {
         last_status_text TEXT, result_files_json TEXT, deadline_notified_at INTEGER,
         created_at INTEGER NOT NULL, last_push_at INTEGER
       );
+      CREATE TABLE IF NOT EXISTS audit (
+        at INTEGER NOT NULL, action TEXT NOT NULL, peer_id TEXT NOT NULL, detail TEXT
+      );
       CREATE TABLE IF NOT EXISTS auth_failures (peer_id TEXT NOT NULL, at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS shared_files (
         file_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, peer_id TEXT NOT NULL, path TEXT NOT NULL,
@@ -213,9 +216,22 @@ export class A2ADb {
     return (this.db.query("SELECT * FROM shared_files WHERE file_id = ?1").get(fileId) as never) ?? null;
   }
 
+  /** Every request we send to another assistant. No message text, only what and to whom. */
+  audit(action: string, peerId: string, detail: string | null, now: number): void {
+    this.db.query("INSERT INTO audit (at, action, peer_id, detail) VALUES (?1, ?2, ?3, ?4)").run(now, action, peerId, detail);
+  }
+  listAudit(limit = 100): Array<{ at: number; action: string; peer_id: string; detail: string | null }> {
+    return this.db.query("SELECT * FROM audit ORDER BY at DESC LIMIT ?1").all(limit) as Array<{
+      at: number;
+      action: string;
+      peer_id: string;
+      detail: string | null;
+    }>;
+  }
+
   /** "Delete my data": everything this plugin stored. */
   wipe(): void {
-    for (const t of ["settings", "peers", "invites", "seen_messages", "delegations_inbound", "delegations_outbound", "auth_failures", "shared_files"]) {
+    for (const t of ["settings", "peers", "invites", "seen_messages", "delegations_inbound", "delegations_outbound", "auth_failures", "shared_files", "audit"]) {
       this.db.exec(`DELETE FROM ${t}`);
     }
   }

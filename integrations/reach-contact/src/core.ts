@@ -1,5 +1,6 @@
 // The logic behind the two reach-contact tools, with its outside pieces passed in
 // so tests can run it without a Vellum assistant.
+import { maskTarget, type AuditLog } from "./audit.ts";
 import { checkPlanForSend, newPlan, readBack, type PlanStore, type ReachPlan } from "./plan.ts";
 import type { RouterHintClient } from "./router-hint.ts";
 import { chooseRoute, explainRefusal, type Verb } from "./route-policy.ts";
@@ -9,6 +10,7 @@ export interface CoreDeps {
   hints: RouterHintClient;
   /** This assistant's id in the router (BUNTY_ASSISTANT_ID). */
   assistantId: string;
+  audit?: AuditLog;
   now?: () => number;
 }
 
@@ -93,6 +95,7 @@ export async function sendPlan(
   if (!checked.ok) return { content: `Not sent: ${checked.error}`, isError: true };
   const plan = checked.plan;
   deps.plans.markUsed(plan.id, (deps.now ?? Date.now)());
+  deps.audit?.record({ at: (deps.now ?? Date.now)(), planId: plan.id, route: plan.route, target: maskTarget(plan.phone, plan.peerId) });
 
   let hintNote = "";
   if (plan.notifyRouter && plan.phone) {

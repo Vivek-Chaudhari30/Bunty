@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FileAuditLog, MemoryAuditLog } from "./src/audit.ts";
 import { makePlan, sendPlan, type CoreDeps } from "./src/core.ts";
 import { isEmergency, toE164 } from "./src/phone.ts";
 import { FilePlanStore, MemoryPlanStore, PLAN_TTL_MS } from "./src/plan.ts";
@@ -170,5 +171,43 @@ describe("tools and adapters", () => {
     expect(req.url).toBe("http://router.test/outbound-hint");
     const body = await req.text();
     expect(req.headers.get("x-bunty-signature")).toBe(signHint(body, Number(req.headers.get("x-bunty-timestamp")), "k"));
+  });
+});
+
+describe("audit and delete", () => {
+  test("each send is audited without the message text", async () => {
+    const audit = new MemoryAuditLog();
+    const d = { ...deps(), audit };
+    const id = planIdOf(makePlan({ verb: "call", contact_name: "Test Shop", phone: "+919999900001", message: "secret words" }, d).content);
+    await sendPlan({ plan_id: id }, { approvedViaPrompt: true }, d);
+    expect(audit.list()).toEqual([{ at: 1_000_000, planId: id, route: "call", target: "***0001" }]);
+    expect(JSON.stringify(audit.list())).not.toContain("secret words");
+  });
+
+  test("refused sends are not audited", async () => {
+    const audit = new MemoryAuditLog();
+    const d = { ...deps(), audit };
+    const id = planIdOf(makePlan({ verb: "call", contact_name: "Test Shop", phone: "+919999900001", message: "hi" }, d).content);
+    await sendPlan({ plan_id: id }, {}, d);
+    expect(audit.list()).toEqual([]);
+  });
+
+  test("file plan store and audit log can be cleared", () => {
+    const dir = mkdtempSync(join(tmpdir(), "reach-del-"));
+    const plans = new FilePlanStore(dir);
+    const audit = new FileAuditLog(dir);
+    const d = { ...deps(Date.now()), plans, audit };
+    const id = planIdOf(makePlan({ verb: "call", contact_name: "Test Shop", phone: "+919999900001", message: "hi" }, d).content);
+    audit.record({ at: 1, planId: id, route: "call", target: "***0001" });
+    plans.clear();
+    audit.clear();
+    expect(plans.get(id)).toBeNull();
+    expect(audit.list()).toEqual([]);
+  });
+
+  test("delete tool needs the owner and a fresh approval", async () => {
+    const tool = (await import("./tools/reach_contact_delete_data.ts")).default;
+    expect((await tool.execute({}, { conversationId: "c", workingDir: "/", trustClass: "trusted_contact" })).isError).toBe(true);
+    expect((await tool.execute({}, { conversationId: "c", workingDir: "/", trustClass: "guardian" })).content).toContain("approval");
   });
 });

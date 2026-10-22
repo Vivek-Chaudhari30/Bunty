@@ -1,7 +1,7 @@
 // A reach plan: exactly what will happen, read back to the owner before anything is sent.
 // The approved plan is stored, and the send step must match it word for word.
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Route } from "./route-policy.ts";
 
@@ -50,6 +50,8 @@ export interface PlanStore {
   save(p: ReachPlan): void;
   get(id: string): ReachPlan | null;
   markUsed(id: string, now?: number): void;
+  /** "Delete my data". */
+  clear(): void;
 }
 
 export class MemoryPlanStore implements PlanStore {
@@ -64,6 +66,9 @@ export class MemoryPlanStore implements PlanStore {
   markUsed(id: string, now = Date.now()) {
     const p = this.plans.get(id);
     if (p) p.usedAt = now;
+  }
+  clear() {
+    this.plans.clear();
   }
 }
 
@@ -98,6 +103,9 @@ export class FilePlanStore implements PlanStore {
     const all = this.read();
     if (all[id]) all[id].usedAt = now;
     this.write(all);
+  }
+  clear() {
+    rmSync(this.file, { force: true });
   }
 }
 

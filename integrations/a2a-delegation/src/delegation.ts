@@ -4,6 +4,7 @@
 // Assignee (Sujal): receive task -> Gate A (acceptDelegation) -> work (Gate B is Vellum's own
 // gating of Sujal's tools) -> askRequester -> Gate C (releaseResult) -> completed.
 import { randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { InboundTask, OutboundTask, PeerRow } from "./db.ts";
 import { buildMessageRequest, delegationMeta, quotePeer, textOf, validateTask } from "./envelope.ts";
@@ -418,6 +419,15 @@ export class DelegationService extends A2AService {
       `${v.peer.owner_name} canceled the task ${taskId}. Stop any work on it.${reason ? `\n${quotePeer(this.peerLabel(v.peer), reason)}` : ""}`,
     );
     return json({ ok: true, state: "canceled" });
+  }
+
+  /** Also removes received and shared files on disk. */
+  override async deleteAllData(): Promise<number> {
+    const n = await super.deleteAllData();
+    if (this.deps.dataDir) {
+      for (const dir of ["received", "outbox"]) rmSync(join(this.deps.dataDir, dir), { recursive: true, force: true });
+    }
+    return n;
   }
 
   async handleFile(req: Request): Promise<Response> {

@@ -226,3 +226,36 @@ describe("files", () => {
     expect(safeFilename("deck 1.pptx")).toBe("deck 1.pptx");
   });
 });
+
+describe("audit and delete my data", () => {
+  test("outward requests are audited with ids only", async () => {
+    const p = setup();
+    await pairUp(p);
+    const sent = await sendDecks(p);
+    const t = p.sujal.db.listInbound()[0]!;
+    await svc(p.sujal).acceptDelegation(t.task_id, true);
+    expect(p.chintu.db.listAudit().map((a) => a.action)).toContain("send_message");
+    expect(p.sujal.db.listAudit()[0]).toMatchObject({ action: "send_status", peer_id: "chintu", detail: t.task_id });
+    expect(JSON.stringify(p.chintu.db.listAudit())).not.toContain("presentations");
+    expect(sent.id).toBe(t.task_id);
+  });
+
+  test("deletes everything and disconnects the other side", async () => {
+    const p = setup();
+    await pairUp(p);
+    const sent = await sendDecks(p);
+    const t = p.sujal.db.listInbound()[0]!;
+    await svc(p.sujal).acceptDelegation(t.task_id, true);
+    await svc(p.sujal).releaseResult(t.task_id, ["decks/presentation-1.pptx"]);
+    const saved = JSON.parse(p.chintu.db.getOutbound(sent.id)!.result_files_json!) as string[];
+
+    expect(await svc(p.chintu).deleteAllData()).toBe(1);
+    expect(p.chintu.db.listPeers()).toEqual([]);
+    expect(p.chintu.db.listOutbound()).toEqual([]);
+    expect(p.chintu.db.listAudit()).toEqual([]);
+    expect(p.chintu.secrets.values.has("peer_sujal")).toBe(false);
+    expect(await Bun.file(saved[0]!).exists()).toBe(false);
+    // Sujal was told and forgot Chintu too.
+    expect(p.sujal.db.getPeer("chintu")).toBeNull();
+  });
+});

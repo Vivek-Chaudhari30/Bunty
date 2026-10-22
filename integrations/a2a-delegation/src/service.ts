@@ -48,6 +48,19 @@ function sha256(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
+/** Ids only, never message text or file contents. */
+function auditDetail(path: string, body: string): string | null {
+  try {
+    const b = JSON.parse(body) as { id?: string; taskId?: string; params?: { message?: { message_id?: string; task_id?: string } } };
+    if (path === "message") return b.params?.message?.task_id ?? b.params?.message?.message_id ?? null;
+    if (path === "status") return b.id ?? null;
+    if (path === "cancel") return b.taskId ?? null;
+  } catch {
+    // not JSON: nothing to record
+  }
+  return null;
+}
+
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status });
 }
@@ -198,6 +211,7 @@ export class A2AService {
     const shared = await this.deps.secrets.get(FIELDS.peer(peer.peer_id));
     const ingress = await this.deps.secrets.get(FIELDS.peerIngress(peer.peer_id));
     if (!shared || !ingress) throw new A2AError(`Missing secrets for ${peer.peer_id}; pair again.`);
+    this.deps.db.audit(`send_${path}`, peer.peer_id, auditDetail(path, body), this.now());
     return postWithRetry(
       this.deps.transport,
       `${peer.base_url}/${path}`,
@@ -361,6 +375,28 @@ export class A2AService {
       `${quotePeer(this.peerLabel(peer), text)}\nTell the owner this note from ${peer.owner_name}. They can reply with a2a_send_note to "${peer.peer_id}".`,
     );
     return { id: taskId, context_id: message.context_id, status: { state: "completed", timestamp: new Date(now).toISOString() } };
+  }
+
+  // ── Delete my data ─────────────────────────────────────────────────────
+
+  /**
+   * Disconnects every peer (telling them, best effort), forgets all secrets and wipes the
+   * database. The caller removes files on disk.
+   */
+  async deleteAllData(): Promise<number> {
+    const peers = this.deps.db.listPeers();
+    for (const p of peers) {
+      try {
+        if (p.status === "active") await this.sendSigned(p, "unpair", JSON.stringify({ peerId: this.deps.selfId }));
+      } catch (err) {
+        this.log("delete.unpair_failed", { peer: p.peer_id, error: String(err) });
+      }
+      await this.forgetPeer(p.peer_id);
+    }
+    await this.deps.secrets.remove(FIELDS.pairToken);
+    await this.deps.secrets.remove(FIELDS.ingress);
+    this.deps.db.wipe();
+    return peers.length;
   }
 
   // ── Read-only views for the owner ──────────────────────────────────────

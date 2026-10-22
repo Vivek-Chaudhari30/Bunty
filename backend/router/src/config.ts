@@ -12,6 +12,8 @@ export interface RouterConfig {
   whatsappVerifyToken: string;
   twilioAuthToken: string;
   internalHmacKey: string;
+  /** Optional bearer token for GET /metrics. Unset: metrics are open (counters only). */
+  metricsToken?: string;
 }
 
 const REQUIRED = [
@@ -35,5 +37,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     whatsappVerifyToken: env.ROUTER_WHATSAPP_VERIFY_TOKEN!,
     twilioAuthToken: env.ROUTER_TWILIO_AUTH_TOKEN!,
     internalHmacKey: env.ROUTER_INTERNAL_HMAC_KEY!,
+    metricsToken: env.ROUTER_METRICS_TOKEN || undefined,
   };
 }
