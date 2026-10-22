@@ -20,7 +20,7 @@ Stage: **prototype**, built on the open-source [Vellum assistant](https://github
 | Phone calls | Not started |
 | Google (Gmail, Calendar) via Composio | Not started |
 | Zomato and Swiggy | Not started |
-| Website | Not started |
+| Website | Built, not deployed |
 
 ## How it works (prototype)
 

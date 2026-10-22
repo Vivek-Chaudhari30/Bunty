@@ -1,0 +1,185 @@
+/* layout.css - Container, section spacing, grid utilities and responsive rules. */
+
+/* Main container: centres content, applies gutters */
+.container {
+  width: 100%;
+  max-width: var(--max-width);
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: var(--gutter);
+  padding-right: var(--gutter);
+}
+
+/* Narrower container for text-heavy pages (about, privacy, terms, etc.) */
+.container--narrow {
+  max-width: 48rem;
+}
+
+/* Section vertical rhythm */
+.section {
+  padding-top: var(--space-16);
+  padding-bottom: var(--space-16);
+}
+
+.section--sm {
+  padding-top: var(--space-12);
+  padding-bottom: var(--space-12);
+}
+
+/* Horizontal rule between sections */
+.section + .section {
+  border-top: 1px solid var(--color-rule);
+}
+
+/* Alternate background for visual separation */
+.section--alt {
+  background-color: var(--color-bg-alt);
+}
+
+/* Two-column split layout */
+.split {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-10);
+}
+
+@media (min-width: 1024px) {
+  .split {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .split__left {
+    flex: 1 1 55%;
+  }
+
+  .split__right {
+    flex: 1 1 45%;
+  }
+}
+
+/* Stack: vertical flex with consistent gap */
+.stack {
+  display: flex;
+  flex-direction: column;
+}
+
+.stack--xs { gap: var(--space-2); }
+.stack--sm { gap: var(--space-4); }
+.stack--md { gap: var(--space-6); }
+.stack--lg { gap: var(--space-10); }
+
+/* Inline cluster */
+.cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+/* Page header for inner pages */
+.page-header {
+  padding-top: var(--space-16);
+  padding-bottom: var(--space-12);
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.page-header__title {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+}
+
+@media (min-width: 768px) {
+  .page-header__title {
+    font-size: var(--text-3xl);
+  }
+}
+
+.page-header__subtitle {
+  margin-top: var(--space-3);
+  font-size: var(--text-lg);
+  color: var(--color-ink-muted);
+}
+
+/* Prose content wrapper for text-heavy pages */
+.prose {
+  font-size: var(--text-base);
+  line-height: 1.7;
+}
+
+.prose h2 {
+  font-size: var(--text-xl);
+  margin-top: var(--space-12);
+  margin-bottom: var(--space-4);
+}
+
+.prose h3 {
+  font-size: var(--text-lg);
+  margin-top: var(--space-8);
+  margin-bottom: var(--space-3);
+}
+
+.prose p {
+  margin-bottom: var(--space-4);
+}
+
+.prose p + p {
+  margin-top: 0;
+}
+
+.prose ul,
+.prose ol {
+  margin-bottom: var(--space-4);
+  padding-left: var(--space-6);
+}
+
+.prose ul {
+  list-style: disc;
+}
+
+.prose ol {
+  list-style: decimal;
+}
+
+.prose li {
+  margin-bottom: var(--space-2);
+}
+
+.prose li::marker {
+  color: var(--color-ink-muted);
+}
+
+.prose a {
+  color: var(--color-accent);
+}
+
+.prose strong {
+  font-weight: 700;
+}
+
+/* Definition list for scope and feature details */
+.def-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.def-list__item {
+  padding: var(--space-6) 0;
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.def-list__item:first-child {
+  border-top: 1px solid var(--color-rule);
+}
+
+.def-list__term {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin-bottom: var(--space-2);
+}
+
+.def-list__desc {
+  color: var(--color-ink-muted);
+}

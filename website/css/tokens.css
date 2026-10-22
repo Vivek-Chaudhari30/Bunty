@@ -1,0 +1,221 @@
+/* tokens.css - Design tokens for Bunty website
+   All colours, type scale, spacing, radii and font-face declarations.
+   This is the single source of truth for the visual system. */
+
+/* --- Font face declarations --- */
+
+/* Display serif: Source Serif 4 (Latin) */
+@font-face {
+  font-family: 'Source Serif 4';
+  src: url('../fonts/source-serif-4-latin-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Source Serif 4';
+  src: url('../fonts/source-serif-4-latin-600.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Source Serif 4';
+  src: url('../fonts/source-serif-4-latin-700.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Display serif: Noto Serif Devanagari (Hindi) */
+@font-face {
+  font-family: 'Noto Serif Devanagari';
+  src: url('../fonts/noto-serif-devanagari-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Noto Serif Devanagari';
+  src: url('../fonts/noto-serif-devanagari-700.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Display serif: Noto Serif Gujarati */
+@font-face {
+  font-family: 'Noto Serif Gujarati';
+  src: url('../fonts/noto-serif-gujarati-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Noto Serif Gujarati';
+  src: url('../fonts/noto-serif-gujarati-700.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Body sans: Anek Latin */
+@font-face {
+  font-family: 'Anek Latin';
+  src: url('../fonts/anek-latin-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Anek Latin';
+  src: url('../fonts/anek-latin-500.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Anek Latin';
+  src: url('../fonts/anek-latin-700.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Body sans: Anek Devanagari (Hindi) */
+@font-face {
+  font-family: 'Anek Devanagari';
+  src: url('../fonts/anek-devanagari-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Anek Devanagari';
+  src: url('../fonts/anek-devanagari-500.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Anek Devanagari';
+  src: url('../fonts/anek-devanagari-700.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Body sans: Anek Gujarati */
+@font-face {
+  font-family: 'Anek Gujarati';
+  src: url('../fonts/anek-gujarati-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Anek Gujarati';
+  src: url('../fonts/anek-gujarati-500.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Anek Gujarati';
+  src: url('../fonts/anek-gujarati-700.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* --- Custom properties --- */
+
+:root {
+  /* Colours */
+  --color-bg: #F4F1EA;
+  --color-bg-alt: #EDE9E0;
+  --color-ink: #1C1B19;
+  --color-ink-muted: #5E5A52;
+  --color-rule: #D9D4C7;
+  --color-accent: #1E5B45;
+  --color-accent-hover: #174A38;
+  --color-accent-on: #F4F1EA;
+
+  /* Type scale (rem, based on 16px root) */
+  --text-xs: 0.875rem;
+  --text-sm: 1rem;
+  --text-base: 1.125rem;
+  --text-lg: 1.375rem;
+  --text-xl: 1.75rem;
+  --text-2xl: 2.25rem;
+  --text-3xl: 3rem;
+  --text-4xl: 4rem;
+
+  /* Font stacks */
+  --font-display: 'Source Serif 4', 'Noto Serif Devanagari', 'Noto Serif Gujarati', Georgia, serif;
+  --font-body: 'Anek Latin', 'Anek Devanagari', 'Anek Gujarati', system-ui, sans-serif;
+
+  /* Spacing (rem) */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-20: 5rem;
+  --space-24: 6rem;
+
+  /* Radii */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+
+  /* Layout */
+  --max-width: 67.5rem;
+  --gutter: 1.5rem;
+
+  /* Transitions - instant colour change only */
+  --transition-color: color 0.1s ease, background-color 0.1s ease, border-color 0.1s ease;
+}
+
+/* Larger gutter on wider screens */
+@media (min-width: 768px) {
+  :root {
+    --gutter: 2rem;
+  }
+}
+
+/* Hindi elements: taller line-height for Devanagari script */
+[lang="hi"] {
+  font-family: 'Anek Devanagari', 'Anek Latin', system-ui, sans-serif;
+  line-height: 1.8;
+}
+[lang="hi"] h1,
+[lang="hi"] h2,
+[lang="hi"] h3 {
+  font-family: 'Noto Serif Devanagari', 'Source Serif 4', Georgia, serif;
+  line-height: 1.4;
+}
+
+/* Gujarati elements: taller line-height for Gujarati script */
+[lang="gu"] {
+  font-family: 'Anek Gujarati', 'Anek Latin', system-ui, sans-serif;
+  line-height: 1.8;
+}
+[lang="gu"] h1,
+[lang="gu"] h2,
+[lang="gu"] h3 {
+  font-family: 'Noto Serif Gujarati', 'Source Serif 4', Georgia, serif;
+  line-height: 1.4;
+}
+
+/* Respect reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
+}

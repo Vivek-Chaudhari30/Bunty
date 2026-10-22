@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>About us - Bunty</title>
+  <meta name="description" content="Learn about Bunty, our motivation, and the team building personal AI assistance for everyone.">
+  <link rel="canonical" href="https://bunty.ai/about.html">
+  <meta property="og:title" content="About us - Bunty">
+  <meta property="og:description" content="Why we are building a personal AI assistant on phone calls and WhatsApp.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://bunty.ai/about.html">
+  <meta property="og:image" content="https://bunty.ai/og-image.png">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/reset.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/pages.css">
+</head>
+<body>
+  <a href="#main" class="skip-link">Skip to main content</a>
+
+  <!-- Header -->
+  <header class="header" role="banner">
+    <div class="container header__inner">
+      <a href="/" class="header__wordmark" aria-label="Bunty home">Bunty</a>
+
+      <button class="header__menu-btn" aria-expanded="false" aria-controls="main-nav" aria-label="Open menu">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/>
+          <line x1="3" y1="12" x2="21" y2="12"/>
+          <line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+      </button>
+
+      <nav class="header__nav" id="main-nav" aria-label="Main navigation">
+        <ul class="header__nav-list">
+          <li><a href="/#capabilities">What Bunty does</a></li>
+          <li><a href="/#how-it-works">How it works</a></li>
+          <li><a href="scope.html">Scope</a></li>
+          <li><a href="pricing.html">Pricing</a></li>
+          <li><a href="about.html" aria-current="page">About us</a></li>
+        </ul>
+      </nav>
+
+      <div class="header__actions">
+        <a href="https://wa.me/910000000000" class="btn btn--primary btn--sm header__cta">Chat on WhatsApp</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="page-header">
+      <div class="container container--narrow">
+        <h1 class="page-header__title">About Bunty</h1>
+        <p class="page-header__subtitle">A personal assistant you reach by phone call or WhatsApp.</p>
+      </div>
+    </div>
+
+    <section class="section">
+      <div class="container container--narrow prose">
+        <p>Bunty is a personal assistant you reach by phone call or WhatsApp. You tell it what you need, and it takes care of it and confirms when it is done. We are a team of three, working across India, Boston and the UK.</p>
+
+        <h2>Why Bunty</h2>
+        <p>Most useful software asks you to download an app, make an account and learn a new screen. Many people do not want that, and some find it hard. Almost everyone can make a phone call or send a WhatsApp message. So Bunty works through those two things, and nothing else is needed.</p>
+        <p>You can speak or write to Bunty in Hindi, English, Hinglish or Gujarati. It remembers what you tell it, so you do not have to repeat yourself. Before it books something, calls someone or spends money, it reads the task back and waits for your yes. Payments are never automatic, because you approve each one in your own UPI app. When Bunty calls someone for you, it says it is an AI calling on your behalf.</p>
+
+        <h2>Where we are</h2>
+        <p>Bunty is in its prototype stage. We are testing with a small group of people, adding one task at a time, starting with reminders and WhatsApp, then calls, Google and food ordering.</p>
+
+        <h2>The team</h2>
+        <div class="team-list">
+          <div class="team-member">
+            <h3 class="team-member__name">Devamm</h3>
+            <p class="team-member__role">Co-Founder, United Kingdom</p>
+            <p class="team-member__bio">MSc in Advanced Computer Science (AI) at the University of Leeds.</p>
+          </div>
+          <div class="team-member">
+            <h3 class="team-member__name">Shrestha Thakkar</h3>
+            <p class="team-member__role">Co-Founder, India</p>
+            <p class="team-member__bio">Software engineer at Aaspass.</p>
+          </div>
+          <div class="team-member">
+            <h3 class="team-member__name">Vivek Chaudhari</h3>
+            <p class="team-member__role">Co-Founder, Boston</p>
+            <p class="team-member__bio">FDSE Context AI Labs | MSc CS Northeastern University.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer" role="contentinfo">
+    <div class="container footer__inner">
+      <div class="footer__col">
+        <p class="footer__heading">Pages</p>
+        <a href="about.html" class="footer__link">About us</a>
+        <a href="scope.html" class="footer__link">Scope</a>
+        <a href="pricing.html" class="footer__link">Pricing</a>
+        <a href="contact.html" class="footer__link">Contact us</a>
+        <a href="onboarding.html" class="footer__link">How to start</a>
+      </div>
+      <div class="footer__col">
+        <p class="footer__heading">Legal</p>
+        <a href="privacy.html" class="footer__link">Privacy Policy</a>
+        <a href="terms.html" class="footer__link">Terms of Service</a>
+      </div>
+      <div class="footer__col">
+        <p class="footer__heading">Contact</p>
+        <a href="mailto:hello@example.com" class="footer__link">hello@example.com</a>
+        <span class="footer__link">+91 00000 00000</span>
+      </div>
+      <div class="footer__bottom">
+        <p>Bunty AI Assistant, San Francisco, USA. Prototype: not all features are available yet.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    (function() {
+      var btn = document.querySelector('.header__menu-btn');
+      var nav = document.querySelector('.header__nav');
+      if (!btn || !nav) return;
+      btn.addEventListener('click', function() {
+        var open = btn.getAttribute('aria-expanded') === 'true';
+        btn.setAttribute('aria-expanded', String(!open));
+        nav.classList.toggle('header__nav--open');
+      });
+    })();
+  </script>
+</body>
+</html>
