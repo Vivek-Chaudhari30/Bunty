@@ -14,7 +14,7 @@ Open http://localhost:8080. Asset links are root paths (/assets/...), so open it
 - Upload the contents of this folder (not the folder itself) into public_html, including the hidden .htaccess.
 - .htaccess forces HTTPS, redirects www to the bare domain, sets caching and security headers, and sends unknown paths to the home page.
 - _headers is only for Cloudflare Pages and is ignored on Hostinger.
-- Automatic: pushing changes under website/ to main runs .github/workflows/website-deploy.yml. It copies the contents of this folder (without README.md and _headers) onto the website-deploy branch, and Hostinger deploys that branch into public_html. Manual upload still works.
+- Automatic: pushing changes under website/ (or to the workflow file itself) to main runs .github/workflows/website-deploy.yml. It copies the contents of this folder (without README.md and _headers) onto the website-deploy branch, and Hostinger deploys that branch into public_html. Manual upload still works.
 
 ### One-time setup for automatic deploys
 
