@@ -89,7 +89,7 @@ review it after the prototype, so don't build launch-target parts yet unless ask
 | Payments | Razorpay UPI payment requests (later) | User approves with their own UPI PIN | Same |
 | OTP | Decide when building onboarding (ask) | | MSG91 |
 | Router service (`backend/`) | Bun + TypeScript (proposed: same language as Vellum) | One language for the whole prototype | Part of own backend |
-| Website | Plain HTML + CSS (+ a little JS), Cloudflare Pages | Static, free, fast in India | Same |
+| Website | Plain HTML + CSS (+ a little JS), Hostinger (static files in `public_html`, `.htaccess` for headers) | Static, cheap, simple upload | Same |
 | Server | One cloud VM running Docker (`vellum hatch --remote docker`) | Simple; one container set per tester | AWS Mumbai |
 | Docs and standups | Notion (Features + Standup log) | One place the whole team reads | Same |
 | Code | GitHub, one repo | | Same |

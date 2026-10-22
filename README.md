@@ -55,7 +55,7 @@ under [Keys still empty](#keys-still-empty). Details: [CHANGES.md](CHANGES.md).
 | 8 | Hardening and server deploy | `backend/router`, `backend/deploy`, `infra`, plugins | Built and tested with mocks; voice replies not wired into Vellum |
 
 Not started: Google (Gmail, Calendar) via Composio; Zomato and Swiggy.
-Website: built in `website/` (plain static HTML, CSS and JS for Cloudflare Pages). The old
+Website: built in `website/` (plain static HTML, CSS and JS, hosted on Hostinger). The old
 [Vercel preview](https://website-seven-xi-36.vercel.app) still shows the previous site.
 
 ## Folders
@@ -134,7 +134,7 @@ python3 -m http.server 8080   # open http://localhost:8080
 ```
 
 Open it through a server, not by double-clicking the file: asset links are root paths like `/assets/`.
-Deploy on Cloudflare Pages with no build command and `website` as the output directory.
+Deploy on Hostinger: upload the contents of `website/` (including the hidden `.htaccess`) into `public_html`.
 See [website/README.md](website/README.md).
 
 ## Keys still empty
