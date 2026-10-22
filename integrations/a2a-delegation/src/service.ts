@@ -66,10 +66,13 @@ function json(body: unknown, status = 200): Response {
 }
 
 export class A2AService {
-  protected readonly nonces = new NonceCache();
-  protected readonly limiter = new RateLimiter();
+  protected readonly nonces: NonceCache;
+  protected readonly limiter: RateLimiter;
 
-  constructor(readonly deps: ServiceDeps) {}
+  constructor(readonly deps: ServiceDeps) {
+    this.nonces = new NonceCache(deps.db.db);
+    this.limiter = new RateLimiter(undefined, deps.db.db);
+  }
 
   protected now(): number {
     return (this.deps.now ?? Date.now)();

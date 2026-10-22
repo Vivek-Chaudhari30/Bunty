@@ -1,5 +1,6 @@
 // SQLite storage for the router (bun:sqlite). No message bodies are stored.
 import { Database } from "bun:sqlite";
+import { RATE_HITS_SCHEMA } from "./limits.ts";
 
 export const STICKY_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -50,6 +51,7 @@ export class RouterStore {
         assistant_id TEXT
       );
     `);
+    this.db.exec(RATE_HITS_SCHEMA);
   }
 
   /** Outward actions the router itself takes (onboarding replies, deletes). Last 4 digits only. */
@@ -69,7 +71,7 @@ export class RouterStore {
   }
 
   /**
-   * "Delete my data": the user's routing row, consent, onboarding record, and every sticky
+   * "Delete my data": the user's routing row, consent, onboarding record, rate-limit hits, and every sticky
    * route that points at their assistant or their number. Returns the removed assistant id,
    * so the operator can delete that assistant's workspace too.
    */
@@ -81,6 +83,7 @@ export class RouterStore {
       this.db.query("DELETE FROM users WHERE phone_e164 = ?1").run(phone);
       this.db.query("DELETE FROM consent WHERE phone_e164 = ?1").run(phone);
       this.db.query("DELETE FROM onboarding_replies WHERE phone_e164 = ?1").run(phone);
+      this.db.query("DELETE FROM rate_hits WHERE key = ?1").run(phone);
     })();
     return user?.assistant_id ?? null;
   }

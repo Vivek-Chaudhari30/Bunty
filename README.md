@@ -87,7 +87,7 @@ bun install                # dev dependencies only: typescript, @types/bun
 bun run check              # typecheck + all tests in backend/ and integrations/
 ```
 
-Expect `133 pass, 0 fail`. `bun run test` never runs Vellum's own tests; inside `vellum/` run only
+Expect `142 pass, 0 fail`. `bun run test` never runs Vellum's own tests; inside `vellum/` run only
 the test file you need (`bun test path/to/file.test.ts`).
 
 Everything runs with mocks by default (`BUNTY_ADAPTERS` unset). Set `BUNTY_ADAPTERS=real` only

@@ -24,6 +24,7 @@ SQLite `router.db`:
 | --- | --- |
 | `users` | `phone_e164` (PK), `assistant_id`, `assistant_base_url`, `status`, `created_at` |
 | `sticky_routes` | `counterparty_e164`, `assistant_id`, `expires_at` |
+| `rate_hits` | `bucket` (`whatsapp` / `call`), `key` (sender number), `at`; rows older than 1 minute are deleted on every check |
 | `consent` | `phone_e164`, `kind` (recording, data use), `granted_at` |
 
 No message bodies are stored. Logs show the last 4 digits of numbers only.
@@ -55,7 +56,8 @@ Behaviour worth knowing:
 - `POST /internal/users` body: `{ "phone", "assistantId", "assistantBaseUrl", "status"? }`.
 - Phase 8: `POST /internal/users/delete` (`{ "phone" }`, "delete my data"),
   `POST /internal/consent` (`{ "phone", "kind": "recording" | "data_use" }`), `GET /metrics`.
-  Rate limits per sender number: 30 WhatsApp messages and 5 calls per minute (`src/limits.ts`);
+  Rate limits per sender number: 30 WhatsApp messages and 5 calls per minute (`src/limits.ts`,
+  stored in the `rate_hits` table so they survive a restart; "delete my data" clears them);
   over the limit, messages are dropped with a 200 (no Meta retry) and calls hear a busy message.
   The `audit` table records onboarding replies and deletions (last 4 digits only).
 

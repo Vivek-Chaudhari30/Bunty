@@ -6,6 +6,7 @@
 //   checks it before our route runs ("a paired peer sent this").
 // - X-Bunty-Signature: the pair's shared secret. Our route checks it ("this peer sent this").
 // Both sign `timestamp + "." + nonce + "." + rawBody`.
+import { Database } from "bun:sqlite";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 export const MAX_SKEW_SECONDS = 300;
@@ -58,32 +59,59 @@ export function signedHeaders(opts: {
   };
 }
 
-/** Remembers nonces for 10 minutes so a captured request cannot be replayed. */
+/** Used nonces and rate-limit hits. Created by A2ADb; kept in SQLite so a restart forgets nothing. */
+export const REPLAY_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS nonces (
+    peer_id TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL,
+    PRIMARY KEY (peer_id, nonce)
+  );
+  CREATE INDEX IF NOT EXISTS nonces_expires ON nonces(expires_at);
+  CREATE TABLE IF NOT EXISTS rate_hits (key TEXT NOT NULL, at INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS rate_hits_key ON rate_hits(key, at);
+`;
+
+/** The plugin's database (`A2ADb.db`), or a private in-memory one for tests. */
+function replayDb(db?: Database): Database {
+  if (db) return db;
+  const mem = new Database(":memory:");
+  mem.exec(REPLAY_SCHEMA);
+  return mem;
+}
+
+/** Remembers nonces for 10 minutes so a captured request cannot be replayed, even across a restart. */
 export class NonceCache {
-  private seen = new Map<string, number>();
+  private readonly db: Database;
+  constructor(db?: Database) {
+    this.db = replayDb(db);
+  }
   /** Returns false if this nonce was already used. */
   claim(peerId: string, nonce: string, nowMs: number): boolean {
-    for (const [k, exp] of this.seen) if (exp <= nowMs) this.seen.delete(k);
-    const key = `${peerId}:${nonce}`;
-    if (this.seen.has(key)) return false;
-    this.seen.set(key, nowMs + NONCE_TTL_MS);
-    return true;
+    this.db.query("DELETE FROM nonces WHERE expires_at <= ?1").run(nowMs);
+    return (
+      this.db
+        .query("INSERT OR IGNORE INTO nonces (peer_id, nonce, expires_at) VALUES (?1, ?2, ?3)")
+        .run(peerId, nonce, nowMs + NONCE_TTL_MS).changes === 1
+    );
   }
 }
 
-/** Sliding one-minute window per peer. */
+/** Sliding one-minute window per peer. Rows older than a minute are deleted on every check. */
 export class RateLimiter {
-  private hits = new Map<string, number[]>();
-  constructor(private readonly perMinute = RATE_LIMIT_PER_MINUTE) {}
+  private readonly db: Database;
+  constructor(
+    private readonly perMinute = RATE_LIMIT_PER_MINUTE,
+    db?: Database,
+  ) {
+    this.db = replayDb(db);
+  }
   allow(key: string, nowMs: number): boolean {
-    const recent = (this.hits.get(key) ?? []).filter((t) => nowMs - t < 60_000);
-    if (recent.length >= this.perMinute) {
-      this.hits.set(key, recent);
-      return false;
-    }
-    recent.push(nowMs);
-    this.hits.set(key, recent);
-    return true;
+    return this.db.transaction(() => {
+      this.db.query("DELETE FROM rate_hits WHERE at <= ?1").run(nowMs - 60_000);
+      const { n } = this.db.query("SELECT COUNT(*) AS n FROM rate_hits WHERE key = ?1").get(key) as { n: number };
+      if (n >= this.perMinute) return false;
+      this.db.query("INSERT INTO rate_hits (key, at) VALUES (?1, ?2)").run(key, nowMs);
+      return true;
+    })();
   }
 }
 

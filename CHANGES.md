@@ -2,7 +2,7 @@
 
 Everything built so far, oldest first. Every phase is built and tested **against mocks**: no real
 call, message, person or paid service has been used. Current total: `bun run check` = typecheck
-clean, **133 tests pass, 0 fail**. Nothing in `vellum/` has been changed.
+clean, **142 tests pass, 0 fail**. Nothing in `vellum/` has been changed.
 
 Example names follow AGENTS.md: assistants **Chintu** (Owner A's) and **Sujal** (Owner B's),
 numbers `+91 00000 00001` and `+91 00000 00002`.
@@ -118,8 +118,8 @@ Added the design that every phase follows, and the rules that make AI tools read
     (Owner A hears only accepted, question, done, declined, failed, canceled).
   - Files up to 5 MB inline, bigger ones by a signed 24-hour link. Only files inside the
     workspace can be released.
-  - `schedules/deadline-sweep`: every 15 minutes, Owner A is asked once what to do about an
-    overdue task.
+  - Deadline sweep: every 15 minutes, Owner A is asked once what to do about an overdue task
+    (now a timer started by `hooks/init.ts`, no model turn; see "After the phases").
 - **Tests:** 14, including the roadmap scenario end to end ("three presentations by tomorrow").
 
 ## Phase 8: hardening and server deploy
@@ -137,6 +137,20 @@ Added the design that every phase follows, and the rules that make AI tools read
     runbook in [infra/README.md](infra/README.md).
 - **Not done:** Exotel and Sarvam (later, as their own integrations), voice replies wired in.
 - **Tests:** 28.
+
+## After the phases: quick fixes (BUN-8, BUN-14, BUN-18, BUN-19)
+
+- **BUN-8:** every plugin and `_template` now declares `"@vellumai/plugin-api": "^0.12.6"`,
+  matching our Vellum copy (was `^0.8.0`, which Vellum's loader will soon refuse).
+- **BUN-14:** `.github/workflows/check.yml` runs `bun run check` on Bun 1.3.11 for every pull
+  request and push to `main` (D-17).
+- **BUN-18:** the A2A deadline sweep runs on a timer inside the assistant, started by
+  `hooks/init.ts` and stopped by `hooks/shutdown.ts`, so no model turn runs every 15 minutes.
+  `schedules/deadline-sweep` is removed (D-15).
+- **BUN-19:** router rate limits and A2A nonces and rate limits are stored in SQLite and survive a
+  restart; "delete my data" clears them (D-16).
+- **Tests:** 9 new (timer, restart, delete my data). Type shim gains `PluginLogger`,
+  `InitContext.logger` and `ShutdownContext`.
 
 ## Decisions
 
@@ -158,6 +172,9 @@ Full text: [docs/architecture/decisions.md](docs/architecture/decisions.md).
 | D-12 | Every outside service behind an adapter, mock by default | Chosen overnight, revisit |
 | D-13 | Peer messages never run a model turn | Chosen overnight, revisit |
 | D-14 | Wire format uses Vellum's real A2A field names (snake_case) | Chosen overnight, revisit |
+| D-15 | Deadline sweep runs on a timer, not a schedule | Proposed (agreed with Vivek) |
+| D-16 | Rate limits and A2A nonces stored in SQLite | Proposed (agreed with Vivek) |
+| D-17 | CI on GitHub Actions | Proposed (agreed with Vivek) |
 
 ## Proposed `vellum/` changes (not made)
 
