@@ -56,3 +56,29 @@ create schedules.
 assistant with `ANTHROPIC_API_KEY`.
 
 **`vellum/` edits:** none.
+
+## Phase 2: WhatsApp
+
+**Built**
+- `integrations/whatsapp/src/test-webhook.ts`: builds Meta-shaped webhook payloads (text, voice
+  note, photo, document, approval button) matching `vellum/gateway/src/whatsapp/normalize.ts`,
+  and signs them with Meta's `X-Hub-Signature-256` scheme.
+- `integrations/whatsapp/scripts/send-test-webhook.ts`: sends one to your own local gateway or
+  router. Never contacts Meta.
+- `integrations/whatsapp/README.md`: test kit, plus the two owner-on-WhatsApp gaps with exact
+  files. (The test kit files were swept into the Phase 1 commit by mistake; the README and log
+  are in this one.)
+
+**Not done (needs the team's OK to edit `vellum/`):** owner verification on WhatsApp
+(`supportsVerification: false`) and sending approvals/call questions to WhatsApp
+(`calls/guardian-dispatch.ts`). Details in the README.
+
+**Tests:** 3 new (payload shapes, signature). `bun run check` clean.
+
+**Needs real keys:** Meta app + test number: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`,
+`WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN` (stored per assistant with
+`assistant credentials prompt --service whatsapp`), plus a public URL for the gateway. The exit
+check (Hindi voice note in, correct reply out, approval buttons) also needs `ANTHROPIC_API_KEY`
+and Deepgram for transcription.
+
+**`vellum/` edits:** none.
