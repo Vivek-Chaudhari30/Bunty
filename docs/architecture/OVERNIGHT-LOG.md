@@ -116,3 +116,24 @@ real onboarding reply (`BUNTY_ADAPTERS=real`), a public URL for the router. Exit
 teammates, one shared number) needs those plus two running assistants.
 
 **`vellum/` edits:** none.
+
+## Phase 4: phone calls
+
+**Built:** calls are built into Vellum (Twilio Media Streams, Deepgram, ElevenLabs), so this is
+config and measurement only.
+- `integrations/calls/src/voice-config.ts` + `scripts/voice-config.ts`: the India voice config
+  (`services.stt.language multi`, ElevenLabs per-language voices, `calls.disclosure.enabled true`).
+  Dry run by default. Keys checked against `vellum/assistant/src/config/schemas/{stt,tts,calls}.ts`.
+- `integrations/calls/src/exit-check.ts` + `scripts/exit-check.ts`: scores the 10 test calls from a
+  CSV against the roadmap's exit check.
+
+**Files touched:** `integrations/calls/**`, `.env.example` (`ELEVENLABS_VOICE_HI/EN/GU`),
+`README.md`.
+
+**Tests:** 6 new. `bun run check` clean.
+
+**Needs real keys:** Twilio (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`,
+stored via the `twilio-setup` skill), `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` + voice ids,
+`ANTHROPIC_API_KEY`, a public URL. Then guardian phone verification and the 10 test calls.
+
+**`vellum/` edits:** none.

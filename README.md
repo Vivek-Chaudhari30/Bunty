@@ -17,7 +17,7 @@ Stage: **prototype**, built on the open-source [Vellum assistant](https://github
 | --- | --- |
 | Reminders | Setup documented (built into Vellum); live check needs an LLM key |
 | WhatsApp | Setup documented + signed test-webhook kit; owner-on-WhatsApp needs a `vellum/` edit (not done); live needs Meta keys |
-| Phone calls | Not started |
+| Phone calls | Voice config + exit-check scripts (built into Vellum); live needs Twilio, Deepgram, ElevenLabs |
 | Google (Gmail, Calendar) via Composio | Not started |
 | Zomato and Swiggy | Not started |
 | Shared-number router | Built and tested with mocks (`backend/router`); live needs Meta + Twilio |

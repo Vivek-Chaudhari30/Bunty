@@ -18,7 +18,18 @@ Deepgram and ElevenLabs keys. Never paste them in chat; use the secure prompt.
 3. Verify yourself as owner by phone code (`guardian-verify-setup`).
 4. From Phase 3, the Twilio number's voice webhook points at the router `/twilio/voice`.
 
+## Scripts
+
+- `scripts/voice-config.ts`: prints the India voice config commands (dry run); `--apply` runs them.
+  Voice ids come from `ELEVENLABS_VOICE_HI`, `ELEVENLABS_VOICE_EN`, `ELEVENLABS_VOICE_GU`.
+- `scripts/exit-check.ts calls.csv`: the Phase 4 exit check. One line per test call:
+  `ok,first_reply_ms,language`, for example `1,1800,hi`. Passes with at least 10 calls, at most 1
+  failure and an average first reply under 2.5 s.
+
 ## How to test
 
+`bun test integrations/calls` (no keys needed).
+
 Own numbers only. Inbound call asking about something it remembers. Outbound
-`call_start` to your second phone. Note latency and language quality in Notion.
+`call_start` to your second phone. Note latency and language quality in Notion, and keep the CSV
+for `exit-check.ts`.
