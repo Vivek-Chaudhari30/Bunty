@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { A2ADb } from "../src/db.ts";
 import { buildMessageRequest, parseMessageRequest, quotePeer, delegationMeta } from "../src/envelope.ts";
 import { FIELDS } from "../src/secrets.ts";
 import { INVITE_TTL_MS } from "../src/service.ts";
@@ -38,6 +42,26 @@ describe("signing", () => {
     const nonces = new NonceCache();
     expect((await check(sign("{}"), "{}", nonces)).ok).toBe(true);
     expect(await check(sign("{}"), "{}", nonces)).toMatchObject({ ok: false, reason: "replayed_nonce" });
+  });
+
+  test("a replay is still rejected after the assistant restarts", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "a2a-")), "a2a.db");
+    expect((await check(sign("{}", "same"), "{}", new NonceCache(new A2ADb(path).db))).ok).toBe(true);
+    expect(await check(sign("{}", "same"), "{}", new NonceCache(new A2ADb(path).db))).toMatchObject({
+      ok: false,
+      reason: "replayed_nonce",
+    });
+  });
+
+  test("rate limit survives a restart; delete my data clears nonces and hits", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "a2a-")), "a2a.db");
+    const before = new RateLimiter(1, new A2ADb(path).db);
+    expect(before.allow("sujal", now)).toBe(true);
+    const db = new A2ADb(path);
+    expect(new RateLimiter(1, db.db).allow("sujal", now + 1)).toBe(false);
+    new NonceCache(db.db).claim("sujal", "n1", now);
+    db.wipe();
+    expect(db.db.query("SELECT (SELECT COUNT(*) FROM nonces) + (SELECT COUNT(*) FROM rate_hits) AS n").get()).toEqual({ n: 0 });
   });
 
   test("request more than 5 minutes old is rejected", async () => {

@@ -6,7 +6,7 @@
   "description": "Pair with another Bunty assistant, pass short notes, and delegate tasks with the owners' approval.",
   "icon": "handshake",
   "peerDependencies": {
-    "@vellumai/plugin-api": "^0.8.0"
+    "@vellumai/plugin-api": "^0.12.6"
   },
   "vellum": {}
 }

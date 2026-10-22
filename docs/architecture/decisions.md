@@ -90,3 +90,24 @@ protocol doc example is updated to match.
 Twilio, Meta WhatsApp, TTS and LLM calls in our code go through small interfaces. The mock is used
 unless `BUNTY_ADAPTERS=real`; the real one reads its key from env and throws
 `NotConfiguredError` naming the missing variable. No real calls or messages are sent by tests.
+
+## D-15 · Deadline sweep runs on a timer, not a schedule · 2026-10-22 · Proposed (agreed with Vivek)
+`a2a-delegation/hooks/init.ts` starts a 15-minute timer inside the assistant (first run after 1
+minute) that calls `deadlineSweep()` directly; `hooks/shutdown.ts` stops it. The old
+`schedules/deadline-sweep` is removed. Why: the schedule ran a model turn every 15 minutes per
+assistant even when nothing was overdue. Instead of: an hourly schedule (still a model turn every
+hour, alerts up to an hour late). Trade-off: the sweep no longer shows in Vellum's schedules UI,
+and the timer is unverified until a live assistant runs (BUN-30). The owner can still ask for the
+check any time through `a2a_deadline_sweep`.
+
+## D-16 · Rate limits and A2A nonces stored in SQLite · 2026-10-22 · Proposed (agreed with Vivek)
+Router: table `rate_hits (bucket, key, at)` in the router's database. A2A: tables `nonces` and
+`rate_hits` in `a2a.db`. Rows older than their window are deleted on every check, and "delete my
+data" clears them. Why: a restart used to reset every limit and forget used nonces, so a captured
+request could be replayed right after a restart. Instead of: keeping them in memory, or a separate
+state file. Trade-off: one SQLite write per incoming request.
+
+## D-17 · CI on GitHub Actions · 2026-10-22 · Proposed (agreed with Vivek)
+`.github/workflows/check.yml` runs `bun run check` on Bun 1.3.11 for every pull request and push to
+`main`. Actions are pinned to exact commits (`actions/checkout` v4.2.2, `oven-sh/setup-bun`
+v2.0.2). Instead of: installing Bun with its curl script. Trade-off: one third-party action, pinned.

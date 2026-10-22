@@ -4,7 +4,7 @@
   "private": true,
   "description": "One line: what this integration lets the assistant do.",
   "peerDependencies": {
-    "@vellumai/plugin-api": "^0.8.0"
+    "@vellumai/plugin-api": "^0.12.6"
   },
   "vellum": {}
 }

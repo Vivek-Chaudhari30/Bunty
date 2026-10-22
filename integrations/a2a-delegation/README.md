@@ -25,7 +25,7 @@ a2a-delegation/
 │   ├── accept_delegation.ts     Gate A, requireFreshApproval          (high risk)
 │   └── release_delegation_result.ts  Gate C, requireFreshApproval     (high risk)
 ├── skills/a2a-delegation/SKILL.md   when to use which tool, how to word owner prompts
-├── schedules/deadline-sweep/    every 15 min: due tasks -> status request / owner question
+├── hooks/init.ts, shutdown.ts   start / stop the 15-min deadline timer (no model turn, D-15)
 └── src/
     ├── signing.ts               HMAC sign + verify, nonce cache, clock skew
     ├── peers.ts                 peer records (secret lives in credential store)
@@ -55,7 +55,8 @@ Differences from the layout above, all recorded in `docs/architecture/decisions.
   same things the real one does.
 - Extra tools beyond the list above: `a2a_ask_requester` (question back while working),
   `a2a_report_failure` (can't finish), `a2a_resume_peer` (after a security pause),
-  `a2a_deadline_sweep` (called by the schedule). Every tool is owner only; every tool that sends
+  `a2a_deadline_sweep` (the owner can run the deadline check by hand; `hooks/init.ts` runs it every
+  15 minutes on a timer). Every tool is owner only; every tool that sends
   something or changes trust is `high` risk and checks `ctx.approvedViaPrompt`.
 - Gate C as built: `release_delegation_result` hashes exactly the approved files and stores the
   hash; `pushStatus` refuses any status push whose files do not match it, whatever called it.
@@ -65,6 +66,8 @@ Differences from the layout above, all recorded in `docs/architecture/decisions.
   (the download is signed like every other request). Received files are saved under the plugin
   data dir, `received/<taskId>/`. Only files inside the workspace can be released.
 - `.pptx`: no library added (decision D-08); any file type can be delegated.
+- Used nonces and per-peer rate limits are stored in `a2a.db` (tables `nonces`, `rate_hits`), so a
+  restart does not reopen a replay window (D-16).
 
 ## Secrets
 

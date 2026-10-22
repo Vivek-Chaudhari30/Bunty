@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MockWhatsAppSender } from "../src/adapters.ts";
 import { BUSY_CALL, createRouter } from "../src/app.ts";
-import { CALLS_PER_MINUTE, Metrics, WHATSAPP_PER_MINUTE } from "../src/limits.ts";
+import { CALLS_PER_MINUTE, Metrics, RateLimiter, WHATSAPP_PER_MINUTE } from "../src/limits.ts";
 import { RouterStore } from "../src/store.ts";
 import { config, internalRequest, MockForwarder, setup, voiceRequest, waMessage, waRequest, waWebhook } from "./helpers.ts";
 
@@ -71,6 +74,33 @@ describe("rate limits", () => {
     for (let i = 0; i < CALLS_PER_MINUTE; i++) await r.handle(voiceRequest({ From: "+910000000001", CallSid: `CA${i}` }));
     const res = await r.handle(voiceRequest({ From: "+910000000001", CallSid: "CAx" }));
     expect(await res.text()).toContain(BUSY_CALL);
+  });
+
+  test("limits survive a router restart (same database file)", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "router-")), "router.db");
+    const t = 1_000_000;
+    const before = new RateLimiter(2, new RouterStore(path).db, "call");
+    expect(before.allow("+910000000001", t)).toBe(true);
+    expect(before.allow("+910000000001", t + 1)).toBe(true);
+    const after = new RateLimiter(2, new RouterStore(path).db, "call");
+    expect(after.allow("+910000000001", t + 2)).toBe(false);
+    expect(after.allow("+910000000001", t + 60_001)).toBe(true);
+  });
+
+  test("limiters with different buckets do not share counts", () => {
+    const store = new RouterStore();
+    const wa = new RateLimiter(1, store.db, "whatsapp");
+    const call = new RateLimiter(1, store.db, "call");
+    expect(wa.allow("+910000000001", 0)).toBe(true);
+    expect(call.allow("+910000000001", 0)).toBe(true);
+    expect(wa.allow("+910000000001", 1)).toBe(false);
+  });
+
+  test("delete my data also removes the number's rate-limit hits", () => {
+    const store = new RouterStore();
+    new RateLimiter(5, store.db, "call").allow("+910000000001", Date.now());
+    store.deleteUser("+910000000001");
+    expect(store.db.query("SELECT COUNT(*) AS n FROM rate_hits").get()).toEqual({ n: 0 });
   });
 });
 

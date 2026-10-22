@@ -202,7 +202,7 @@ export class DelegationService extends A2AService {
     return res.bytes;
   }
 
-  /** Requester side, every 15 minutes: tell the owner about tasks past their deadline, once. */
+  /** Requester side, run by src/deadline-timer.ts every 15 minutes: tell the owner about tasks past their deadline, once. */
   async deadlineSweep(): Promise<number> {
     const now = this.now();
     let n = 0;

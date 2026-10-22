@@ -1,5 +1,6 @@
 // Plugin storage: SQLite (bun:sqlite) in the plugin's data dir. No secrets here.
 import { Database } from "bun:sqlite";
+import { REPLAY_SCHEMA } from "./signing.ts";
 import type { TaskState, TaskType, WaitingOn } from "./types.ts";
 
 export type PeerStatus = "active" | "paused";
@@ -95,6 +96,7 @@ export class A2ADb {
         filename TEXT NOT NULL, media_type TEXT, expires_at INTEGER NOT NULL
       );
     `);
+    this.db.exec(REPLAY_SCHEMA);
   }
 
   getSetting(key: string): string | null {
@@ -231,7 +233,7 @@ export class A2ADb {
 
   /** "Delete my data": everything this plugin stored. */
   wipe(): void {
-    for (const t of ["settings", "peers", "invites", "seen_messages", "delegations_inbound", "delegations_outbound", "auth_failures", "shared_files", "audit"]) {
+    for (const t of ["settings", "peers", "invites", "seen_messages", "delegations_inbound", "delegations_outbound", "auth_failures", "shared_files", "audit", "nonces", "rate_hits"]) {
       this.db.exec(`DELETE FROM ${t}`);
     }
   }

@@ -1,4 +1,5 @@
-// Run by schedules/deadline-sweep every 15 minutes. Only tells the owner; sends nothing.
+// The owner can ask for this check any time; hooks/init.ts also runs it every 15 minutes
+// without a model turn. Only tells the owner; sends nothing.
 import type { ToolContext, ToolExecutionResult } from "@vellumai/plugin-api";
 import { ownerOnly, run } from "../src/gate.ts";
 import { getService } from "../src/runtime.ts";

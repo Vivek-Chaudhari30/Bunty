@@ -49,9 +49,22 @@ declare module "@vellumai/plugin-api" {
     ) => Promise<ToolExecutionResult>;
   }
 
+  /** Pino-style logger (vellum/assistant/src/hooks/types.ts). */
+  export interface PluginLogger {
+    info(obj: Record<string, unknown>, msg?: string): void;
+    warn(obj: Record<string, unknown>, msg?: string): void;
+    error(obj: Record<string, unknown>, msg?: string): void;
+    debug(obj: Record<string, unknown>, msg?: string): void;
+  }
+
   export interface InitContext {
     config: unknown;
+    logger: PluginLogger;
     pluginStorageDir: string;
+    assistantVersion: string;
+  }
+
+  export interface ShutdownContext {
     assistantVersion: string;
   }
 

@@ -196,3 +196,10 @@ now (A03, A13 wiring, A25, A26, A35).
 
 Already in Linear and not duplicated: BUN-5 (website, which A13 and A37 relate to) and BUN-6
 (competitor research).
+
+## Updates since this audit
+
+- 2026-10-22, branch `vivek/quick-fixes-bun-8-14-18-19`: A03 / BUN-8 (plugin API `^0.12.6`),
+  A35 / BUN-14 (CI workflow), A25 / BUN-18 (deadline sweep on a timer, no model turn) and
+  A26 / BUN-19 (rate limits and nonces in SQLite) are done in code. `bun run check`: 142 pass.
+  The timer and CI still need a live run (BUN-30, first pull request).

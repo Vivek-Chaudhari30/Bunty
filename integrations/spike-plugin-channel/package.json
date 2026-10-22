@@ -4,7 +4,7 @@
   "private": true,
   "description": "Phase 0 throwaway plugin: checks plugin-channel turns, owner approval and owner notifications.",
   "peerDependencies": {
-    "@vellumai/plugin-api": "^0.8.0"
+    "@vellumai/plugin-api": "^0.12.6"
   },
   "vellum": {}
 }

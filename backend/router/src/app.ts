@@ -33,8 +33,8 @@ export function createRouter(deps: RouterDeps): (req: Request) => Promise<Respon
   const log = deps.log ?? (() => {});
   const now = deps.now ?? Date.now;
   const metrics = deps.metrics ?? new Metrics();
-  const waLimiter = new RateLimiter(WHATSAPP_PER_MINUTE);
-  const callLimiter = new RateLimiter(CALLS_PER_MINUTE);
+  const waLimiter = new RateLimiter(WHATSAPP_PER_MINUTE, store.db, "whatsapp");
+  const callLimiter = new RateLimiter(CALLS_PER_MINUTE, store.db, "call");
 
   /** Who should get traffic from this number: their own assistant, or the one that contacted them. */
   function resolve(phone: string): Target {

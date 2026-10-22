@@ -1,15 +1,46 @@
 // Per-number rate limits and simple counters for /metrics.
+import { Database } from "bun:sqlite";
 
-/** Sliding one-minute window per key. In memory: limits reset when the router restarts. */
+/** Hits in the last minute, per limiter ("bucket") and sender. Created by RouterStore. */
+export const RATE_HITS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS rate_hits (
+    bucket TEXT NOT NULL,
+    key TEXT NOT NULL,
+    at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS rate_hits_key ON rate_hits(bucket, key, at);
+  CREATE INDEX IF NOT EXISTS rate_hits_at ON rate_hits(at);
+`;
+
+/**
+ * Sliding one-minute window per key, kept in SQLite so limits survive a router restart.
+ * Pass the router's database (`store.db`); without one it uses a private in-memory database.
+ * Rows older than a minute are deleted on every check.
+ */
 export class RateLimiter {
-  private hits = new Map<string, number[]>();
-  constructor(readonly perMinute: number) {}
+  private readonly db: Database;
+  constructor(
+    readonly perMinute: number,
+    db?: Database,
+    private readonly bucket = "default",
+  ) {
+    if (db) {
+      this.db = db;
+    } else {
+      this.db = new Database(":memory:");
+      this.db.exec(RATE_HITS_SCHEMA);
+    }
+  }
   allow(key: string, nowMs: number): boolean {
-    const recent = (this.hits.get(key) ?? []).filter((t) => nowMs - t < 60_000);
-    const ok = recent.length < this.perMinute;
-    if (ok) recent.push(nowMs);
-    this.hits.set(key, recent);
-    return ok;
+    return this.db.transaction(() => {
+      this.db.query("DELETE FROM rate_hits WHERE at <= ?1").run(nowMs - 60_000);
+      const { n } = this.db
+        .query("SELECT COUNT(*) AS n FROM rate_hits WHERE bucket = ?1 AND key = ?2")
+        .get(this.bucket, key) as { n: number };
+      const ok = n < this.perMinute;
+      if (ok) this.db.query("INSERT INTO rate_hits (bucket, key, at) VALUES (?1, ?2, ?3)").run(this.bucket, key, nowMs);
+      return ok;
+    })();
   }
 }
 

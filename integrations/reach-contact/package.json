@@ -5,7 +5,7 @@
   "displayName": "Reach a contact",
   "description": "Call, WhatsApp or message someone's assistant for the owner, after reading the plan back and getting a yes.",
   "peerDependencies": {
-    "@vellumai/plugin-api": "^0.8.0"
+    "@vellumai/plugin-api": "^0.12.6"
   },
   "vellum": {}
 }
