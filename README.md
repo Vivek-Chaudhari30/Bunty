@@ -15,7 +15,7 @@ Stage: **prototype**, built on the open-source [Vellum assistant](https://github
 
 | Integration | Status |
 | --- | --- |
-| Reminders | Not started |
+| Reminders | Setup documented (built into Vellum); live check needs an LLM key |
 | WhatsApp | Not started |
 | Phone calls | Not started |
 | Google (Gmail, Calendar) via Composio | Not started |

@@ -40,3 +40,19 @@ D-10.
 (`ANTHROPIC_API_KEY`). Steps are in `integrations/spike-plugin-channel/README.md`.
 
 **`vellum/` edits:** none.
+
+## Phase 1: reminders
+
+**Built:** `integrations/reminders/README.md`, setup notes only, no code (reminders are Vellum's
+bundled `schedule` skill). Checked in `vellum/assistant/src/tools/schedule/create.ts`: one-shot
+`fire_at` must carry a time-zone offset, recurring uses cron + `timezone`, and only the owner can
+create schedules.
+
+**Files touched:** `integrations/reminders/README.md`, `README.md` (status row).
+
+**Tests:** no new code. `bun run check` still clean.
+
+**Needs real keys:** the exit check (reminder fires on time in India and UK/US) needs a running
+assistant with `ANTHROPIC_API_KEY`.
+
+**`vellum/` edits:** none.
