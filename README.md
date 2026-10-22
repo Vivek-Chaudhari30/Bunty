@@ -20,7 +20,7 @@ Stage: **prototype**, built on the open-source [Vellum assistant](https://github
 | Phone calls | Not started |
 | Google (Gmail, Calendar) via Composio | Not started |
 | Zomato and Swiggy | Not started |
-| Website | Built, not deployed |
+| Website | Built ([Live preview](https://website-seven-xi-36.vercel.app)) |
 
 ## How it works (prototype)
 
@@ -100,6 +100,8 @@ assistant plugins list    # should show <app-name> as ok
 Each integration's own README lists the secrets it needs and how to test it.
 
 ### 4. Website
+
+Live preview: https://website-seven-xi-36.vercel.app
 
 ```bash
 cd website

@@ -5,6 +5,10 @@ Static public website for Bunty personal AI assistant.
 Built with semantic HTML5, pure CSS custom properties, and minimal vanilla JavaScript.
 No CSS frameworks, build steps, or external runtime dependencies.
 
+## Live preview
+
+Website is live at: https://website-seven-xi-36.vercel.app
+
 ## How to run locally
 
 ```bash
