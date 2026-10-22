@@ -2,12 +2,8 @@
 // (docs/architecture/channels-phone-whatsapp.md section 2). Keys checked against
 // vellum/assistant/src/config/schemas/{stt,tts,calls}.ts.
 
-export interface VoiceEnv {
-  /** ElevenLabs voice ids per language; empty ones are skipped. */
-  ELEVENLABS_VOICE_HI?: string;
-  ELEVENLABS_VOICE_EN?: string;
-  ELEVENLABS_VOICE_GU?: string;
-}
+/** ElevenLabs voice ids per language (ELEVENLABS_VOICE_HI / _EN / _GU); empty ones are skipped. */
+export type VoiceEnv = Record<string, string | undefined>;
 
 function quote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
