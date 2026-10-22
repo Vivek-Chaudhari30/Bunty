@@ -1,9 +1,16 @@
-# Bunty services on one machine. Phase 3: the router. Phase 8 adds Caddy (TLS) in front.
-# Assistants are started by Vellum itself (`vellum hatch --remote docker`), one per tester;
-# the router only needs their public URLs, written with backend/router/scripts/add-user.ts.
+# Bunty services on one machine.
 #
+# Local (Phases 0-7): just the router.
 #   cp .env.example .env   # fill in the ROUTER_* values
 #   docker compose -f infra/docker-compose.yml up -d --build
+#
+# Server (Phase 8): router + Caddy (HTTPS for router.<domain> and <assistant>.<domain>).
+#   cp infra/assistants.example.json infra/assistants.json   # your domain, ids and gateway ports
+#   bun backend/deploy/scripts/gen-caddyfile.ts               # writes infra/Caddyfile
+#   docker compose -f infra/docker-compose.yml --profile server up -d --build
+#
+# Assistants are started by Vellum itself (`vellum hatch --remote docker`), one per tester, and
+# listen on the host. Register each one in the router with backend/router/scripts/add-user.ts.
 
 services:
   router:
@@ -17,7 +24,7 @@ services:
     volumes:
       - router-data:/data
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://localhost:8787/healthz').then(r => process.exit(r.ok ? 0 : 1))"]
@@ -25,5 +32,23 @@ services:
       timeout: 5s
       retries: 3
 
+  caddy:
+    profiles: ["server"]
+    image: caddy:2.8.4-alpine
+    depends_on:
+      - router
+    ports:
+      - "80:80"
+      - "443:443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
 volumes:
   router-data:
+  caddy-data:
+  caddy-config:

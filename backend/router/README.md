@@ -53,6 +53,11 @@ Behaviour worth knowing:
 - `POST /outbound-hint` for a number that belongs to a user is ignored: user-to-user goes
   assistant to assistant (decision D-05).
 - `POST /internal/users` body: `{ "phone", "assistantId", "assistantBaseUrl", "status"? }`.
+- Phase 8: `POST /internal/users/delete` (`{ "phone" }`, "delete my data"),
+  `POST /internal/consent` (`{ "phone", "kind": "recording" | "data_use" }`), `GET /metrics`.
+  Rate limits per sender number: 30 WhatsApp messages and 5 calls per minute (`src/limits.ts`);
+  over the limit, messages are dropped with a 200 (no Meta retry) and calls hear a busy message.
+  The `audit` table records onboarding replies and deletions (last 4 digits only).
 
 ## How to run
 

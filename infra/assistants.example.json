@@ -1,0 +1,9 @@
+{
+  "domain": "bunty.example.com",
+  "acmeEmail": "ops@example.com",
+  "routerPort": 8787,
+  "assistants": [
+    { "id": "chintu", "gatewayPort": 7830 },
+    { "id": "sujal", "gatewayPort": 7831 }
+  ]
+}

@@ -48,3 +48,15 @@ Checked in source. Both need a small edit inside `vellum/`, which needs the team
 | Owner approvals and call questions go only to the desktop (`vellum`) conversation | `vellum/assistant/src/calls/guardian-dispatch.ts` (`getGuardianDelivery({ channelTypes: ["vellum"] })`) | Also deliver to the guardian's WhatsApp binding when one exists. |
 
 Until then, approvals reach the owner on the desktop app or Telegram.
+
+## Voice-note replies (Phase 8, adapter only)
+
+`src/voice-reply.ts`: voice note in -> voice note out, text in -> text out, per-user switch to turn
+voice off (decision D-07). Answers over 1200 characters, or any text-to-speech failure, fall back
+to text. Text-to-speech (`ElevenLabsTts`) and the WhatsApp audio send (`MetaWhatsAppMessenger`:
+upload media, then send `audio`) are mocked unless `BUNTY_ADAPTERS=real`.
+
+**Not wired in:** Vellum's WhatsApp sender only sends image, video and document
+(`vellum/assistant/src/messaging/providers/whatsapp/send.ts`). Hooking this in needs a small
+`vellum/` edit or a plugin hook, which needs the team's OK. Audio is MP3, which WhatsApp shows
+as an audio file rather than a voice-note bubble; true voice notes need OGG/Opus.

@@ -1,16 +1,66 @@
 # Overnight log
 
-Work done in one unattended session, phase by phase. Summary goes at the top when all phases are
-done.
+## Summary
 
-**Branch:** all work is on `overnight/phases` (built on top of `docs/architecture-build-pack`, PR
-#1), not `main`. The request was to work directly on `main`, but merging the unreviewed PR #1
-branch into `main` was refused by the tool's safety check (you had said earlier not to merge PR
-#1). Every phase is still committed and pushed, just to this branch. To land it: merge PR #1, then
-open a PR from `overnight/phases`.
+All nine roadmap phases (0 to 8) have their code, docs and tests. Everything runs against mocks;
+nothing called a real service, phone or person. `bun run check` (typecheck + 133 tests) passes.
+No file in `vellum/` was changed.
 
-Notion was not reachable from this session, so the feature pages and standup row were not
-updated (AGENTS.md section 7). This log is the update to copy into Notion.
+**Where it is:** branch `overnight/phases` on GitHub, built on top of PR #1
+(`docs/architecture-build-pack`). It is **not on `main`**: merging the unreviewed PR #1 branch into
+`main` was refused by the tool's safety check, because you had said earlier not to merge PR #1.
+To land it, review and merge PR #1, then open a PR from `overnight/phases` into `main`.
+
+### What works with mocks
+
+| Piece | Where | Tested |
+| --- | --- | --- |
+| Shared-number router: WhatsApp + calls to the right assistant, 24 h stickiness for non-users, onboarding reply, signed internal API, delete, consent, rate limits, audit, metrics | `backend/router` | 42 tests + a local smoke run |
+| Reach a contact: route choice, emergency refusal, read-back, one-time approved plan, router hint, audit | `integrations/reach-contact` | 26 tests |
+| Assistant to assistant: pairing, notes, tasks with Gates A/B/C, question back, cancel, deadlines, files (inline and signed link), pause on bad signatures, delete my data, audit | `integrations/a2a-delegation` | 40 tests, Chintu and Sujal end to end in one process |
+| WhatsApp test kit (signed fake webhooks) and voice-reply adapter | `integrations/whatsapp` | 11 tests |
+| Call voice config and the Phase 4 exit-check scorer | `integrations/calls` | 6 tests |
+| Caddyfile generator for the server | `backend/deploy` | 4 tests |
+| Phase 0 spike plugin | `integrations/spike-plugin-channel` | 4 tests |
+
+### Keys and accounts needed, and where they go
+
+| Need | Names | Where it plugs in |
+| --- | --- | --- |
+| Anthropic (LLM) | `ANTHROPIC_API_KEY` | Every assistant (Vellum). Needed for every live exit check. |
+| Meta WhatsApp app + test number | `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN` | Each assistant: `assistant credentials prompt --service whatsapp`. Router: `ROUTER_WHATSAPP_APP_SECRET` (same app secret), `ROUTER_WHATSAPP_VERIFY_TOKEN`; the token and phone number id for the real onboarding reply. |
+| Twilio account + number | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | Each assistant via the `twilio-setup` skill. Router: `ROUTER_TWILIO_AUTH_TOKEN`. |
+| Deepgram (speech to text) | `DEEPGRAM_API_KEY` | Each assistant (Vellum). |
+| ElevenLabs (voices) | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_HI/EN/GU` | Each assistant (Vellum); `integrations/calls/scripts/voice-config.ts`; the voice-reply adapter. |
+| Our own random secrets | `ROUTER_INTERNAL_HMAC_KEY`, `ROUTER_METRICS_TOKEN` | Router `.env`; the HMAC key also in each assistant for router hints. |
+| Settings | `ROUTER_PUBLIC_BASE_URL`, `BUNTY_ADAPTERS=real`, `BUNTY_ASSISTANT_ID`, `BUNTY_ROUTER_URL`, `BUNTY_ASSISTANT_NAME`, `BUNTY_OWNER_NAME` | Router `.env` and each assistant's environment. |
+| Public URLs | DNS for `router.<domain>` and `*.<domain>` | `infra/README.md` "Server deploy". |
+
+A2A pairing secrets are created by the plugin and stored in Vellum's credential store. Nobody types them.
+
+### Needs a decision from the team
+
+- Merge PR #1, then review `overnight/phases`.
+- Two `vellum/` edits for the owner on WhatsApp (verification, approvals to WhatsApp), and one to
+  wire voice-note replies in: see `integrations/whatsapp/README.md`. None were made.
+- Decisions D-09 to D-14 are "chosen overnight, revisit" (`decisions.md`), and D-08 (`.pptx`) has
+  a recommendation but no library added.
+- Notion was not reachable, so this log is the update to copy into the feature pages and standup.
+
+### Start here (for a teammate picking this up)
+
+1. `git fetch && git checkout overnight/phases && bun install && bun run check`. Expect 133 pass.
+2. Read `docs/architecture/decisions.md` D-09 to D-14: what changed from the plan and why.
+3. Run the router locally: `backend/router/README.md` "How to run". Send fake WhatsApps with
+   `integrations/whatsapp/scripts/send-test-webhook.ts`.
+4. With an Anthropic key, do Phase 0 live first: hatch `chintu` and `sujal`, install
+   `integrations/spike-plugin-channel`, and run spikes A, B, C (its README). The most important
+   check is whether `ctx.approvedViaPrompt` is set when the owner approves a prompt (D-09); every
+   gate relies on it.
+5. Then follow the phases' "Needs real keys" notes below, in order, using your own test numbers only.
+
+**Branch note (written at the start):** the request was to work directly on `main`; see the
+summary above for why it is on `overnight/phases`.
 
 ---
 
@@ -229,5 +279,44 @@ The tool-gate test now covers all 15 tools. `bun run check`: 105 pass, 0 fail.
 
 **Needs real keys:** as Phase 6. The live exit check also needs Owner B's assistant to produce the
 decks (an LLM key) and, for files to reach Owner A on WhatsApp, Phase 2.
+
+**`vellum/` edits:** none.
+
+## Phase 8: hardening
+
+**Built**
+- Router: `POST /internal/users/delete` ("delete my data": routing row, consent, sticky routes),
+  `POST /internal/consent`, per-number rate limits (30 WhatsApps, 5 calls per minute; over the
+  limit, messages are dropped without a Meta retry and calls hear a busy message, and a dropped
+  sender is never forwarded inside someone else's batch), `audit` table (onboarding replies,
+  deletions; last 4 digits only), `GET /metrics` (Prometheus counters, optional bearer token).
+- `a2a-delegation`: `audit` table of every request sent to a peer (ids only),
+  `a2a_delete_my_data` (disconnect every peer, forget secrets, wipe the database and files).
+- `reach-contact`: `audit.jsonl` of approved sends (last 4 digits or peer id, no text),
+  `reach_contact_delete_data`.
+- `integrations/whatsapp/src/voice-reply.ts`: voice in, voice out (D-07), with text fallback;
+  ElevenLabs and Meta audio adapters, mocked by default. Not wired into Vellum (see README).
+- Server deploy: Caddy in `infra/docker-compose.yml` (profile `server`), Caddyfile generated
+  from `infra/assistants.json` by `backend/deploy`, router port bound to localhost,
+  "delete my data" runbook and monitoring notes in `infra/README.md`.
+
+**Files touched:** `backend/router/src/{app,config,store,limits}.ts`, `backend/router/test/hardening.test.ts`,
+`backend/deploy/**`, `integrations/a2a-delegation/src/{db,service,delegation}.ts`,
+`integrations/a2a-delegation/tools/a2a_delete_my_data.ts`, `integrations/reach-contact/src/{audit,core,plan,runtime}.ts`,
+`integrations/reach-contact/tools/reach_contact_delete_data.ts`, `integrations/whatsapp/src/voice-reply.ts`,
+`infra/{docker-compose.yml,assistants.example.json,README.md}`, `.gitignore`, `.env.example`
+(`ROUTER_METRICS_TOKEN`), `README.md`.
+
+**Interrupted:** this phase was interrupted once while editing `backend/router/src/store.ts`. That
+edit had not been written, so the tree was clean and green; the work was redone from there.
+
+**Tests:** 28 new. `bun run check`: 133 pass, 0 fail.
+
+**Not done:** CES for provider tokens (considered: Vellum already keeps provider keys in its
+credential store; nothing to add tonight), Exotel and Sarvam (later, as their own integrations per
+the roadmap), voice replies wired into Vellum (needs a `vellum/` edit).
+
+**Needs real keys:** ElevenLabs + Meta for voice replies; a VM, DNS and every key above for the
+server deploy exit check ("a new tester onboards in under 5 minutes").
 
 **`vellum/` edits:** none.
