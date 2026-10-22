@@ -111,3 +111,29 @@ state file. Trade-off: one SQLite write per incoming request.
 `.github/workflows/check.yml` runs `bun run check` on Bun 1.3.11 for every pull request and push to
 `main`. Actions are pinned to exact commits (`actions/checkout` v4.2.2, `oven-sh/setup-bun`
 v2.0.2). Instead of: installing Bun with its curl script. Trade-off: one third-party action, pinned.
+
+## D-18 · Bunty branding: plugin first, small shared constant in `vellum/` · 2026-10-22 · Proposed (agreed with Vivek)
+Users on WhatsApp, calls, the dashboard and the CLI never see "Vellum". In order:
+1. Workspace identity: `infra/scripts/set-bunty-identity.ts` writes `IDENTITY.md` (Name: Bunty)
+   and replaces only the `## Personality` section of `SOUL.md` (warm, short, plain; Hindi,
+   English, Hinglish, Gujarati).
+2. Plugin `integrations/bunty-brand`: a `pre-model-call` hook adds the brand rules to the system
+   prompt of user-facing calls (name, never mention Vellum or tools, the "who made you" answer
+   "I'm Bunty, your personal assistant. The Bunty team built me to help with reminders, calls and
+   messages.", plain-language permission requests).
+3. Safety net in `vellum/`: `assistant/src/util/brand.ts` (`BRAND_NAME`, `applyBrand()`) runs on
+   every WhatsApp text (`sendWhatsAppReply`) and all call speech (`sanitizeForTts`,
+   `speakSystemPrompt`). It changes only the word in prose; URLs, code and identifiers stay.
+4. Fixed messages, settings, dashboard (5 languages) and CLI text edited at source, using
+   `BRAND_NAME` in TypeScript and "Bunty" in JSON and HTML. Full list:
+   `docs/architecture/bunty-branding-inventory.md` section 5c.
+5. `infra/scripts/check-brand.ts` (in `bun run check`) fails on any new user-facing "Vellum".
+
+Why: no plugin hook can change outgoing channel text or fixed messages, and a call's reply is
+spoken before `post-model-call` runs, so prompt rules alone cannot guarantee it. Instead of: a
+blind rename across `vellum/` (thousands of identifiers, breaks updates) or prompt rules only
+(no guarantee for fixed text or calls). Trade-off: 203 `vellum/` files changed (157 source and
+data files including 507 translation lines, plus 46 tests), so each Vellum update needs a re-check; `bun run check:brand`
+shows anything that came back. Not done yet: 250 AI-facing skill and tool lines (listed as
+"pending" in `infra/scripts/check-brand.allow.json`, covered at runtime by the plugin and the
+safety net), real logos, and Bunty's own docs, Chrome extension and OAuth apps.

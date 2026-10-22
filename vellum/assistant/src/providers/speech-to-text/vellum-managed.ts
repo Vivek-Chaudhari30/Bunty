@@ -10,6 +10,7 @@ import {
   type ManagedSpeechResult,
   managedSpeechTranscribe,
 } from "../../platform/managed-speech.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import {
   SttError,
   type SttErrorCategory,
@@ -61,7 +62,7 @@ export function sttErrorFromManagedSpeech(
   if (failure.code === "insufficient_balance") {
     return managed(
       "provider-error",
-      "Vellum credits are exhausted — add funds to your Vellum account to continue using managed transcription.",
+      `${BRAND_NAME} credits are exhausted. Add funds to your ${BRAND_NAME} account to continue using managed transcription.`,
     );
   }
   switch (failure.status) {
@@ -75,7 +76,7 @@ export function sttErrorFromManagedSpeech(
         ? managed("auth", failure.message)
         : new SttError(
             "auth",
-            "Vellum couldn't authenticate with the platform while transcribing — reconnect your Vellum account, then retry.",
+            `${BRAND_NAME} couldn't authenticate with the platform while transcribing. Reconnect your ${BRAND_NAME} account, then retry.`,
             { userFacing: true },
           );
     case 429:

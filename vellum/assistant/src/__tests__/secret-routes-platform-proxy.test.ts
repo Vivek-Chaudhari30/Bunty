@@ -285,7 +285,7 @@ describe("secret routes managed proxy registry sync", () => {
       "vellum:platform_assistant_id",
     ]) {
       await expect(deleteCredential(name)).rejects.toThrow(
-        "Vellum credentials cannot be deleted",
+        "Bunty credentials cannot be deleted",
       );
     }
 

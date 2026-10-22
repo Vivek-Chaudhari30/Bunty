@@ -1,5 +1,6 @@
 import { registerPlugin } from "@capacitor/core";
 
+import { BRAND_NAME } from "@/lib/brand";
 import { isNativePlatform } from "@/runtime/native-auth";
 import { getNativeUrlSchemeForHost } from "@/runtime/native-deep-link";
 import { APEX_DOMAIN } from "@/utils/domains";
@@ -121,7 +122,7 @@ let pendingRetrieval: Promise<string | null> | null = null;
 async function retrieveTokenForServer(server: string): Promise<string> {
   const { token } = await NativeBiometric.retrieveToken({
     server,
-    reason: "Sign in to Vellum",
+    reason: `Sign in to ${BRAND_NAME}`,
   });
   return token;
 }

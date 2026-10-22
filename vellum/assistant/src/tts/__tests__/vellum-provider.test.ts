@@ -127,7 +127,7 @@ describe("vellum TTS adapter", () => {
     };
     const provider = createVellumProvider();
     await expect(provider.synthesize(request())).rejects.toThrow(
-      /Vellum credits/,
+      /Bunty credits/,
     );
   });
 
@@ -245,7 +245,7 @@ describe("vellum TTS definition", () => {
     expect(vellumTtsProviderDefinition.secretRequirements).toEqual([
       {
         credentialStoreKey: "credential/vellum/assistant_api_key",
-        displayName: "Vellum account connection",
+        displayName: "Bunty account connection",
         setCommand: "assistant platform connect",
       },
     ]);

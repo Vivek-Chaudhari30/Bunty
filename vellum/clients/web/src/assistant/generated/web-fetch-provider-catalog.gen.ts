@@ -2,6 +2,8 @@
 // Mirrors assistant/src/providers/fetch-provider-catalog.ts — keep in sync.
 
 /** Ordered list of provider ids — drives the picker option order. */
+import { BRAND_NAME } from "@/lib/brand";
+
 export const WEB_FETCH_PROVIDER_IDS: readonly string[] = [
   "default",
   "firecrawl",
@@ -13,7 +15,7 @@ export const WEB_FETCH_PROVIDER_IDS: readonly string[] = [
 export const WEB_FETCH_PROVIDER_DISPLAY_NAMES: Readonly<
   Record<string, string>
 > = {
-  default: "Vellum",
+  default: BRAND_NAME,
   firecrawl: "Firecrawl",
   fastcrw: "fastCRW",
   tinyfish: "TinyFish",

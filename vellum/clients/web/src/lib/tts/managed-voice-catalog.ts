@@ -10,6 +10,8 @@
 // Keyed loosely (by string) so labels also resolve for sources that arrive
 // from the platform voices endpoint before this file learns about them;
 // callers fall back to the raw source string on a miss.
+import { BRAND_NAME } from "@/lib/brand";
+
 export const MANAGED_VOICE_SOURCE_LABELS: Record<string, string> = {
   deepgram: "Deepgram",
   elevenlabs: "ElevenLabs",
@@ -21,7 +23,7 @@ export const MANAGED_VOICE_SOURCE_LABELS: Record<string, string> = {
  * live-voice first-run picker can't drift.
  */
 export const MANAGED_VOICE_CREDITS_NOTE =
-  "Uses Vellum credits, through providers like ElevenLabs and Deepgram.";
+  `Uses ${BRAND_NAME} credits, through providers like ElevenLabs and Deepgram.`;
 
 /**
  * Split a voice `description` ("American · calm, smooth, professional") into its

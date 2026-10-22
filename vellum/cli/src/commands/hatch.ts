@@ -5,6 +5,7 @@ import {
   saveAssistantEntry,
   setActiveAssistant,
 } from "../lib/assistant-config";
+import { BRAND_NAME } from "../lib/brand.js";
 import {
   SPECIES_CONFIG,
   VALID_REMOTE_HOSTS,
@@ -352,7 +353,7 @@ async function hatchVellumPlatform(): Promise<void> {
     console.log(`   ${line}`);
   }
   console.log("");
-  console.log("   Hatching assistant on Vellum platform...");
+  console.log(`   Hatching assistant on ${BRAND_NAME} platform...`);
   console.log("");
 
   const { assistant: result } = await hatchAssistant(token);

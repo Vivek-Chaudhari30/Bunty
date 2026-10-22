@@ -13,6 +13,7 @@ import {
   type AssistantEntry,
 } from "../lib/assistant-config";
 import { parseAssistantTargetArg } from "../lib/assistant-target-args.js";
+import { BRAND_NAME } from "../lib/brand.js";
 import { runCloudflareTunnel } from "../lib/cloudflare-tunnel.js";
 import { relaunchDetached } from "../lib/detached-process.js";
 import {
@@ -130,7 +131,7 @@ function parseArgs(): TunnelArgs {
       console.log("");
       console.log("Providers:");
       console.log(
-        "  vellum       Managed tunnel via Vellum Cloud (not yet available)",
+        `  vellum       Managed tunnel via ${BRAND_NAME} Cloud (not yet available)`,
       );
       console.log(
         "  ngrok        ngrok tunnel — install: brew install ngrok/ngrok/ngrok",
@@ -284,7 +285,7 @@ function toLocalTunnelTarget(entry: AssistantEntry): LocalTunnelTarget | null {
 function describeUntunnelableEntry(entry: AssistantEntry): string {
   const reference = formatAssistantReference(entry);
   return entry.cloud === "vellum"
-    ? `Assistant '${reference}' runs on Vellum Cloud and needs no tunnel.`
+    ? `Assistant '${reference}' runs on ${BRAND_NAME} Cloud and needs no tunnel.`
     : `Assistant '${reference}' has no locally managed runtime to tunnel.`;
 }
 

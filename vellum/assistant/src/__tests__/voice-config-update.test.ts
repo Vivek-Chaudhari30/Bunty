@@ -285,7 +285,7 @@ describe("voice_config_update — tts_voice_id (managed/vellum active)", () => {
     );
 
     expect(result.isError).toBe(false);
-    expect(result.content).toStartWith("Vellum managed voice updated to");
+    expect(result.content).toStartWith("Bunty managed voice updated to");
     expect(result.content).toContain(
       'ui_show { surface_type: "voice_picker", data: {} }',
     );

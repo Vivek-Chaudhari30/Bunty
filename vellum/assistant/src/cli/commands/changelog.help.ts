@@ -1,5 +1,6 @@
 /** Declarative help for the `assistant changelog` command. */
 
+import { BRAND_NAME } from "../../util/brand.js";
 import type { CliCommandHelp } from "../lib/cli-command-help.js";
 
 // Shared config surfaced in the help text; `changelog.ts` imports these for
@@ -17,7 +18,7 @@ export const CACHE_STABLE_LIMIT = 5;
 export const changelogHelp: CliCommandHelp = {
   name: "changelog",
   description:
-    "Show release notes of the Vellum Assistant to see what new capabilities you have!",
+    `Show release notes of the ${BRAND_NAME} Assistant to see what new capabilities you have!`,
   options: [
     {
       flags: "--since <version>",

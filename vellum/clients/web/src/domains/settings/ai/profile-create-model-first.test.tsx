@@ -984,7 +984,7 @@ describe("the managed route's annotation", () => {
 
     const managed = Array.from(
       document.querySelectorAll<HTMLElement>('[role="option"]'),
-    ).find((option) => optionLabel(option) === "Vellum");
+    ).find((option) => optionLabel(option) === "Bunty");
     expect(managed?.textContent).toContain("Managed");
   });
 });

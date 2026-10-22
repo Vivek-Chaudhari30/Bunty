@@ -7,6 +7,8 @@
  */
 import type { ElectronHostOS } from "@vellumai/ipc-contract";
 
+import { BRAND_NAME } from "@/lib/brand";
+
 // ---------------------------------------------------------------------------
 // Shared types
 // ---------------------------------------------------------------------------
@@ -33,20 +35,20 @@ export interface TTSProvider {
 export const TTS_PROVIDERS: readonly TTSProvider[] = [
   {
     id: "vellum",
-    displayName: "Vellum",
+    displayName: BRAND_NAME,
     subtitle:
-      "Text-to-speech through your Vellum account — billed to Vellum credits, no separate API key needed.",
+      `Text-to-speech through your ${BRAND_NAME} account, billed to ${BRAND_NAME} credits, no separate API key needed.`,
     // Deliberately false in the static fallback: this entry stands in for
     // daemons whose live catalog is unavailable or predates managed voice
     // selection, and those daemons ignore `providers.vellum.model` writes.
     // New daemons advertise true via the live catalog fetch.
     supportsVoiceSelection: false,
-    apiKeyPlaceholder: "Connected via your Vellum account",
+    apiKeyPlaceholder: `Connected via your ${BRAND_NAME} account`,
     credentialsGuide: {
       description:
-        "Connect this assistant to your Vellum account; managed speech uses that connection instead of a provider API key.",
+        `Connect this assistant to your ${BRAND_NAME} account; managed speech uses that connection instead of a provider API key.`,
       url: "https://platform.vellum.ai/",
-      linkLabel: "Open Vellum Platform",
+      linkLabel: `Open ${BRAND_NAME} Platform`,
     },
   },
   {
@@ -148,9 +150,9 @@ export const MACOS_NATIVE_STT_PROVIDER_ID = "macos-native";
 export const STT_PROVIDERS: readonly STTProvider[] = [
   {
     id: "vellum",
-    displayName: "Vellum",
+    displayName: BRAND_NAME,
     subtitle:
-      "Transcription through your Vellum account — billed to Vellum credits, no separate API key needed.",
+      `Transcription through your ${BRAND_NAME} account, billed to ${BRAND_NAME} credits, no separate API key needed.`,
   },
   {
     id: "deepgram",
@@ -262,7 +264,7 @@ export const IMAGE_GEN_PROVIDERS = [
 ] as const;
 
 export const IMAGE_GEN_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
-  vellum: "Vellum",
+  vellum: BRAND_NAME,
   gemini: "Gemini",
   openai: "OpenAI",
   openrouter: "OpenRouter",

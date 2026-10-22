@@ -9,6 +9,7 @@ import {
   resolveAssistant,
   type AssistantEntry,
 } from "../lib/assistant-config";
+import { BRAND_NAME } from "../lib/brand.js";
 import { dockerResourceNames } from "../lib/docker";
 import { getLogDir } from "../lib/xdg-log";
 import { execOutput } from "../lib/step-runner";
@@ -623,7 +624,7 @@ export async function logs(): Promise<void> {
     case "vellum":
       console.error(
         "Logs for Vellum-managed instances are not yet supported.\n" +
-          "View logs in the Vellum platform dashboard.",
+          `View logs in the ${BRAND_NAME} platform dashboard.`,
       );
       process.exit(1);
       break;

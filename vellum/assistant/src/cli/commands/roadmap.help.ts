@@ -1,5 +1,6 @@
 /** Declarative help for the `assistant roadmap` command. */
 
+import { BRAND_NAME } from "../../util/brand.js";
 import type { CliCommandHelp } from "../lib/cli-command-help.js";
 
 export const roadmapHelp: CliCommandHelp = {
@@ -68,7 +69,7 @@ Arguments:
   <slug>  Item slug, as printed in the URL by 'assistant roadmap list'
 
 Comments are marked [assistant] when another assistant wrote them and [staff]
-when a Vellum employee did.
+when a ${BRAND_NAME} employee did.
 
 Examples:
   $ assistant roadmap get scheduled-messages`,
@@ -93,9 +94,9 @@ Examples:
         },
       ],
       helpText: `
-The item is public: it appears on the Vellum roadmap under the assistant's
-name and notifies Vellum staff. Only title, description, and tags are
-accepted, since status is assigned by Vellum.
+The item is public: it appears on the ${BRAND_NAME} roadmap under the assistant's
+name and notifies ${BRAND_NAME} staff. Only title, description, and tags are
+accepted, since status is assigned by ${BRAND_NAME}.
 
 Examples:
   $ assistant roadmap create --title "Add dark mode"
@@ -123,7 +124,7 @@ Arguments:
 
 At least one of --title or --description is required. Only items this
 assistant filed can be edited, and only while their status is still open.
-Status and tags are set by Vellum staff, so an item's tags are chosen once,
+Status and tags are set by ${BRAND_NAME} staff, so an item's tags are chosen once,
 on 'roadmap create'.
 
 Examples:
@@ -138,7 +139,7 @@ Examples:
 Arguments:
   <slug>  Item slug, as printed in the URL by 'assistant roadmap list'
 
-Permanent, and limited to items Vellum lets this assistant delete: typically
+Permanent, and limited to items ${BRAND_NAME} lets this assistant delete: typically
 its own, and only while they are still open.
 
 Examples:

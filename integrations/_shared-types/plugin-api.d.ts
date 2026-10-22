@@ -68,6 +68,17 @@ declare module "@vellumai/plugin-api" {
     assistantVersion: string;
   }
 
+  /** vellum/assistant/src/hooks/types.ts PreModelCallContext. */
+  export interface PreModelCallContext {
+    readonly conversationId: string;
+    /** "mainAgent" for the user-facing reply; null when the call site is untagged. */
+    readonly callSite: string | null;
+    systemPrompt: string | null;
+    modelProfile: string | null;
+    deferAssistantOutput: boolean;
+    readonly logger: PluginLogger;
+  }
+
   export interface StoreCredentialOptions {
     label?: string;
     description?: string;

@@ -1,5 +1,6 @@
 /** Declarative help for the `assistant image-generation` command. */
 
+import { BRAND_NAME } from "../../util/brand.js";
 import type { CliCommandHelp } from "../lib/cli-command-help.js";
 
 export const imageGenerationHelp: CliCommandHelp = {
@@ -7,7 +8,7 @@ export const imageGenerationHelp: CliCommandHelp = {
   description: "AI image generation and editing",
   helpText: `
 Modes:
-  managed    — Uses platform-managed credentials (requires login to Vellum).
+  managed   , Uses platform-managed credentials (requires login to ${BRAND_NAME}).
   your-own   — Uses your own Gemini or OpenAI API key depending on the configured model.
 
 Supported models: pass a tier alias, the assistant resolves it to the

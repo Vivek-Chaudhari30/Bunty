@@ -1,4 +1,5 @@
 import { resolveAssistant } from "../lib/assistant-config.js";
+import { BRAND_NAME } from "../lib/brand.js";
 import {
   leaseGuardianToken,
   loadGuardianToken,
@@ -132,7 +133,7 @@ export async function setup(): Promise<void> {
   const gatewayUrl = entry.localUrl ?? entry.runtimeUrl;
   const bearerToken = await resolveSetupBearerToken(entry, gatewayUrl);
 
-  console.log("Vellum Setup");
+  console.log(`${BRAND_NAME} Setup`);
   console.log("============\n");
 
   try {

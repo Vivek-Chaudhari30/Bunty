@@ -930,7 +930,7 @@ describe("credentials routes", () => {
           body: { id: credentialId },
           headers: { "x-vellum-principal-type": "local" },
         }),
-      ).rejects.toThrow(/owned by the Vellum platform/);
+      ).rejects.toThrow(/owned by the Bunty platform/);
     });
 
     test("inspect refuses platform credentials", async () => {
@@ -976,7 +976,7 @@ describe("credentials routes", () => {
             value: "https://attacker.test",
           },
         }),
-      ).rejects.toThrow(/owned by the Vellum platform/);
+      ).rejects.toThrow(/owned by the Bunty platform/);
 
       expect(secureStore.get("vellum:platform_base_url")).toBe(
         PLATFORM_BASE_URL,
@@ -1103,7 +1103,7 @@ describe("credentials routes", () => {
           body: { id: credentialId },
           headers: { "x-vellum-principal-type": "local" },
         }),
-      ).rejects.toThrow(/owned by the Vellum platform/);
+      ).rejects.toThrow(/owned by the Bunty platform/);
     });
 
     test("inspect refuses platform credentials", async () => {
@@ -1149,7 +1149,7 @@ describe("credentials routes", () => {
             value: "https://attacker.test",
           },
         }),
-      ).rejects.toThrow(/owned by the Vellum platform/);
+      ).rejects.toThrow(/owned by the Bunty platform/);
 
       expect(secureStore.get("vellum:platform_base_url")).toBe(
         PLATFORM_BASE_URL,

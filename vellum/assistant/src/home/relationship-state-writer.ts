@@ -27,6 +27,7 @@ import { countConversations as countConversationsDb } from "../persistence/conve
 import { resolveGuardianPersonaPath } from "../prompts/persona-resolver.js";
 import { broadcastMessage } from "../runtime/assistant-event-hub.js";
 import type { OnboardingContext } from "../types/onboarding-context.js";
+import { BRAND_NAME } from "../util/brand.js";
 import { getLogger } from "../util/logger.js";
 import {
   getDataDir,
@@ -72,7 +73,7 @@ export const ONBOARDING_SIDECAR_FILENAME = "onboarding-context.json";
 const VOICE_WRITING_UNLOCK_CONVERSATIONS = 10;
 
 /** Default assistant name when IDENTITY.md cannot be parsed. */
-const DEFAULT_ASSISTANT_NAME = "Vellum";
+const DEFAULT_ASSISTANT_NAME = BRAND_NAME;
 
 /** Default assistant identifier (multi-assistant reserved for future). */
 const DEFAULT_ASSISTANT_ID = "default";

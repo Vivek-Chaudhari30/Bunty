@@ -19,6 +19,7 @@
 import { getDb } from "../../persistence/db-connection.js";
 import { credentialKey } from "../../security/credential-key.js";
 import { getSecureKeyResultAsync } from "../../security/secure-keys.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import {
   describeSubscriptionModelIncompatibility,
   isConnectionCompatibleWithModel,
@@ -80,7 +81,7 @@ export async function vellumConnectionAvailability(): Promise<ConnectionAvailabi
   if (!ctx.platformBaseUrl) {
     return {
       status: "vellum_unauthenticated",
-      message: "Not signed in to Vellum — the platform URL is not configured.",
+      message: `Not signed in to ${BRAND_NAME}, the platform URL is not configured.`,
     };
   }
   // The context collapses an unreachable credential read into "no key";
@@ -95,13 +96,13 @@ export async function vellumConnectionAvailability(): Promise<ConnectionAvailabi
     return {
       status: "unknown",
       message:
-        "The credential store is unreachable, so Vellum sign-in could not be verified. Try again shortly.",
+        `The credential store is unreachable, so ${BRAND_NAME} sign-in could not be verified. Try again shortly.`,
     };
   }
   return {
     status: "vellum_unauthenticated",
     message:
-      "Not signed in to Vellum — no assistant API key is stored. Log in to use Vellum-managed inference.",
+      `Not signed in to ${BRAND_NAME}, no assistant API key is stored. Log in to use ${BRAND_NAME}-managed inference.`,
   };
 }
 
@@ -236,7 +237,7 @@ export async function computeConnectionAvailability(
       }
       return {
         status: "unsupported_auth",
-        message: `Connection "${resolvedConnectionName}" uses Vellum platform auth, which cannot serve provider "${provider}". Add an API-key connection for "${provider}" ${SETTINGS_HINT}.`,
+        message: `Connection "${resolvedConnectionName}" uses ${BRAND_NAME} platform auth, which cannot serve provider "${provider}". Add an API-key connection for "${provider}" ${SETTINGS_HINT}.`,
       };
     case "none": {
       // Keyless providers (catalog setupMode "keyless", e.g. ollama) and

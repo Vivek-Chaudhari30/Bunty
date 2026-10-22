@@ -1,3 +1,4 @@
+import { BRAND_NAME } from "../util/brand.js";
 import { PLATFORM_PROVIDER_META } from "./platform-proxy/constants.js";
 
 export type LongContextMode =
@@ -2859,12 +2860,12 @@ const RAW_PROVIDER_CATALOG: ProviderCatalogEntry[] = [
   },
   {
     id: "vellum",
-    displayName: "Vellum",
+    displayName: BRAND_NAME,
     subtitle:
-      "Models served on Vellum GPU nodes through the managed connection.",
+      `Models served on ${BRAND_NAME} GPU nodes through the managed connection.`,
     setupMode: "api-key",
     setupHint:
-      "Uses the assistant API key through the Vellum managed connection. These models cannot use a bring-your-own key.",
+      `Uses the assistant API key through the ${BRAND_NAME} managed connection. These models cannot use a bring-your-own key.`,
     featureFlag: "vellum-hosted-inference",
     models: [
       {

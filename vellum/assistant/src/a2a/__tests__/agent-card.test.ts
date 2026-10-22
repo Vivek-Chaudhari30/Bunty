@@ -49,7 +49,7 @@ describe("buildAgentCard", () => {
   test("defaults description when omitted", () => {
     const card = buildAgentCard(BASE_PARAMS);
 
-    expect(card.description).toBe("Alice - a Vellum AI assistant");
+    expect(card.description).toBe("Alice - a Bunty AI assistant");
   });
 
   test("uses explicit description when provided", () => {

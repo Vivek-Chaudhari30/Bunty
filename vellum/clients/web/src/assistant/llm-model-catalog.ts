@@ -9,6 +9,8 @@
 // Parity is enforced by llm-model-catalog.test.ts: update the daemon
 // catalog first, run the sync, then mirror the change here.
 
+import { BRAND_NAME } from "@/lib/brand";
+
 export interface LlmCatalogModel {
   id: string;
   displayName: string;
@@ -1321,7 +1323,7 @@ export const DEFAULT_MODEL_BY_PROVIDER: Record<LlmProviderId, string> = {
 export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   // Routing identities that cards and pickers render as providers.
   // `vellum` is also the catalog owner of Vellum-hosted GPU models.
-  vellum: "Vellum",
+  vellum: BRAND_NAME,
   chatgpt: "ChatGPT Subscription",
   anthropic: "Anthropic",
   openai: "OpenAI",

@@ -25,6 +25,7 @@ import { z } from "zod";
 import { getPlatformBaseUrl } from "../../config/env.js";
 import { credentialKey } from "../../security/credential-key.js";
 import { getSecureKeyAsync } from "../../security/secure-keys.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { ACTOR_PRINCIPALS } from "../auth/route-policy.js";
 import {
   BadGatewayError,
@@ -129,7 +130,7 @@ function resolveEndpoints(): RoadmapEndpoints {
 
   if (!apiOverride && deployment?.name !== "production") {
     throw new UnprocessableEntityError(
-      `The Vellum roadmap has no deployment for a ${getPlatformBaseUrl()} assistant. Set VELLUM_MARKETING_URL to the roadmap service for this environment.`,
+      `The ${BRAND_NAME} roadmap has no deployment for a ${getPlatformBaseUrl()} assistant. Set VELLUM_MARKETING_URL to the roadmap service for this environment.`,
     );
   }
 
@@ -170,7 +171,7 @@ async function requireAssistantApiKey(): Promise<string> {
   const key = await assistantApiKey();
   if (!key) {
     throw new UnprocessableEntityError(
-      "Not connected to the Vellum Platform, so there is no assistant identity to post as. " +
+      `Not connected to the ${BRAND_NAME} Platform, so there is no assistant identity to post as. ` +
         "Run `assistant platform connect` first.",
     );
   }
@@ -225,11 +226,11 @@ async function roadmapFetch(
   } catch (err) {
     if (deadline.aborted) {
       throw new GatewayTimeoutError(
-        `The Vellum roadmap service did not answer within ${ROADMAP_REQUEST_TIMEOUT_MS / 1000}s.`,
+        `The ${BRAND_NAME} roadmap service did not answer within ${ROADMAP_REQUEST_TIMEOUT_MS / 1000}s.`,
       );
     }
     throw new BadGatewayError(
-      `Could not reach the Vellum roadmap service: ${err instanceof Error ? err.message : String(err)}`,
+      `Could not reach the ${BRAND_NAME} roadmap service: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 }
@@ -396,7 +397,7 @@ function unsupportedUpdateFieldsMessage(keys: string[]): string {
   const unknown = keys.filter((k) => !STAFF_ONLY_UPDATE_FIELDS.has(k));
   const reasons = [
     ...(staffOnly.length > 0
-      ? [`${listFields(staffOnly)} set by Vellum staff`]
+      ? [`${listFields(staffOnly)} set by ${BRAND_NAME} staff`]
       : []),
     ...(unknown.length > 0
       ? [`${listFields(unknown)} not a roadmap update field`]
@@ -651,7 +652,7 @@ export const ROUTES: RouteDefinition[] = [
     },
     summary: "List public roadmap items",
     description:
-      "Lists items from the public Vellum roadmap. Authenticated as the assistant when a platform API key is stored, which fills in viewerUpvoted; anonymous otherwise.",
+      `Lists items from the public ${BRAND_NAME} roadmap. Authenticated as the assistant when a platform API key is stored, which fills in viewerUpvoted; anonymous otherwise.`,
     tags: ["roadmap"],
     queryParams: [
       { name: "q", required: false, description: "Search query" },
@@ -723,7 +724,7 @@ export const ROUTES: RouteDefinition[] = [
     },
     summary: "Update a roadmap item",
     description:
-      "Updates the title or description of a roadmap item this assistant filed, while the item is still open. Status and tags are set by Vellum staff.",
+      `Updates the title or description of a roadmap item this assistant filed, while the item is still open. Status and tags are set by ${BRAND_NAME} staff.`,
     tags: ["roadmap"],
     pathParams: SLUG_PARAM,
     requestBody: updateRequestSchema,

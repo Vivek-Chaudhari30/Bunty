@@ -157,13 +157,13 @@ describe("WebSearchCard — provider-only configuration", () => {
     expect(providerTrigger()).toBeTruthy();
   });
 
-  test("Vellum and Provider Native are offered alongside the BYOK providers", () => {
+  test("Bunty and Provider Native are offered alongside the BYOK providers", () => {
     renderCard();
 
     fireEvent.click(providerTrigger());
     const options = visibleOptions();
     expect(options).toEqual([
-      "Vellum",
+      "Bunty",
       "Provider Native",
       "Perplexity",
       "Brave",
@@ -178,15 +178,15 @@ describe("WebSearchCard — provider-only configuration", () => {
     ]);
   });
 
-  test("selecting Vellum hides the API key field and saves the provider+mode pair", async () => {
+  test("selecting Bunty hides the API key field and saves the provider+mode pair", async () => {
     renderCard();
 
     fireEvent.click(providerTrigger());
-    selectOption("Vellum");
+    selectOption("Bunty");
 
     expect(screen.queryByText("API Key")).toBeNull();
     expect(
-      screen.getByText(/Search runs through your Vellum account/),
+      screen.getByText(/Search runs through your Bunty account/),
     ).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -356,7 +356,7 @@ describe("WebSearchCard — provider-only configuration", () => {
     renderCard();
 
     fireEvent.click(providerTrigger());
-    selectOption("Vellum");
+    selectOption("Bunty");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(configPatchCalls.length).toBe(1));
@@ -368,13 +368,13 @@ describe("WebSearchCard — provider-only configuration", () => {
 
   // A config written by the legacy mode toggle marks managed via `mode`
   // while `provider` holds the BYOK restore value.
-  test("a legacy managed-mode daemon renders as Vellum", () => {
+  test("a legacy managed-mode daemon renders as Bunty", () => {
     daemonConfigData = {
       services: { "web-search": { mode: "managed", provider: "brave" } },
     };
     renderCard();
 
-    expect(providerTrigger().textContent).toContain("Vellum");
+    expect(providerTrigger().textContent).toContain("Bunty");
     expect(screen.queryByText("API Key")).toBeNull();
   });
 
@@ -392,7 +392,7 @@ describe("WebSearchCard — provider-only configuration", () => {
     renderCard();
 
     expect(providerTrigger().textContent).toContain("Provider Native");
-    expect(providerTrigger().textContent).not.toContain("Vellum");
+    expect(providerTrigger().textContent).not.toContain("Bunty");
   });
 
   test("escaping a legacy managed-mode daemon resets mode alongside the provider", async () => {

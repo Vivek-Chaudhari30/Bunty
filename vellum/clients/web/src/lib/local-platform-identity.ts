@@ -2,6 +2,7 @@ import type {
   PlatformStatusGetResponses,
   PlatformVerifycredentialPostResponses,
 } from "@/generated/daemon/types.gen";
+import { BRAND_NAME } from "@/lib/brand";
 import { PlatformIdentityInjectionError } from "@/lib/platform-identity-errors";
 import { buildVellumMutatingHeaders } from "@/lib/auth/request-headers";
 import { resolveSupportsCredentialVerification } from "@/lib/backwards-compat/credential-verification";
@@ -495,7 +496,7 @@ async function ensureLocalAssistantPlatformIdentity(
   );
   if (!organizationId) {
     throw new Error(
-      "Sign in to Vellum and select an organization to register this local assistant.",
+      `Sign in to ${BRAND_NAME} and select an organization to register this local assistant.`,
     );
   }
 
@@ -747,7 +748,7 @@ async function platformPost<T>(
   const electronHostOS = detectElectronHostOS();
   if (electronHostOS) {
     if (!sessionToken) {
-      throw new Error("Sign in to Vellum to register this local assistant.");
+      throw new Error(`Sign in to ${BRAND_NAME} to register this local assistant.`);
     }
     headers.set(
       ELECTRON_RENDERER_ORIGIN_HEADER,

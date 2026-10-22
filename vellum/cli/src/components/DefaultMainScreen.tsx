@@ -9,6 +9,7 @@ import {
 } from "react";
 import { Box, render as inkRender, Text, useInput, useStdout } from "ink";
 
+import { BRAND_NAME } from "../lib/brand.js";
 import { SPECIES_CONFIG, type Species } from "../lib/constants";
 import { lookupAssistantByIdentifier } from "../lib/assistant-config";
 import { checkHealth } from "../lib/health-check";
@@ -87,8 +88,8 @@ const RETRY_TIMEOUT_MS = 30_000;
 // ── Layout constants ──────────────────────────────────────
 const MAX_TOTAL_WIDTH = 72;
 const DEFAULT_TERMINAL_ROWS = 24;
-const HEADER_PREFIX_UNICODE = "── Vellum ";
-const HEADER_PREFIX_ASCII = "-- Vellum ";
+const HEADER_PREFIX_UNICODE = `── ${BRAND_NAME} `;
+const HEADER_PREFIX_ASCII = `-- ${BRAND_NAME} `;
 
 // Left panel structure: HEADER lines + art + FOOTER lines
 // Header chrome (borders around panel content)
@@ -644,7 +645,7 @@ function ConnectionScreen({
   });
 
   const config = SPECIES_CONFIG[species];
-  const title = `Vellum ${config.hatchedEmoji} ${species}`;
+  const title = `${BRAND_NAME} ${config.hatchedEmoji} ${species}`;
   const width = Math.min(terminalColumns, MAX_TOTAL_WIDTH);
 
   return (
@@ -714,7 +715,7 @@ function CompactHeader({
   const compactIdentity =
     identity.length > 18 ? `${identity.slice(0, 15)}...` : identity;
   const label = ` ${compactIdentity} ${statusEmoji(status)} `;
-  const prefix = "── Vellum";
+  const prefix = `── ${BRAND_NAME}`;
   const suffix = "──";
   const fillLen = Math.max(
     0,

@@ -50,7 +50,7 @@ function nameTag(name: string): string | null {
   );
 }
 
-const EXPECTED_TITLE = "Vellum: Your Personal Intelligence";
+const EXPECTED_TITLE = "Bunty: Your Personal Intelligence";
 const EXPECTED_IMAGE = "https://www.vellum.ai/og-cover-v2.jpg";
 
 describe("SPA shell: Open Graph metadata", () => {
@@ -59,7 +59,7 @@ describe("SPA shell: Open Graph metadata", () => {
     expect(ogTag("og:description")).toBeTruthy();
     expect(ogTag("og:image")).toBe(EXPECTED_IMAGE);
     expect(ogTag("og:type")).toBe("website");
-    expect(ogTag("og:site_name")).toBe("Vellum");
+    expect(ogTag("og:site_name")).toBe("Bunty");
   });
 
   test("declares the image dimensions so cards render on first share", () => {

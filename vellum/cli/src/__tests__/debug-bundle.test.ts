@@ -152,7 +152,7 @@ describe("vellum debug-bundle", () => {
     expect(token).toBe("local-token");
     expect(params).toEqual({
       uploadUrl: "https://storage.googleapis.com/b/signed",
-      description: "debug bundle for Vellum staff",
+      description: "debug bundle for Bunty staff",
       profile: "debug",
     });
     expect(pollMock).toHaveBeenCalled();

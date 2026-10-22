@@ -219,7 +219,7 @@ describe("PUT /v1/config/llm/profiles/:name — managed profile guard", () => {
         pathParams: { name: "my-custom" },
         body: { provider: "vellum", model: "not-a-real-model" },
       }),
-    ).rejects.toThrow(/not served by the Vellum managed route/);
+    ).rejects.toThrow(/not served by the Bunty managed route/);
     expect(committedRaw()).toBeNull();
   });
 

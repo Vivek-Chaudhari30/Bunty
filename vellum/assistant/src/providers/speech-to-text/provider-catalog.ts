@@ -18,6 +18,7 @@ import type {
   SttTurnDetectionMode,
   TelephonySttMode,
 } from "../../stt/types.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { baseLanguageSubtag } from "../../util/language-subtag.js";
 import { FLUX_MULTILINGUAL_SUBTAGS } from "./deepgram-flux-frames.js";
 
@@ -289,11 +290,11 @@ const CATALOG: ReadonlyMap<SttProviderId, SttProviderEntry> = new Map<
     {
       id: "vellum",
       baseModelFamily: "nova-3",
-      displayName: "Vellum",
+      displayName: BRAND_NAME,
       subtitle:
-        "Speech-to-text through your Vellum account — billed to Vellum credits, no separate API key needed.",
+        `Speech-to-text through your ${BRAND_NAME} account, billed to ${BRAND_NAME} credits, no separate API key needed.`,
       setupMode: "connection",
-      setupHint: "Connect your Vellum account to enable managed transcription.",
+      setupHint: `Connect your ${BRAND_NAME} account to enable managed transcription.`,
       credentialProvider: "vellum",
       supportedBoundaries: new Set<SttBoundaryId>([
         "daemon-batch",
@@ -314,11 +315,11 @@ const CATALOG: ReadonlyMap<SttProviderId, SttProviderEntry> = new Map<
       id: "vellum-flux",
       variantOf: "vellum",
       variantModel: "flux",
-      displayName: "Vellum (Flux)",
+      displayName: `${BRAND_NAME} (Flux)`,
       subtitle:
-        "Conversational speech-to-text with model-native turn detection, through your Vellum account. No separate API key needed.",
+        `Conversational speech-to-text with model-native turn detection, through your ${BRAND_NAME} account. No separate API key needed.`,
       setupMode: "connection",
-      setupHint: "Connect your Vellum account to enable managed transcription.",
+      setupHint: `Connect your ${BRAND_NAME} account to enable managed transcription.`,
       // Shared with `vellum`: the platform connection is the credential, and
       // Flux is a different endpoint on the same relay, not a second account.
       credentialProvider: "vellum",

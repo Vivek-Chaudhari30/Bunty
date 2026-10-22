@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { DrizzleDb } from "../../persistence/db-connection.js";
 import { providerConnections } from "../../persistence/schema/inference.js";
 import { normalizeCredentialRef } from "../../security/credential-key.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { getLogger } from "../../util/logger.js";
 import { clearConnectionProviderCache } from "../registry.js";
 import {
@@ -430,7 +431,7 @@ const CANONICAL_CONNECTIONS: Array<{
     name: VELLUM_MANAGED_CONNECTION_NAME,
     provider: VELLUM_MANAGED_PROVIDER,
     auth: { type: "platform" },
-    label: "Vellum",
+    label: BRAND_NAME,
   },
 ];
 

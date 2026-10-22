@@ -866,7 +866,7 @@ describe("StatusBanner", () => {
             ? "Your assistant runs locally"
             : "Reconnecting to your assistant…",
         );
-        expect(html).toContain("Open the Vellum desktop app");
+        expect(html).toContain("Open the Bunty desktop app");
         expect(html).not.toContain("Wake up");
         expect(html).toContain('data-tone="neutral"');
       },
@@ -1130,7 +1130,7 @@ describe("StatusBanner", () => {
 
       expect(html).toContain("Your assistant is asleep");
       expect(html).toContain("Wake up");
-      expect(html).not.toContain("Trying to reach Vellum");
+      expect(html).not.toContain("Trying to reach Bunty");
       expect(html).not.toContain("Retry now");
     });
 
@@ -1142,7 +1142,7 @@ describe("StatusBanner", () => {
       const html = renderToStaticMarkup(<StatusBanner />);
 
       expect(html).toContain("Your assistant is waking up");
-      expect(html).not.toContain("Trying to reach Vellum");
+      expect(html).not.toContain("Trying to reach Bunty");
     });
   });
 
@@ -1204,7 +1204,7 @@ describe("StatusBanner", () => {
 
       const html = renderToStaticMarkup(<StatusBanner />);
 
-      expect(html).toContain("Trying to reach Vellum");
+      expect(html).toContain("Trying to reach Bunty");
       expect(html).toContain("Retry now");
       expect(html).toContain('data-tone="error"');
       expect(html).toContain("lucide-cloud-off");
@@ -1233,7 +1233,7 @@ describe("StatusBanner", () => {
       const html = renderToStaticMarkup(<StatusBanner />);
 
       expect(html).toContain("Assistant fatal error");
-      expect(html).not.toContain("Trying to reach Vellum");
+      expect(html).not.toContain("Trying to reach Bunty");
     });
 
     test("does not render backend-unreachable connectivity state outside Electron", () => {

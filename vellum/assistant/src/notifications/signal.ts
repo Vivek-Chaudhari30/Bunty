@@ -10,6 +10,7 @@
 import { z } from "zod";
 
 import type { ConversationCreateType } from "../persistence/conversation-types.js";
+import { BRAND_NAME } from "../util/brand.js";
 import type { GuardianQuestionPayload } from "./guardian-question-mode.js";
 import { UrgencySchema } from "./urgency.js";
 
@@ -17,7 +18,7 @@ import { UrgencySchema } from "./urgency.js";
 
 export const NOTIFICATION_SOURCE_CHANNELS = [
   { id: "assistant_tool", description: "Assistant skill/tool invocation" },
-  { id: "vellum", description: "Vellum native client (macOS/iOS)" },
+  { id: "vellum", description: `${BRAND_NAME} native client (macOS/iOS)` },
   { id: "phone", description: "Phone call pipeline" },
   { id: "telegram", description: "Telegram channel" },
   { id: "whatsapp", description: "WhatsApp channel" },

@@ -1,5 +1,6 @@
 /** Declarative help for the `assistant oauth` command. */
 
+import { BRAND_NAME } from "../../../util/brand.js";
 import type { CliCommandHelp } from "../../lib/cli-command-help.js";
 
 export const oauthHelp: CliCommandHelp = {
@@ -12,10 +13,10 @@ export const oauthHelp: CliCommandHelp = {
   helpText: `
 OAuth providers may support up to two modes – "managed" and "your-own".
   managed:
-    Requires a Vellum Platform account. For providers that support it, managed mode offloads the burden of needing to create and register an oauth app.
-    Vellum Platform manages oauth token management and refresh and proxies requests to the provier.
+    Requires a ${BRAND_NAME} Platform account. For providers that support it, managed mode offloads the burden of needing to create and register an oauth app.
+    ${BRAND_NAME} Platform manages oauth token management and refresh and proxies requests to the provier.
   you-own:
-    Provides ultimate control and removes dependency on Vellum Platform, but requires that you set up your own oauth app and register it
+    Provides ultimate control and removes dependency on ${BRAND_NAME} Platform, but requires that you set up your own oauth app and register it
     via \`assistant oauth apps upsert\`.
 All commands are intended to work regardless of the provider's mode. Check and set the mode for a given provider with \`assistant oauth mode\`.
 
@@ -514,7 +515,7 @@ Arguments:
              Run "assistant oauth providers list" to see available providers.
 
 Modes:
-  managed    OAuth credentials are managed by the Vellum platform. The
+  managed    OAuth credentials are managed by the ${BRAND_NAME} platform. The
              assistant connects via a platform-hosted authorization flow.
              No local client ID or secret is needed.
   your-own   You supply your own OAuth app credentials (client ID and

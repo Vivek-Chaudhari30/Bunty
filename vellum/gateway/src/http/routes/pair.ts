@@ -33,6 +33,7 @@ import { LOCAL_ASSISTANT_ID } from "../../assistant-id.js";
 import { mintAndRecordDeviceBoundTokenPair } from "../../auth/guardian-bootstrap.js";
 import { CURRENT_POLICY_EPOCH } from "../../auth/policy.js";
 import { mintToken } from "../../auth/token-service.js";
+import { BRAND_NAME } from "../../brand.js";
 import { KNOWN_EXTENSION_ORIGINS } from "../../chrome-extension-origins.js";
 import { getGatewayDb } from "../../db/connection.js";
 import {
@@ -279,7 +280,7 @@ export async function handlePair(
       });
       return errorResponse(
         "FORBIDDEN",
-        "origin does not match a known Vellum extension",
+        `origin does not match a known ${BRAND_NAME} extension`,
         403,
       );
     }

@@ -9,6 +9,7 @@
  * graphs containing a cycle.
  */
 
+import { BRAND_NAME } from "../util/brand.js";
 import { ConfigError } from "../util/errors.js";
 import { CHATGPT_SUBSCRIPTION_CONNECTION_NAME } from "./inference/auth.js";
 import { isCodexSubscriptionModel } from "./openai/codex-models.js";
@@ -71,7 +72,7 @@ export function resolveRoutingIdentity(
       throw new ConnectionResolutionError(
         VELLUM_MANAGED_CONNECTION_NAME,
         "unroutable_managed_model",
-        `provider "vellum" cannot route model "${model ?? "<unset>"}" — no managed upstream serves it. Pick a model from the Vellum catalog or set a concrete provider.`,
+        `provider "vellum" cannot route model "${model ?? "<unset>"}", no managed upstream serves it. Pick a model from the ${BRAND_NAME} catalog or set a concrete provider.`,
         { model },
       );
     }

@@ -44,6 +44,7 @@ import {
   TokenExpiredError,
   withValidToken,
 } from "../security/token-manager.js";
+import { BRAND_NAME } from "../util/brand.js";
 import { getLogger } from "../util/logger.js";
 
 const log = getLogger("credential-health");
@@ -457,7 +458,7 @@ async function checkManagedProvider(
         provider: providerRow.provider,
         accountInfo: allConnections[0]?.account_label ?? null,
         status: "missing_token",
-        details: `No active managed connection for ${providerRow.provider}. Reconnect on the Vellum platform.`,
+        details: `No active managed connection for ${providerRow.provider}. Reconnect on the ${BRAND_NAME} platform.`,
         missingScopes: [],
         canAutoRecover: false,
       });
@@ -554,7 +555,7 @@ async function checkManagedProvider(
           results.push({
             ...base,
             status: "ping_failed",
-            details: `${providerRow.provider} managed liveness check returned ${pingResp.status} from the upstream provider. The Vellum platform may not have refreshed the token before forwarding; will retry next cycle.`,
+            details: `${providerRow.provider} managed liveness check returned ${pingResp.status} from the upstream provider. The ${BRAND_NAME} platform may not have refreshed the token before forwarding; will retry next cycle.`,
             canAutoRecover: false,
           });
         } else {
@@ -581,7 +582,7 @@ async function checkManagedProvider(
           results.push({
             ...base,
             status: "revoked",
-            details: `${providerRow.provider} managed connection cannot be refreshed by the Vellum platform. Reconnect on the Vellum platform.`,
+            details: `${providerRow.provider} managed connection cannot be refreshed by the ${BRAND_NAME} platform. Reconnect on the ${BRAND_NAME} platform.`,
             canAutoRecover: false,
           });
         } else {
@@ -664,7 +665,7 @@ export async function checkAssistantApiKey(): Promise<CredentialHealthResult | n
       ...base,
       status: "unreachable",
       details:
-        "The credential store is unreachable, so Vellum's managed credentials could not be checked.",
+        `The credential store is unreachable, so ${BRAND_NAME}'s managed credentials could not be checked.`,
       canAutoRecover: false,
     };
   }
@@ -683,7 +684,7 @@ export async function checkAssistantApiKey(): Promise<CredentialHealthResult | n
       ...base,
       status: "missing_token",
       details:
-        "No Vellum-managed credentials are stored yet. Log in to the Vellum platform to set them up.",
+        `No ${BRAND_NAME}-managed credentials are stored yet. Log in to the ${BRAND_NAME} platform to set them up.`,
       canAutoRecover: true,
     };
   }
@@ -695,7 +696,7 @@ export async function checkAssistantApiKey(): Promise<CredentialHealthResult | n
       ...base,
       status: "unreachable",
       details:
-        "The Vellum platform client could not be built, so Vellum's managed credentials could not be checked.",
+        `The ${BRAND_NAME} platform client could not be built, so ${BRAND_NAME}'s managed credentials could not be checked.`,
       canAutoRecover: false,
     };
   }
@@ -711,7 +712,7 @@ export async function checkAssistantApiKey(): Promise<CredentialHealthResult | n
       // action rather than at reconnecting something the reader never
       // connected.
       details:
-        "Vellum's managed credentials stopped working, so chat and background tasks that use them are paused. Restoring takes a moment and will not affect anything else.",
+        `${BRAND_NAME}'s managed credentials stopped working, so chat and background tasks that use them are paused. Restoring takes a moment and will not affect anything else.`,
       canAutoRecover: true,
     };
   }
@@ -720,7 +721,7 @@ export async function checkAssistantApiKey(): Promise<CredentialHealthResult | n
       ...base,
       status: "unreachable",
       details:
-        "Vellum did not answer the managed-credential check. Health is unknown until the next check.",
+        `${BRAND_NAME} did not answer the managed-credential check. Health is unknown until the next check.`,
       canAutoRecover: false,
     };
   }
@@ -728,7 +729,7 @@ export async function checkAssistantApiKey(): Promise<CredentialHealthResult | n
   return {
     ...base,
     status: "healthy",
-    details: "Vellum's managed credentials are working.",
+    details: `${BRAND_NAME}'s managed credentials are working.`,
     canAutoRecover: true,
   };
 }

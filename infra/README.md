@@ -14,6 +14,20 @@ vellum hatch            # second assistant -> sujal (or use --remote docker for 
 vellum ps               # both should be listed
 ```
 
+Every assistant users talk to is named **Bunty** (Chintu and Sujal are only the example names in
+our docs and tests). Set the name and personality in each workspace, before the first
+`vellum wake` or at any time later (the daemon reloads the files):
+
+```bash
+bun infra/scripts/set-bunty-identity.ts --workspace <assistant workspace dir> --dry-run
+bun infra/scripts/set-bunty-identity.ts --workspace <assistant workspace dir>
+```
+
+It writes `IDENTITY.md`, replaces only the `## Personality` section of `SOUL.md`, and backs up
+anything it changes to `<workspace>/.bunty-backups/`. Source text lives in
+`infra/scripts/bunty-identity/`. Without `--workspace` it uses `$VELLUM_WORKSPACE_DIR`, then
+`~/.vellum/workspace`.
+
 Expose each gateway with the Vellum `public-ingress` skill (or Velay) when Meta, Twilio or the
 other assistant must reach it. Use test numbers and your own phones only.
 

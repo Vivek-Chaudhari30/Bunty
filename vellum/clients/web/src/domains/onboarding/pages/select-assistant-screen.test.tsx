@@ -1222,18 +1222,18 @@ describe("SelectAssistantScreen native mobile", () => {
     expect(installNativeRememberedOriginsMock).toHaveBeenCalled();
   });
 
-  test("a shell serving a self-hosted origin offers a Vellum Cloud card", async () => {
+  test("a shell serving a self-hosted origin offers a Bunty Cloud card", async () => {
     isNativeMobileValue = true;
     nativeCloudOriginValue = BAKED_CLOUD_URL;
     assistantsValue = [];
 
     render(<SelectAssistantScreen />);
 
-    await waitFor(() => expect(screen.getByText("Vellum Cloud")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Bunty Cloud")).toBeTruthy());
     // No device-local entry to forget, so the card carries no actions menu.
-    expect(screen.queryByLabelText("Actions for Vellum Cloud")).toBeNull();
+    expect(screen.queryByLabelText("Actions for Bunty Cloud")).toBeNull();
 
-    fireEvent.click(screen.getByText("Vellum Cloud"));
+    fireEvent.click(screen.getByText("Bunty Cloud"));
     fireEvent.click(screen.getByText("Continue"));
 
     await waitFor(() =>
@@ -1260,9 +1260,9 @@ describe("SelectAssistantScreen native mobile", () => {
       render(<SelectAssistantScreen />);
 
       await waitFor(() =>
-        expect(screen.getByText("Vellum Cloud")).toBeTruthy(),
+        expect(screen.getByText("Bunty Cloud")).toBeTruthy(),
       );
-      fireEvent.click(screen.getByText("Vellum Cloud"));
+      fireEvent.click(screen.getByText("Bunty Cloud"));
       fireEvent.click(screen.getByText("Continue"));
 
       await waitFor(() =>
@@ -1309,7 +1309,7 @@ describe("SelectAssistantScreen native mobile", () => {
 
     render(<SelectAssistantScreen />);
 
-    await waitFor(() => expect(screen.getByText("Vellum Cloud")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Bunty Cloud")).toBeTruthy());
     // The default selection commits in an effect after the card renders, so
     // clicking on render alone hits a disabled Continue and does nothing.
     await waitFor(() =>
@@ -1324,7 +1324,7 @@ describe("SelectAssistantScreen native mobile", () => {
     );
   });
 
-  test("no Vellum Cloud card when the shell already serves the baked origin", async () => {
+  test("no Bunty Cloud card when the shell already serves the baked origin", async () => {
     isNativeMobileValue = true;
     assistantsValue = [makePairedAssistant(), makePlatformAssistant()];
 
@@ -1333,10 +1333,10 @@ describe("SelectAssistantScreen native mobile", () => {
     await waitFor(() =>
       expect(screen.getByText("Choose an Assistant")).toBeTruthy(),
     );
-    expect(screen.queryByText("Vellum Cloud")).toBeNull();
+    expect(screen.queryByText("Bunty Cloud")).toBeNull();
   });
 
-  test("no Vellum Cloud card on a browser surface", async () => {
+  test("no Bunty Cloud card on a browser surface", async () => {
     nativeCloudOriginValue = BAKED_CLOUD_URL;
     assistantsValue = [makePairedAssistant(), makePlatformAssistant()];
 
@@ -1345,7 +1345,7 @@ describe("SelectAssistantScreen native mobile", () => {
     await waitFor(() =>
       expect(screen.getByText("Choose an Assistant")).toBeTruthy(),
     );
-    expect(screen.queryByText("Vellum Cloud")).toBeNull();
+    expect(screen.queryByText("Bunty Cloud")).toBeNull();
   });
 });
 

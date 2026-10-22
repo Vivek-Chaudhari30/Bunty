@@ -18,6 +18,7 @@ import { ConnectionResolutionError } from "../providers/connection-resolution.js
 import { PROVIDER_CATALOG } from "../providers/model-catalog.js";
 import { getProviderRoutingSource } from "../providers/registry.js";
 import { isAbortReason } from "../util/abort-reasons.js";
+import { BRAND_NAME } from "../util/brand.js";
 import {
   type ProviderCredentialSource,
   ProviderError,
@@ -360,9 +361,9 @@ function connectionResolutionUserMessage(
     case "missing_connection":
       return `No provider connection is configured${usedBy}. Ask me to set one up right here, or add an API key in ${fixPath}.`;
     case "unroutable_managed_model":
-      return `The model "${error.model ?? "<unset>"}"${usedBy} isn't served by the Vellum managed route. Pick a model from the Vellum catalog, or choose a concrete provider in ${fixPath}.`;
+      return `The model "${error.model ?? "<unset>"}"${usedBy} isn't served by the ${BRAND_NAME} managed route. Pick a model from the ${BRAND_NAME} catalog, or choose a concrete provider in ${fixPath}.`;
     case "adapter_unavailable":
-      return `${connection}${usedBy} could not serve model "${error.model ?? "<unset>"}". This model is only available on the Vellum GPU route and was not sent through another provider.`;
+      return `${connection}${usedBy} could not serve model "${error.model ?? "<unset>"}". This model is only available on the ${BRAND_NAME} GPU route and was not sent through another provider.`;
     case "missing_credential":
       // Provider-neutral: api_key connections store keys, oauth_subscription
       // connections store login tokens — the fix differs but the location
@@ -373,9 +374,9 @@ function connectionResolutionUserMessage(
       // this classifier only sees the reason code, so one honest wording covers
       // both the transient and the re-provision cases.
       if (getIsPlatform()) {
-        return `${connection}${usedBy} is unavailable. If this persists, the platform credential may need to be re-provisioned on the Vellum platform.`;
+        return `${connection}${usedBy} is unavailable. If this persists, the platform credential may need to be re-provisioned on the ${BRAND_NAME} platform.`;
       }
-      return `${connection}${usedBy} requires a Vellum platform login. Log in, or pick a different provider in ${fixPath}.`;
+      return `${connection}${usedBy} requires a ${BRAND_NAME} platform login. Log in, or pick a different provider in ${fixPath}.`;
     case "model_incompatible":
       return `${error.model ? `Model "${error.model}"` : "The requested model"} isn't available on ${connectionName ? `connection "${connectionName}"` : "the configured connection"}${usedBy}. Pick a different model or connection in ${fixPath}.`;
   }
@@ -859,7 +860,7 @@ function managedUsageLimitClassification(): Omit<
   return {
     code: "MANAGED_USAGE_LIMIT",
     userMessage:
-      "Vellum managed inference is rate limited. This is a Vellum-side usage limit, not an AI provider outage.",
+      `${BRAND_NAME} managed inference is rate limited. This is a ${BRAND_NAME}-side usage limit, not an AI provider outage.`,
     retryable: true,
     errorCategory: "managed_usage_limit",
   };
@@ -879,7 +880,7 @@ function managedKeyInvalidClassification(): Omit<
   return {
     code: "MANAGED_KEY_INVALID",
     userMessage:
-      "Vellum's managed inference credential was rejected. This isn't a personal provider API key — Vellum provisions this one, so there's nothing to update in Settings.",
+      `${BRAND_NAME}'s managed inference credential was rejected. This isn't a personal provider API key. ${BRAND_NAME} provisions this one, so there's nothing to update in Settings.`,
     retryable: false,
     errorCategory: "managed_key_invalid",
   };

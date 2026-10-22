@@ -27,6 +27,7 @@ import type { CategoryInfo } from "@/domains/intelligence/skills/use-skill-categ
 import type { SuperpowerFilter } from "@/domains/intelligence/superpowers/types";
 import { useTouchMobile } from "@/hooks/use-touch-mobile";
 import { useTranslation } from "@/i18n";
+import { BRAND_NAME } from "@/lib/brand";
 import {
   BottomSheet,
   Button,
@@ -56,7 +57,7 @@ type TranslateFilterLabel = (
 function filterLabel(value: SuperpowerFilter, t: TranslateFilterLabel): string {
   switch (value) {
     case "vellum":
-      return "Vellum";
+      return BRAND_NAME;
     case "clawhub":
       return "Clawhub";
     case "skillssh":

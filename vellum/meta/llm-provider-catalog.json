@@ -2738,10 +2738,10 @@
     },
     {
       "id": "vellum",
-      "displayName": "Vellum",
-      "subtitle": "Models served on Vellum GPU nodes through the managed connection.",
+      "displayName": "Bunty",
+      "subtitle": "Models served on Bunty GPU nodes through the managed connection.",
       "setupMode": "api-key",
-      "setupHint": "Uses the assistant API key through the Vellum managed connection. These models cannot use a bring-your-own key.",
+      "setupHint": "Uses the assistant API key through the Bunty managed connection. These models cannot use a bring-your-own key.",
       "supportsPlatformAuth": true,
       "featureFlag": "vellum-hosted-inference",
       "defaultModel": "qwen/qwen3-8b",

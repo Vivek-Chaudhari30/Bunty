@@ -19,6 +19,7 @@
 
 import { z } from "zod";
 
+import { BRAND_NAME } from "../util/brand.js";
 import { VellumPlatformClient } from "./client.js";
 
 export type ManagedSpeechResult<T> =
@@ -67,7 +68,7 @@ async function resolveClient(): Promise<
         ok: false,
         kind: "unavailable",
         message:
-          "Managed speech is unavailable: no Vellum platform connection.",
+          `Managed speech is unavailable: no ${BRAND_NAME} account connection.`,
       },
     };
   }

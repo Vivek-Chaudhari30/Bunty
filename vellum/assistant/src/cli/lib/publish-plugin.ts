@@ -17,6 +17,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { BRAND_NAME } from "../../util/brand.js";
+
 const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
@@ -568,7 +570,7 @@ export async function runPublish(
     console.log(formatPayloadForPrint(payload));
     console.log("");
     const result = await deps.confirmPrompt({
-      question: "Submit this entry to the Vellum marketplace? [y/N] ",
+      question: `Submit this entry to the ${BRAND_NAME} marketplace? [y/N] `,
       isTTY: Boolean(process.stdin.isTTY),
       refuseNonInteractiveMessage:
         "Refusing to publish non-interactively. Pass --force to confirm.",
@@ -587,7 +589,7 @@ export async function runPublish(
   const platformDeps = await resolvePlatformDeps();
   if (!platformDeps) {
     const msg =
-      "Not connected to Vellum platform. Run `assistant platform connect` to connect, or use --print to generate the entry without submitting.";
+      `Not connected to ${BRAND_NAME} platform. Run \`assistant platform connect\` to connect, or use --print to generate the entry without submitting.`;
     if (opts.json) {
       process.stdout.write(
         JSON.stringify({
@@ -640,7 +642,7 @@ export function formatPublishResult(result: PublishResult): string {
   const lines: string[] = [
     `✓ PR opened: ${result.pr_url}`,
     "",
-    "The Vellum team will review your plugin. The review checks:",
+    `The ${BRAND_NAME} team will review your plugin. The review checks:`,
     "  • Pinned commit is reachable and public",
     "  • package.json has @vellumai/plugin-api peer dependency",
     "  • Plugin loads cleanly (hooks register, tools validate)",

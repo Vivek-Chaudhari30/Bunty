@@ -35,6 +35,8 @@ import {
   type WidgetAvatarKind,
 } from "./widget-tokens";
 
+import { BRAND_NAME } from "@/lib/brand";
+
 const CONTENT_MARGIN = 16;
 const ACTION_COLUMN_WIDTH = 71;
 const COLUMN_GAP = 14;
@@ -212,7 +214,7 @@ export function CatchUpWidgetPreview({
                 paddingLeft: ROW_LEADING_INSET * scale,
               }}
             >
-              Open Vellum to see your recent chats.
+              Open {BRAND_NAME} to see your recent chats.
             </span>
           ) : (
             <div style={{ display: "flex", flexDirection: "column" }}>

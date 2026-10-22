@@ -11,6 +11,7 @@ import {
   saveAssistantEntry,
   type AssistantEntry,
 } from "../lib/assistant-config";
+import { BRAND_NAME } from "../lib/brand.js";
 import {
   DAEMON_INTERNAL_ASSISTANT_ID,
   GATEWAY_PORT,
@@ -1240,7 +1241,7 @@ async function spawnBackgroundWebInterface(
     process.exit(1);
   }
 
-  console.log(`Vellum web interface: http://localhost:${port}${SPA_BASE}`);
+  console.log(`${BRAND_NAME} web interface: http://localhost:${port}${SPA_BASE}`);
   console.log(`Running in background (pid ${child.pid}). Logs: ${logPath}`);
   console.log(`Stop with: kill ${child.pid}`);
 }
@@ -1466,7 +1467,7 @@ async function runWebInterface(
   // the platform hardcodes in its loopback callback. We bind both loopback
   // families above so `localhost` reaches us whichever one it resolves to.
   const webInterfaceUrl = `http://localhost:${port}${SPA_BASE}`;
-  console.log(`Vellum web interface: ${webInterfaceUrl}`);
+  console.log(`${BRAND_NAME} web interface: ${webInterfaceUrl}`);
   if (openInBrowser) openBrowser(webInterfaceUrl);
 
   const shutdown = (): void => {

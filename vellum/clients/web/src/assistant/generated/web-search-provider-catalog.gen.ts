@@ -2,6 +2,8 @@
 // Originally generated in the platform repo; maintained as a static file here.
 
 /** Ordered list of provider ids — drives the picker option order. */
+import { BRAND_NAME } from "@/lib/brand";
+
 export const WEB_SEARCH_PROVIDER_IDS: readonly string[] = [
   "vellum",
   "inference-provider-native",
@@ -21,7 +23,7 @@ export const WEB_SEARCH_PROVIDER_IDS: readonly string[] = [
 export const WEB_SEARCH_PROVIDER_DISPLAY_NAMES: Readonly<
   Record<string, string>
 > = {
-  vellum: "Vellum",
+  vellum: BRAND_NAME,
   "inference-provider-native": "Provider Native",
   perplexity: "Perplexity",
   brave: "Brave",

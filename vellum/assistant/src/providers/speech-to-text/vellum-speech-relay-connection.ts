@@ -17,6 +17,7 @@ import { getGatewayInternalBaseUrl } from "../../config/env.js";
 import { CURRENT_POLICY_EPOCH } from "../../runtime/auth/policy.js";
 import { mintToken } from "../../runtime/auth/token-service.js";
 import type { SttErrorCategory } from "../../stt/types.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { getLogger } from "../../util/logger.js";
 
 const log = getLogger("vellum-speech-relay");
@@ -104,13 +105,13 @@ export function mapVelayError(error: VelayErrorInfo): {
       return {
         category: "auth",
         message:
-          "The Vellum speech relay rejected this assistant's API key — the assistant's platform environment may not match the relay it is dialing (set VELAY_BASE_URL on the gateway to the matching environment, e.g. https://velay-staging.vellum.ai for staging).",
+          `The ${BRAND_NAME} speech relay rejected this assistant's API key. The assistant's platform environment may not match the relay it is dialing (set VELAY_BASE_URL on the gateway to the matching environment, e.g. https://velay-staging.vellum.ai for staging).`,
       };
     case "missing_platform_connection":
       return {
         category: "auth",
         message:
-          "Managed speech needs a working Vellum platform connection — reconnect with 'assistant platform connect'.",
+          `Managed speech needs a working ${BRAND_NAME} account connection. Reconnect with 'assistant platform connect'.`,
       };
     case "invalid_token":
       return {
@@ -122,7 +123,7 @@ export function mapVelayError(error: VelayErrorInfo): {
       return {
         category: "provider-error",
         message:
-          "Managed speech is paused: your Vellum organization is out of credits. Top up credits to continue.",
+          `Managed speech is paused: your ${BRAND_NAME} account is out of credits. Top up credits to continue.`,
       };
     case "provider_unreachable":
     case "upstream_error":

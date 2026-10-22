@@ -1,5 +1,6 @@
 /** Declarative help for the `assistant inference` command. */
 
+import { BRAND_NAME } from "../../util/brand.js";
 import type {
   CliCommandHelp,
   CliOptionHelp,
@@ -204,7 +205,7 @@ Examples:
       helpText: `
 A provider entry names a model provider plus how to reach it. Auth is
 derived from the provider: keyless providers (ollama) need none, the
-Vellum entry routes through the platform's managed proxy, and everything
+${BRAND_NAME} entry routes through the platform's managed proxy, and everything
 else uses an API key referenced by --credential.
 
 Canonical entry (seeded on every boot):

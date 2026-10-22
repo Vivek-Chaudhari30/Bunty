@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { BRAND_NAME } from "@/lib/brand";
 import {
   getAppVersionInfo,
   openAppWebsite,
@@ -83,7 +84,7 @@ export function AboutPage() {
 }
 
 const FALLBACK: AppVersionInfo = {
-  appName: "Vellum",
+  appName: BRAND_NAME,
   version: "—",
   commitSha: "—",
   copyright: `© ${new Date().getFullYear()} Vellum`,

@@ -1,3 +1,4 @@
+import { BRAND_NAME } from "../../util/brand.js";
 import { getWorkspaceDir } from "../../util/platform.js";
 import { OpenAIChatCompletionsProvider } from "../openai/chat-completions-provider.js";
 import type { SendMessageOptions } from "../types.js";
@@ -23,7 +24,7 @@ export class VellumProvider extends OpenAIChatCompletionsProvider {
   ) {
     super(apiKey || "not-needed", model, {
       providerName: "vellum",
-      providerLabel: "Vellum",
+      providerLabel: BRAND_NAME,
       streamTimeoutMs: options.streamTimeoutMs,
       omitToolChoiceWhenReasoning: true,
       ...(options.baseURL ? { baseURL: options.baseURL } : {}),

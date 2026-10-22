@@ -302,7 +302,7 @@ describe("tunnel edge targeting", () => {
       "workspace",
     );
     expect(logs).toContain(
-      "Assistant 'cloud-1' runs on Vellum Cloud and needs no tunnel. " +
+      "Assistant 'cloud-1' runs on Bunty Cloud and needs no tunnel. " +
         "Tunneling the local assistant 'assistant-1' instead.",
     );
     expect(ensureTunnelEdgeMock).toHaveBeenCalledWith({
@@ -373,7 +373,7 @@ describe("tunnel edge targeting", () => {
     const logs = await runTunnelCapturingLogs();
 
     expect(logs).toContain(
-      "Assistant 'cloud-1' runs on Vellum Cloud and needs no tunnel. " +
+      "Assistant 'cloud-1' runs on Bunty Cloud and needs no tunnel. " +
         "Tunneling the local assistant 'docker-1' instead.",
     );
     expect(runNgrokTunnelMock).toHaveBeenCalledWith({
@@ -391,7 +391,7 @@ describe("tunnel edge targeting", () => {
 
     expect(exited).toBe(true);
     expect(errors).toContain(
-      "Assistant 'cloud-1' runs on Vellum Cloud and needs no tunnel.",
+      "Assistant 'cloud-1' runs on Bunty Cloud and needs no tunnel.",
     );
     expect(errors).toContain("No local assistant found to tunnel");
     expect(ensureTunnelEdgeMock).not.toHaveBeenCalled();
@@ -410,7 +410,7 @@ describe("tunnel edge targeting", () => {
 
     expect(exited).toBe(true);
     expect(errors).toContain(
-      "Assistant 'cloud-1' runs on Vellum Cloud and needs no tunnel.",
+      "Assistant 'cloud-1' runs on Bunty Cloud and needs no tunnel.",
     );
     expect(errors).toContain(
       "Pass a local assistant as the name argument: assistant-a, assistant-b.",
@@ -435,7 +435,7 @@ describe("tunnel edge targeting", () => {
 
     expect(exited).toBe(true);
     expect(errors).toContain(
-      "Assistant 'cloud-1' runs on Vellum Cloud and needs no tunnel.",
+      "Assistant 'cloud-1' runs on Bunty Cloud and needs no tunnel.",
     );
     expect(errors).toContain(
       "Pass a local assistant as the name argument: assistant-1.",
@@ -528,7 +528,7 @@ describe("tunnel edge targeting", () => {
     const logs = await runTunnelCapturingLogs();
 
     expect(logs).toContain(
-      "Assistant 'cloud-1' runs on Vellum Cloud and needs no tunnel. " +
+      "Assistant 'cloud-1' runs on Bunty Cloud and needs no tunnel. " +
         "Tunneling the local assistant 'apple-1' instead.",
     );
     expect(ensureTunnelEdgeMock).toHaveBeenCalledWith({
@@ -575,7 +575,7 @@ describe("tunnel edge targeting", () => {
 
     expect(exited).toBe(true);
     expect(errors).toContain(
-      "Assistant 'Cloudy (cloud-1)' runs on Vellum Cloud and needs no tunnel.",
+      "Assistant 'Cloudy (cloud-1)' runs on Bunty Cloud and needs no tunnel.",
     );
     expect(errors).toContain(
       "Pass a local assistant as the name argument: assistant-1.",

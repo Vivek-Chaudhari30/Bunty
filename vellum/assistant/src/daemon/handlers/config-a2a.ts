@@ -33,6 +33,7 @@ import {
 import { getDb } from "../../persistence/db-connection.js";
 import { assistantContactMetadata } from "../../persistence/schema/index.js";
 import type { HttpErrorResponse } from "../../runtime/http-errors.js";
+import { BRAND_NAME } from "../../util/brand.js";
 import { getLogger } from "../../util/logger.js";
 import { getAssistantName } from "../identity-helpers.js";
 const log = getLogger("config-a2a");
@@ -182,7 +183,7 @@ export function completeA2AInvite(params: {
   };
 }): CompleteA2AInviteResult {
   // Resolve sender identity before any mutations so we fail cleanly
-  const displayName = getAssistantName() ?? "Vellum Assistant";
+  const displayName = getAssistantName() ?? BRAND_NAME;
   let gatewayUrl: string;
   try {
     gatewayUrl = getPublicBaseUrl(getConfig());
@@ -398,7 +399,7 @@ export async function acceptA2AInvite(params: {
   const senderGatewayUrl = safety.origin;
 
   // 1. Validate local config
-  const displayName = getAssistantName() ?? "Vellum Assistant";
+  const displayName = getAssistantName() ?? BRAND_NAME;
   let localGatewayUrl: string;
   try {
     localGatewayUrl = getPublicBaseUrl(getConfig());

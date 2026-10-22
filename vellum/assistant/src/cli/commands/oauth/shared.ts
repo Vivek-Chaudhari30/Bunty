@@ -7,6 +7,7 @@
 
 import type { Command } from "commander";
 
+import { BRAND_NAME } from "../../../util/brand.js";
 import { writeOutput } from "../../output.js";
 
 // ---------------------------------------------------------------------------
@@ -32,7 +33,7 @@ export async function requirePlatformConnection(
     writeOutput(cmd, {
       ok: false,
       error:
-        "Not connected to Vellum platform. Run `vellum platform connect` to connect first.",
+        `Not connected to ${BRAND_NAME} platform. Run \`vellum platform connect\` to connect first.`,
     });
     process.exitCode = 1;
     return false;

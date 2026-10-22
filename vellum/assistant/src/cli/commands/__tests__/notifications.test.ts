@@ -569,7 +569,7 @@ describe("notifications list", () => {
     expect(ipcCalls[0].method).toBe("list_home_feed");
   });
 
-  test("list help disambiguates Vellum notifications from email inboxes", async () => {
+  test("list help disambiguates Bunty notifications from email inboxes", async () => {
     const { stdout, exitCode } = await runRawCommand([
       "notifications",
       "list",
@@ -578,7 +578,7 @@ describe("notifications list", () => {
 
     expect(exitCode).toBe(0);
     const normalizedHelp = stdout.replace(/\s+/g, " ");
-    expect(normalizedHelp).toContain("Vellum Home feed");
+    expect(normalizedHelp).toContain("Bunty Home feed");
     expect(normalizedHelp).toContain("does not read email inboxes");
     expect(normalizedHelp).toContain("Gmail");
     expect(normalizedHelp).toContain("Outlook");

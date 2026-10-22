@@ -60,7 +60,7 @@ const config: CapacitorConfig = {
   // uses this value as its application namespace. The real iOS bundle IDs are
   // set via `PRODUCT_BUNDLE_IDENTIFIER` in the Xcode project.
   appId: "ai.vellum.assistant",
-  appName: "Vellum",
+  appName: "Bunty",
   webDir: "capacitor-shell",
   server: {
     url: SERVER_URL,

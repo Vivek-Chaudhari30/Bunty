@@ -36,6 +36,7 @@ import {
   getSecureKeyAsync,
   setSecureKeyAsync,
 } from "../security/secure-keys.js";
+import { BRAND_NAME } from "../util/brand.js";
 import { openInHostBrowser } from "../util/browser.js";
 import { getLogger } from "../util/logger.js";
 import { APP_VERSION } from "../version.js";
@@ -145,7 +146,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
     const assistantName = getAssistantName();
     const assistantId = getPlatformAssistantId().trim();
     return buildMcpOAuthClientMetadata({
-      clientName: assistantName ?? "Vellum Assistant",
+      clientName: assistantName ?? `${BRAND_NAME} Assistant`,
       redirectUris: this._redirectUrl ? [this._redirectUrl] : [],
       softwareId: assistantId.length > 0 ? assistantId : undefined,
       softwareVersion: APP_VERSION,

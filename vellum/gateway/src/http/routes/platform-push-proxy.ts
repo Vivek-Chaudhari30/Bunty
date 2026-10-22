@@ -12,6 +12,7 @@
  * authenticates the hop with the stored assistant API key.
  */
 
+import { BRAND_NAME } from "../../brand.js";
 import type { CredentialCache } from "../../credential-cache.js";
 import { credentialKey } from "../../credential-key.js";
 import { fetchImpl } from "../../fetch.js";
@@ -44,7 +45,7 @@ export function createPlatformPushProxyHandler(credentials: CredentialCache) {
     if (!platformBaseUrl || !assistantApiKey || !assistantId) {
       return errorResponse(
         "PLATFORM_UNAVAILABLE",
-        "This assistant is not registered with the Vellum platform, so push notifications are unavailable.",
+        `This assistant is not registered with the ${BRAND_NAME} platform, so push notifications are unavailable.`,
         503,
       );
     }
@@ -112,7 +113,7 @@ export function createPlatformPushProxyHandler(credentials: CredentialCache) {
       );
       return errorResponse(
         "PLATFORM_UNAVAILABLE",
-        "Could not reach the Vellum platform to register this device.",
+        `Could not reach the ${BRAND_NAME} platform to register this device.`,
         502,
       );
     }

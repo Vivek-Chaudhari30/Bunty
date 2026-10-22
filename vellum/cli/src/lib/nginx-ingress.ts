@@ -23,6 +23,7 @@ import {
   lookupAssistantByIdentifier,
   type AssistantEntry,
 } from "./assistant-config.js";
+import { BRAND_NAME } from "./brand.js";
 import { getCurrentEnvironment } from "./environments/resolve.js";
 import { waitForDaemonReady } from "./http-client.js";
 import {
@@ -1048,7 +1049,7 @@ function stuckEdgeRecoveryHint(workspaceDir: string): string {
   const pid = getIngressPid(workspaceDir);
   const target = pid !== null ? `the nginx process (PID ${pid})` : "it";
   return (
-    `Vellum could not stop ${target}, even with SIGKILL. ` +
+    `${BRAND_NAME} could not stop ${target}, even with SIGKILL. ` +
     `Stop it by hand and retry, or run \`vellum sleep\` to shut the ` +
     `assistant down entirely. Check the nginx log: ${logPath}`
   );

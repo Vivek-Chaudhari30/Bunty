@@ -1,12 +1,13 @@
 /** Declarative help for the `assistant skills` command. */
 
+import { BRAND_NAME } from "../../util/brand.js";
 import type { CliCommandHelp } from "../lib/cli-command-help.js";
 
 export const skillsHelp: CliCommandHelp = {
   name: "skills",
-  description: "Browse and install skills from the Vellum catalog",
+  description: `Browse and install skills from the ${BRAND_NAME} catalog`,
   helpText: `
-Manage skills from the Vellum catalog. Skills are instructions of
+Manage skills from the ${BRAND_NAME} catalog. Skills are instructions of
 workflows and tools that teach the assistant when dynamically relevant.`,
   subcommands: [
     {
@@ -47,7 +48,7 @@ Examples:
       name: "search",
       args: "<query>",
       description:
-        "Search the Vellum catalog, skills.sh, and clawhub community registries",
+        `Search the ${BRAND_NAME} catalog, skills.sh, and clawhub community registries`,
       options: [
         {
           flags: "--limit <n>",
@@ -65,11 +66,11 @@ When to use:
 Arguments:
   query    Free-text search term matched against skill names, descriptions,
            and tags. Use the product or capability name, not the full user
-           sentence. Searches the Vellum catalog, the skills.sh community
+           sentence. Searches the ${BRAND_NAME} catalog, the skills.sh community
            registry, and the clawhub registry.
 
 Displays results from all sources with clear labels. When a skill ID
-exists in both the Vellum catalog and a community registry, a conflict
+exists in both the ${BRAND_NAME} catalog and a community registry, a conflict
 note is shown with guidance on which install command to use.
 
 If a catalog match is found, install it with 'assistant skills install <id>'.
@@ -94,7 +95,7 @@ Examples:
       ],
       helpText: `
 Arguments:
-  skill-id   Skill identifier from the Vellum catalog. Run 'assistant skills list'
+  skill-id   Skill identifier from the ${BRAND_NAME} catalog. Run 'assistant skills list'
              to see available IDs. For community skills, use 'assistant skills add'.
 
 Downloads and installs the skill into the workspace skills directory. If the

@@ -181,27 +181,27 @@ describe("ImageGenerationCard — provider-only configuration", () => {
     expect(trigger("Image generation provider")).toBeTruthy();
   });
 
-  test("the provider picker offers Vellum, Gemini, OpenAI and OpenRouter", () => {
+  test("the provider picker offers Bunty, Gemini, OpenAI and OpenRouter", () => {
     renderCard();
 
     fireEvent.click(trigger("Image generation provider"));
     expect(visibleOptions()).toEqual([
-      "Vellum",
+      "Bunty",
       "Gemini",
       "OpenAI",
       "OpenRouter",
     ]);
   });
 
-  test("Vellum hides the key field, lists every model, and saves the pair", async () => {
+  test("Bunty hides the key field, lists every model, and saves the pair", async () => {
     renderCard();
 
     fireEvent.click(trigger("Image generation provider"));
-    selectOption("Vellum");
+    selectOption("Bunty");
 
     expect(screen.queryByText("API Key")).toBeNull();
     expect(
-      screen.getByText(/Image generation runs through your Vellum account/),
+      screen.getByText(/Image generation runs through your Bunty account/),
     ).toBeTruthy();
 
     fireEvent.click(trigger("Image generation model"));
@@ -268,14 +268,14 @@ describe("ImageGenerationCard — provider-only configuration", () => {
   });
 
   // A config written by the legacy mode toggle marks managed via `mode`.
-  test("a legacy managed-mode daemon renders as Vellum", () => {
+  test("a legacy managed-mode daemon renders as Bunty", () => {
     daemonConfigData = {
       services: { "image-generation": { mode: "managed", provider: "gemini" } },
     };
     renderCard();
 
     expect(trigger("Image generation provider").textContent).toContain(
-      "Vellum",
+      "Bunty",
     );
     expect(screen.queryByText("API Key")).toBeNull();
   });
@@ -491,7 +491,7 @@ describe("ImageGenerationCard — provider-only configuration", () => {
     renderCard();
 
     fireEvent.click(trigger("Image generation provider"));
-    selectOption("Vellum");
+    selectOption("Bunty");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(configPatchCalls.length).toBe(1));

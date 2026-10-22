@@ -1498,12 +1498,12 @@ describe("the creature as the call button", () => {
     expect(creatureOf(container)?.getAttribute("aria-label")).toBe("Talk");
   });
 
-  test("is named for the way back to Vellum on a call", () => {
+  test("is named for the way back to Bunty on a call", () => {
     const { container } = render(
       <CompanionSurface phase="call" call={LISTENING_CALL} />,
     );
     expect(creatureOf(container)?.getAttribute("aria-label")).toBe(
-      "Open Vellum",
+      "Open Bunty",
     );
   });
 
@@ -1647,7 +1647,7 @@ describe("the companion surface's dial", () => {
  * rest across that gap reads as the recording having been thrown away, and the
  * report would land in a thread nobody was ever shown.
  */
-describe("the offer of Vellum's dictation", () => {
+describe("the offer of Bunty's dictation", () => {
   test("names the app that pasted, and leaves the words to the card", () => {
     const { container } = render(
       <CompanionSurface

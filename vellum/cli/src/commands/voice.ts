@@ -17,6 +17,7 @@ import chalk from "chalk";
 
 import { extractValueFlag } from "../lib/arg-utils.js";
 import { parseAssistantTargetArg } from "../lib/assistant-target-args.js";
+import { BRAND_NAME } from "../lib/brand.js";
 import { CliLiveVoiceClient } from "../lib/live-voice/client.js";
 import {
   LiveVoiceConnectionError,
@@ -53,7 +54,7 @@ DESCRIPTION:
     Ctrl+C interrupts the assistant mid-reply. Ctrl+D, or Ctrl+C when nothing
     is being spoken, ends the session.
 
-    Works with local, self-hosted, and Vellum cloud assistants. A cloud
+    Works with local, self-hosted, and ${BRAND_NAME} cloud assistants. A cloud
     assistant needs a platform login ('vellum login'); the session is
     authorized per-connection from it.
 

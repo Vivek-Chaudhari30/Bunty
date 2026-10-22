@@ -1,5 +1,6 @@
 import { CHANNEL_BOT_PROVIDER } from "@vellumai/service-contracts/channels";
 
+import { BRAND_NAME } from "../../../brand.js";
 import type {
   ArgRule,
   CommandRiskSpec,
@@ -525,7 +526,7 @@ const riskOverrides: AssistantRiskOverride[] = [
     path: "roadmap create",
     risk: "high",
     reason:
-      "Publishes an item on the public Vellum roadmap under the assistant's name and notifies Vellum staff",
+      `Publishes an item on the public ${BRAND_NAME} roadmap under the assistant's name and notifies ${BRAND_NAME} staff`,
   },
   {
     path: "roadmap update",

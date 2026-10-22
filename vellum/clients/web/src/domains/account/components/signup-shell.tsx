@@ -1,6 +1,7 @@
 import { motion } from "motion/react";
 import { type ReactNode } from "react";
 
+import { BRAND_NAME } from "@/lib/brand";
 import { publicAsset } from "@/utils/public-asset";
 
 import "@/domains/account/components/signup.css";
@@ -29,7 +30,7 @@ export function SignupShell({ children }: { children?: ReactNode }) {
           <img
             src={publicAsset("/vellum-logo-white.svg")}
             // eslint-disable-next-line local/no-untranslated-strings -- brand name
-            alt="Vellum"
+            alt={BRAND_NAME}
             width={82}
             height={25}
           />

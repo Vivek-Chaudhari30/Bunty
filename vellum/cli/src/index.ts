@@ -8,6 +8,7 @@ import {
   SigningKeyContinuityError,
 } from "@vellumai/local-mode";
 
+import { BRAND_NAME } from "./lib/brand.js";
 import { emitCliError } from "./lib/cli-error.js";
 
 import cliPkg from "../package.json";
@@ -113,8 +114,8 @@ function printHelp(): void {
   console.log("  gateway  Gateway management commands");
   console.log("  hatch    Create a new assistant instance");
   console.log("  logs     View logs from an assistant instance");
-  console.log("  login    Log in to the Vellum platform");
-  console.log("  logout   Log out of the Vellum platform");
+  console.log(`  login    Log in to the ${BRAND_NAME} platform`);
+  console.log(`  logout   Log out of the ${BRAND_NAME} platform`);
   console.log("  message  Send a message to a running assistant");
   console.log(
     "  pair     Print a pairing link and QR code for another device [beta]",
@@ -133,7 +134,7 @@ function printHelp(): void {
   console.log("  sleep    Stop the assistant process");
   console.log("  ssh      SSH into a remote assistant instance");
   console.log(
-    "  debug-bundle  Send Vellum staff a debug bundle of a self-hosted assistant",
+    `  debug-bundle  Send ${BRAND_NAME} staff a debug bundle of a self-hosted assistant`,
   );
   console.log("  teleport Transfer assistant data between environments");
   console.log("  terminal Open a terminal into a managed assistant container");
