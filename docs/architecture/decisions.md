@@ -111,3 +111,12 @@ state file. Trade-off: one SQLite write per incoming request.
 `.github/workflows/check.yml` runs `bun run check` on Bun 1.3.11 for every pull request and push to
 `main`. Actions are pinned to exact commits (`actions/checkout` v4.2.2, `oven-sh/setup-bun`
 v2.0.2). Instead of: installing Bun with its curl script. Trade-off: one third-party action, pinned.
+
+## D-18 · Model access through AICredits, GPT-6 Luna first · 2026-10-22 · Proposed (Vivek)
+Each assistant reaches its model through AICredits (`https://api.aicredits.in/v1`), an
+OpenAI-compatible gateway billed in INR, using Vellum's built-in `openai-compatible` provider.
+First model: `openai/gpt-6-luna` ($0.10 / $0.50 per 1M tokens in / out). Why: one prepaid rupee
+account for every model, and switching model is a config change. Instead of: an Anthropic key
+direct (AGENTS.md section 4 assumes Claude). Trade-off: a third party sees every conversation;
+prompt caching and Luna's Indian-language quality are unverified. Details:
+[model-provider.md](model-provider.md).

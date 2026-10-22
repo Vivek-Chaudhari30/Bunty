@@ -1,0 +1,319 @@
+<title>Bunty Call and WhatsApp Pipeline</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Public+Sans:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column with wide bands for diagrams; journey as a numbered rail because it is a real sequence. */
+:root {
+  --paper: #f6f7f4;
+  --sheet: #ffffff;
+  --ink: #17201c;
+  --muted: #5b665f;
+  --line: #dde2dc;
+  --accent: #2c4bd1;
+  --accent-soft: #e6ebfb;
+  --ok: #1d7a4b; --ok-bg: #e2f2e8;
+  --vellum: #2c4bd1; --vellum-bg: #e6ebfb;
+  --warn: #9a5a00; --warn-bg: #fbeed6;
+  --stop: #b0322a; --stop-bg: #f8e1df;
+  --display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --body: "Public Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --paper: #121715; --sheet: #1a201d; --ink: #e7ece8; --muted: #9aa69f; --line: #2c3530;
+  --accent: #8ea4ff; --accent-soft: #232b48;
+  --ok: #6fd39c; --ok-bg: #173226; --vellum: #8ea4ff; --vellum-bg: #232b48;
+  --warn: #f0b85c; --warn-bg: #3a2c12; --stop: #f19189; --stop-bg: #3d1d1a;
+  color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --paper: #121715; --sheet: #1a201d; --ink: #e7ece8; --muted: #9aa69f; --line: #2c3530;
+  --accent: #8ea4ff; --accent-soft: #232b48;
+  --ok: #6fd39c; --ok-bg: #173226; --vellum: #8ea4ff; --vellum-bg: #232b48;
+  --warn: #f0b85c; --warn-bg: #3a2c12; --stop: #f19189; --stop-bg: #3d1d1a;
+  color-scheme: dark;
+}
+body { background: var(--paper); color: var(--ink); font-family: var(--body); font-size: 16px; line-height: 1.6; }
+.wrap { max-width: 980px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 40px 72px; display: grid; gap: 56px; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; line-height: 1.15; margin: 0; }
+h1 { font-size: clamp(2rem, 5vw, 3rem); letter-spacing: -0.01em; }
+h2 { font-size: 1.6rem; }
+h3 { font-size: 1.1rem; }
+p { margin: 0; max-width: 68ch; }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.eyebrow { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+section { display: grid; gap: 18px; min-width: 0; }
+.lede { font-size: 1.15rem; color: var(--ink); }
+.muted { color: var(--muted); }
+header { display: grid; gap: 14px; }
+
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.summary div { background: var(--sheet); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: grid; gap: 4px; align-content: start; }
+.summary b { font-family: var(--display); font-size: 1.05rem; }
+
+.diagram { background: var(--sheet); border: 1px solid var(--line); border-radius: 10px; padding: 16px; overflow-x: auto; }
+.diagram pre.mermaid { margin: 0; background: transparent; min-width: 640px; }
+.caption { font-size: 0.9rem; color: var(--muted); }
+
+.rail { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; counter-reset: step; }
+.rail li { display: grid; grid-template-columns: 44px 1fr; gap: 14px; position: relative; padding-bottom: 22px; }
+.rail li::before { counter-increment: step; content: counter(step); font-family: var(--display); font-weight: 700; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--paper); }
+.rail li::after { content: ""; position: absolute; left: 16px; top: 36px; bottom: 0; width: 2px; background: var(--line); }
+.rail li:last-child::after { display: none; }
+.rail .body { display: grid; gap: 6px; min-width: 0; }
+.rail .who { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); }
+
+.chip { display: inline-block; font-family: var(--mono); font-size: 0.72rem; font-weight: 500; padding: 2px 8px; border-radius: 999px; white-space: nowrap; vertical-align: 1px; }
+.c-ok { color: var(--ok); background: var(--ok-bg); }
+.c-vellum { color: var(--vellum); background: var(--vellum-bg); }
+.c-warn { color: var(--warn); background: var(--warn-bg); }
+.c-stop { color: var(--stop); background: var(--stop-bg); }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 18px; font-size: 0.9rem; color: var(--muted); }
+.legend span { display: inline-flex; gap: 6px; align-items: center; }
+
+.tablebox { overflow-x: auto; background: var(--sheet); border: 1px solid var(--line); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 0.93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+tr:last-child td { border-bottom: none; }
+
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.panel { background: var(--sheet); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.panel ul, .panel ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.flag { border-left: 3px solid var(--stop); background: var(--stop-bg); border-radius: 0 8px 8px 0; padding: 12px 16px; display: grid; gap: 6px; }
+.flag p { color: var(--ink); }
+ol.qs { margin: 0; padding-left: 22px; display: grid; gap: 10px; }
+ol.qs li { padding-left: 4px; max-width: 70ch; }
+footer { font-size: 0.85rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; }
+@media (max-width: 520px) { .rail li { grid-template-columns: 36px 1fr; gap: 10px; } .rail li::before { width: 30px; height: 30px; } .rail li::after { left: 14px; } }
+</style>
+
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">Bunty · WhatsApp and phone · my understanding, 22 Oct 2026</span>
+  <h1>How a person uses Bunty, end to end</h1>
+  <p class="lede">A person in India saves one phone number. They WhatsApp it or call it, in Hindi, English, Hinglish or Gujarati. Behind that one number, every person has their <b>own</b> assistant with its own memory. Bunty does what they ask (reminders, calling or messaging someone, booking) and confirms when it is done. It never acts on the outside world without their "yes".</p>
+  <p class="muted">This page is what I understood from the repo (<code>docs/architecture/</code>, <code>backend/router</code>, <code>integrations/</code>, and Vellum's source). Correct anything that's wrong before we build.</p>
+</header>
+
+<section>
+  <h2>The four ideas everything rests on</h2>
+  <div class="summary">
+    <div><b>One assistant per person</b><span class="muted">Each user gets their own Vellum assistant (decision D-01). Its owner is called the <em>guardian</em>.</span></div>
+    <div><b>Shared numbers, one router</b><span class="muted">One WhatsApp number and one phone number for everyone. <code>backend/router</code> looks at the sender's number and passes the message or call to that person's assistant.</span></div>
+    <div><b>Vellum is the brain</b><span class="muted">Calls, WhatsApp, voice-note transcription, memory, reminders and approvals are already in Vellum. We add plugins and setup, not a new brain.</span></div>
+    <div><b>Code checks the "yes"</b><span class="muted">Anything outward (call, message, booking, money) needs the owner's approval, checked in code, not just asked for in the prompt.</span></div>
+  </div>
+</section>
+
+<section>
+  <h2>The whole system on one picture</h2>
+  <div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  U["User's phone<br/>+91 00000 00001"] -- "WhatsApp: text, voice note, photo" --> META["Meta WhatsApp<br/>Cloud API"]
+  U -- "phone call" --> TW["Twilio<br/>shared number"]
+  META -- "webhook POST /whatsapp" --> R["backend/router<br/>sender number → assistant"]
+  TW -- "POST /twilio/voice" --> R
+  R -- "forward raw body + signature" --> G["Chintu's gateway<br/>/webhooks/whatsapp"]
+  R -. "TwiML Redirect" .-> TW
+  TW -- "POST /webhooks/twilio/voice<br/>then audio WebSocket" --> G
+  subgraph A ["Chintu: Owner A's own Vellum assistant"]
+    G --> D["daemon<br/>agent loop · memory · reminders"]
+    D --> P["our plugins<br/>reach-contact · a2a-delegation"]
+    D --> STT["Deepgram STT"]
+    D --> TTS["ElevenLabs TTS"]
+    D --> LLM["Claude<br/>(Anthropic API)"]
+  end
+  D -- "replies, approval buttons" --> META
+  D -- "call_start (outbound call)" --> TW
+</pre>
+  </div>
+  <p class="caption">Every inbound message or call hits the router first. Every outbound reply or call goes from the assistant straight to Meta or Twilio, without the router.</p>
+</section>
+
+<section>
+  <h2>A user's journey, step by step</h2>
+  <ol class="rail">
+    <li><div class="body">
+      <span class="who">Website · router</span>
+      <h3>Sign up <span class="chip c-warn">not built</span></h3>
+      <p>They sign up on the website and prove the number with an OTP. Then two things happen: an assistant is created for them (<em>hatch</em>), and the router gets a row in <code>users</code> linking <code>+910000000001 → chintu → https://chintu.&lt;domain&gt;</code>. Consent for recording and data use is saved with a timestamp. The router endpoints for this exist (<code>/internal/users</code>, <code>/internal/consent</code>). The website form, the OTP provider (BUN-11) and automatic hatching (BUN-35) do not.</p>
+    </div></li>
+    <li><div class="body">
+      <span class="who">Assistant</span>
+      <h3>Owner is recognized <span class="chip c-vellum">CLI, untested</span></h3>
+      <p>The assistant has to know this number is its <em>owner</em>, not a stranger. On calls, Vellum checks this with a six-digit code (guardian verification). On WhatsApp, <code>assistant channel-verification-sessions create --channel whatsapp</code> gives a code the owner sends from WhatsApp, with no code change. <code>supportsVerification: false</code> only affects what the app shows. Still to be tested live. Without it, the owner's own messages are refused as "unknown".</p>
+    </div></li>
+    <li><div class="body">
+      <span class="who">User → Meta → router</span>
+      <h3>They send a WhatsApp <span class="chip c-ok">router built</span></h3>
+      <p>"Kal subah 7 baje yaad dilana, dawai leni hai" as a voice note. Meta posts the webhook to the router. The router checks Meta's signature, finds the sender in <code>users</code>, and forwards the body unchanged with <code>X-Hub-Signature-256</code>, so the assistant's gateway can check the signature too. If one webhook holds messages from several people, the router splits it and re-signs each part.</p>
+    </div></li>
+    <li><div class="body">
+      <span class="who">Gateway → daemon</span>
+      <h3>The assistant understands it <span class="chip c-vellum">Vellum built-in</span></h3>
+      <p>The gateway drops duplicate messages, downloads the voice note from Meta, and the daemon turns it into text before the model sees it. The model then reads memory (who the user is, their contacts, past requests) and picks a tool: a reminder, a call, a message, or a task for another person's assistant.</p>
+    </div></li>
+    <li><div class="body">
+      <span class="who">Assistant → user</span>
+      <h3>It asks before acting <span class="chip c-vellum">in-chat buttons work</span> <span class="chip c-stop">notifications don't</span></h3>
+      <p>For anything outward ("Call Owner B and say 6 PM?") the tool is high-risk, so Vellum shows an approval prompt. In the owner's own WhatsApp chat these arrive as buttons like <b>[Call] [Text instead]</b>, once the owner is verified on WhatsApp. But Vellum's notification system never sends to WhatsApp (<code>deliveryEnabled: false</code>). So questions raised in the middle of a call, access requests, and <b>reminders</b> don't reach WhatsApp. That needs a <code>vellum/</code> change (V1 on the requirements page).</p>
+    </div></li>
+    <li><div class="body">
+      <span class="who">Assistant → Twilio / Meta</span>
+      <h3>It does the task <span class="chip c-vellum">Vellum built-in</span> <span class="chip c-ok">our plugin built</span></h3>
+      <p>A reminder becomes a Vellum schedule. A call is placed with <code>call_start</code> through Twilio: the assistant says it is an AI calling for the user, talks with live speech-to-text and text-to-speech, and never calls emergency numbers. Our <code>reach_contact</code> tool decides between call, WhatsApp and the other person's assistant, then tells the router "I just contacted +91 …", so that person's replies come back here for 24 h.</p>
+    </div></li>
+    <li><div class="body">
+      <span class="who">Assistant → user</span>
+      <h3>It confirms it's done <span class="chip c-vellum">text works</span> <span class="chip c-warn">voice reply not wired</span></h3>
+      <p>"Owner B ko call kiya, unhone OK bola." The reply goes as text. If the user sent a voice note, the plan is to reply with one too (decision D-07). The voice-reply code exists, but Vellum's WhatsApp sender can't send audio yet (BUN-44).</p>
+    </div></li>
+  </ol>
+</section>
+
+<section>
+  <h2>Path A: a WhatsApp message in detail</h2>
+  <div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  participant U as User (+91 00000 00001)
+  participant M as Meta Cloud API
+  participant R as backend/router
+  participant G as Chintu gateway
+  participant D as Chintu daemon
+  U->>M: voice note
+  M->>R: POST /whatsapp (X-Hub-Signature-256)
+  R->>R: check signature, rate limit (30/min), look up users
+  R->>G: same bytes + same signature
+  G->>G: check signature, dedupe message id (24 h)
+  G->>M: download audio
+  G->>D: inbound message
+  D->>D: transcribe, memory, choose tool
+  D->>M: "Set reminder 7 AM? [Yes] [Change]"
+  M->>U: buttons
+  U->>M: taps Yes
+  M->>R: POST /whatsapp (button reply)
+  R->>G: forward
+  G->>D: approval
+  D->>D: create reminder
+  D->>M: "Done. Kal 7 baje yaad dilaunga."
+</pre>
+  </div>
+  <p class="caption">Unknown number: the router sends a one-time onboarding reply with the sign-up link, at most once a day, and forwards nothing.</p>
+</section>
+
+<section>
+  <h2>Path B: a phone call in detail</h2>
+  <div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  participant U as User's phone
+  participant T as Twilio
+  participant R as backend/router
+  participant G as Chintu gateway
+  participant D as Chintu daemon
+  U->>T: dials shared number
+  T->>R: POST /twilio/voice (X-Twilio-Signature)
+  R->>R: check signature, rate limit (5/min), look up caller
+  R-->>T: TwiML Redirect to chintu/webhooks/twilio/voice
+  T->>G: POST /webhooks/twilio/voice (signed for this URL)
+  G-->>T: Connect Stream
+  T->>G: live audio over WebSocket
+  G->>D: audio
+  D->>D: Deepgram STT (language multi) → Claude → ElevenLabs TTS
+  D->>T: spoken reply (barge-in supported)
+  T->>U: hears answer
+</pre>
+  </div>
+  <p class="caption">Why a redirect and not a proxy: Twilio's signature covers the URL. If Twilio calls the assistant itself, the signature stays valid and the audio never passes through the router.</p>
+</section>
+
+<section>
+  <h2>The tricky part: one shared number</h2>
+  <p>Messages to the shared number are routed by <b>who sent them</b>. Three cases:</p>
+  <div class="tablebox"><table>
+    <thead><tr><th>Who writes or calls</th><th>Where it goes</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>A user (in <code>users</code>)</td><td>Their own assistant</td><td>Normal case.</td></tr>
+      <tr><td>A non-user that an assistant contacted in the last 24 h (a shop, a friend)</td><td>The assistant that contacted them (<code>sticky_routes</code>)</td><td>So the clinic's reply reaches the user who asked Bunty to message the clinic.</td></tr>
+      <tr><td>Anyone else</td><td>Onboarding reply or short spoken message, then hang up</td><td>No assistant to send it to.</td></tr>
+      <tr><td>Owner A wants to reach Owner B, who is also a user</td><td>Assistant to assistant (Chintu → Sujal), never shared-number WhatsApp</td><td>Owner B's reply on the shared number would go to Sujal, not Chintu (decision D-05).</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>What exists today</h2>
+  <div class="legend">
+    <span><span class="chip c-vellum">Vellum built-in</span> needs setup only</span>
+    <span><span class="chip c-ok">built</span> our code, tested with mocks</span>
+    <span><span class="chip c-warn">not built</span> code still to write</span>
+    <span><span class="chip c-stop">blocked</span> needs keys, accounts or a decision</span>
+  </div>
+  <div class="tablebox"><table>
+    <thead><tr><th>Piece</th><th>Status</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>WhatsApp in/out, media, voice-note transcription, buttons</td><td><span class="chip c-vellum">Vellum built-in</span></td><td>Needs the 4 Meta credentials per assistant.</td></tr>
+      <tr><td>Calls in/out, live STT/TTS, AI disclosure</td><td><span class="chip c-vellum">Vellum built-in</span></td><td>Needs the Twilio, Deepgram and ElevenLabs keys.</td></tr>
+      <tr><td><code>backend/router</code></td><td><span class="chip c-ok">built</span></td><td>42 tests, local smoke run. Never behind a public URL.</td></tr>
+      <tr><td>WhatsApp test kit, India voice config, call exit-check scorer</td><td><span class="chip c-ok">built</span></td><td><code>integrations/whatsapp</code>, <code>integrations/calls</code>.</td></tr>
+      <tr><td><code>reach_contact</code> (call / text / tell X)</td><td><span class="chip c-ok">built</span></td><td>Hand-off to <code>call_start</code> / <code>messaging_send</code> not verified live.</td></tr>
+      <tr><td>Owner verification on WhatsApp</td><td><span class="chip c-vellum">Vellum built-in</span></td><td>CLI verification code, not tested live yet.</td></tr>
+      <tr><td>Reminders, call questions and access requests on WhatsApp</td><td><span class="chip c-stop">blocked</span></td><td><code>vellum/</code> change: notifications to WhatsApp are switched off.</td></tr>
+      <tr><td>Voice-note replies</td><td><span class="chip c-stop">blocked</span></td><td>Adapter built; Vellum can't send audio yet. Needs OGG/Opus.</td></tr>
+      <tr><td>WhatsApp template for first contact (outside 24 h window)</td><td><span class="chip c-warn">not built</span></td><td>Meta must approve the template.</td></tr>
+      <tr><td>Sign-up, OTP, auto-hatch, router row</td><td><span class="chip c-warn">not built</span></td><td>OTP provider undecided (BUN-11).</td></tr>
+      <tr><td>Public URLs, server, domain</td><td><span class="chip c-stop">blocked</span></td><td>BUN-24 (local tunnels), BUN-13 (VM, DNS).</td></tr>
+    </tbody>
+  </table></div>
+  <div class="flag">
+    <b>What worries me most</b>
+    <p>Two things. Meta's WhatsApp terms now ban "general-purpose AI assistants" (section 4.7), and Twilio can't give us an Indian number. Both are covered on the requirements page.</p>
+  </div>
+</section>
+
+<section>
+  <h2>How I'd do the WhatsApp and phone work</h2>
+  <div class="cols">
+    <div class="panel">
+      <h3>From you or the team (blocking)</h3>
+      <ul>
+        <li>Anthropic API key (BUN-7)</li>
+        <li>Meta developer app, test number, 4 credentials (BUN-9). Business verification can take days, so start it first.</li>
+        <li>Twilio account and number, Deepgram and ElevenLabs keys (BUN-12)</li>
+        <li>Go / no-go on the 3 <code>vellum/</code> changes (BUN-10)</li>
+        <li>OTP provider (BUN-11)</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>Order I'd build and test in</h3>
+      <ol>
+        <li>Hatch Chintu and Sujal locally, load our plugins (BUN-21, BUN-22).</li>
+        <li>Public URL for each gateway (BUN-24). Point Meta straight at Chintu. Text, Hindi voice note, photo, PDF.</li>
+        <li>The two <code>vellum/</code> changes: owner on WhatsApp, approvals on WhatsApp (BUN-25, BUN-26). WhatsApp exit check (BUN-33).</li>
+        <li>Twilio and India voices (BUN-27), phone verification (BUN-31). 10-call exit check under 2.5 s (BUN-42).</li>
+        <li>Put the router in front of both. Two teammates, one number, each reaches their own assistant (BUN-32).</li>
+        <li>Voice-note replies and first-contact templates (BUN-44, BUN-41).</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Questions to check I've got it right</h2>
+  <ol class="qs">
+    <li><b>One number or two?</b> I assumed one shared WhatsApp number and one shared phone number for all users. Should they be the <em>same</em> Indian number, or is a Twilio number (often US or UK at first) fine for the prototype?</li>
+    <li><b>Owner B's language.</b> When Bunty calls a non-user, does it use the owner's language or detect the other person's? I assumed it detects (STT <code>multi</code>).</li>
+    <li><b>Approvals on WhatsApp.</b> OK to make the two small <code>vellum/</code> changes (owner verification and approvals on WhatsApp)? Without them, WhatsApp-only users can't approve anything.</li>
+    <li><b>Who are the first testers?</b> I assumed only the three of us, on our own numbers, until the exit checks pass.</li>
+    <li><b>Hosting for now.</b> Local machines with tunnels for Phases 2 to 4, then one VM? Or straight to a VM?</li>
+  </ol>
+</section>
+
+<footer>Sources: <code>docs/architecture/ARCHITECTURE.md</code>, <code>channels-phone-whatsapp.md</code>, <code>ROADMAP.md</code>, <code>STATUS-AUDIT.md</code>, <code>backend/router/README.md</code>, <code>integrations/whatsapp</code> and <code>calls</code> READMEs, and Vellum source (<code>guardian-dispatch.ts</code>, <code>channels/types.ts</code>). Example names and numbers are placeholders.</footer>
+
+</div>
