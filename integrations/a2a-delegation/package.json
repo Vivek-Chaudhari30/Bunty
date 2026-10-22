@@ -1,0 +1,12 @@
+{
+  "name": "a2a-delegation",
+  "version": "0.0.1",
+  "private": true,
+  "displayName": "Assistant to assistant",
+  "description": "Pair with another Bunty assistant, pass short notes, and delegate tasks with the owners' approval.",
+  "icon": "handshake",
+  "peerDependencies": {
+    "@vellumai/plugin-api": "^0.8.0"
+  },
+  "vellum": {}
+}

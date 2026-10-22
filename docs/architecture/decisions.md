@@ -67,6 +67,21 @@ Dev dependencies only, pinned to Vellum's versions: `typescript` 5.9.3, `@types/
 `@vellumai/plugin-api` types come from a small shim in `integrations/_shared-types/`. No runtime
 dependencies: SQLite is `bun:sqlite`, crypto is `node:crypto`.
 
+## D-13 · Peer messages never run a model turn · Proposed (chosen overnight, revisit)
+A2A routes are plain webhooks (no `"inbound"`): the plugin checks the peer, stores the note or
+task, and tells the owner with a turn in the owner's own conversation. Gates A and C are tools
+only the owner (guardian) can call, with a fresh approval. Instead of: running the peer's message
+as a non-owner turn and relying on Vellum's non-owner escalation (the protocol doc's original
+idea). Why: the peer's text never reaches a model as a speaker, so it cannot talk the model into
+anything; and it avoids depending on live behaviour Phase 0 could not test. Trade-off: the peer
+cannot chat with Sujal directly; questions go through the owner. Revisit once Spike A/B run live.
+
+## D-14 · Wire format uses Vellum's real A2A field names · Proposed (chosen overnight)
+`vellum/assistant/src/a2a/protocol-types.ts` uses snake_case (`message_id`, `context_id`,
+`task_id`, `artifact_id`) and file bytes in `raw`. Our envelope follows that, not the camelCase in
+the protocol doc's first draft, so a later switch to Vellum's built-in A2A stays possible. The
+protocol doc example is updated to match.
+
 ## D-12 · Every outside service behind an adapter, mock by default · Proposed (chosen overnight)
 Twilio, Meta WhatsApp, TTS and LLM calls in our code go through small interfaces. The mock is used
 unless `BUNTY_ADAPTERS=real`; the real one reads its key from env and throws

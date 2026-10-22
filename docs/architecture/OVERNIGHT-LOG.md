@@ -170,3 +170,34 @@ template, which needs a Meta account.
 `ROUTER_INTERNAL_HMAC_KEY` in each assistant with `BUNTY_ADAPTERS=real`.
 
 **`vellum/` edits:** none.
+
+## Phase 6: a2a-delegation part 1 (pairing + notes)
+
+**Built:** `integrations/a2a-delegation/` plugin skeleton and the pairing + notes half.
+- `channels/ingress.json`: `pair` (gateway bearer = open invite token), `message`, `status`,
+  `cancel`, `unpair`, `file` (gateway HMAC over `timestamp.nonce.body`, 300 s freshness). D-10.
+- `src/signing.ts`: per-peer HMAC, 300 s clock skew, 10-minute nonce cache, 25 MB body limit,
+  30 requests/minute per peer.
+- `src/service.ts`: invite (7 days, one open at a time, only the hash stored), redeem (https only),
+  pair exchange (shared secret + both ingress secrets into the credential store, never SQLite),
+  unpair on both sides, notes end to end, `message_id` idempotency for 24 h, 3 retries at 2/4/8 s,
+  pause a peer after 5 failed checks in 10 minutes and tell the owner.
+- `src/envelope.ts`: hand-written validation of `message/send` and `bunty.delegation/v1`; peer
+  text is always quoted as information, never an instruction.
+- Tools: `a2a_create_invite`, `a2a_redeem_invite`, `a2a_unpair`, `a2a_send_note` (Gate 0),
+  `a2a_resume_peer`, `a2a_task_status`. Owner only; sending tools need a fresh approval.
+- `skills/a2a-delegation/SKILL.md`. `reach-contact` already prefers A2A for paired contacts.
+
+**Decisions taken:** D-13 (peer messages never run a model turn), D-14 (snake_case wire format,
+protocol doc example updated).
+
+**Tests:** 24 new, including Chintu and Sujal end to end in one process with a fake gateway:
+pair via link, one-time and expiring invites, unpair, note delivered to Owner B, forged and
+replayed requests rejected, peer paused after 5 failures, unreachable peer. `bun run check`:
+91 pass, 0 fail.
+
+**Needs real keys:** two running assistants with public URLs (`public-ingress` skill or Velay), the
+plugin installed and its ingress approved in each, `BUNTY_ASSISTANT_ID` set. No paid keys beyond
+`ANTHROPIC_API_KEY`. Owner B seeing the note on WhatsApp also needs Phase 2.
+
+**`vellum/` edits:** none.

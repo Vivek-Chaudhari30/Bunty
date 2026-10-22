@@ -35,6 +35,25 @@ a2a-delegation/
     └── client.ts                outbound HTTPS with retries 2 s / 4 s / 8 s
 ```
 
+## As built (overnight)
+
+Differences from the layout above, all recorded in `docs/architecture/decisions.md`:
+- Peer messages never run a model turn (D-13). Routes are plain webhooks; the plugin tells the
+  owner through a turn in the owner's conversation. So there is no `routes/notices/`.
+- Gateway layer (D-10): `pair` uses bearer verification with the one open invite token; the other
+  routes use HMAC with the assistant-wide `ingress_hmac_secret`. The plugin then checks the
+  per-peer `X-Bunty-Signature`.
+- Gates are checked in each tool: owner only (`trustClass === "guardian"`) and, for anything that
+  sends or changes trust, `ctx.approvedViaPrompt` (D-09).
+- `src/service.ts` (pairing, notes, signing, idempotency, pause after 5 failures),
+  `src/delegation.ts` (tasks, gates, status, files, deadlines), `src/http.ts` (path -> handler),
+  `src/report.ts` (status text), `src/runtime.ts` (real deps). No zod: `src/envelope.ts` validates
+  by hand, so the plugin has no dependencies.
+- Settings per assistant: `BUNTY_ASSISTANT_ID` (required), `BUNTY_ASSISTANT_NAME`,
+  `BUNTY_OWNER_NAME`.
+- `test/harness.ts` runs Chintu and Sujal in one process, with a fake gateway that checks the
+  same things the real one does.
+
 ## Secrets
 
 Service `a2a-delegation`: one field per peer, `peer_<peerId>` (shared HMAC secret). Created during

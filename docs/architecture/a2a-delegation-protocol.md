@@ -41,6 +41,11 @@ Vellum gateway serves them only after the owner approves the declaration.
 
 ## 3. Request signing
 
+As built (decision D-10): `pair` is checked by the gateway as a bearer token (the one open
+invite token); every other request also carries `X-Bunty-Gateway-Signature`, the same HMAC with
+the receiver's assistant-wide ingress secret, which the gateway checks first. Field names follow
+Vellum's A2A types in snake_case (decision D-14).
+
 Every request except `pair` carries:
 
 ```
@@ -64,9 +69,9 @@ peer. All rejections are logged without the body.
   "params": {
     "message": {
       "kind": "message",
-      "messageId": "msg_01",
+      "message_id": "msg_01",
       "role": "user",
-      "contextId": "ctx_ownerA_ownerB",
+      "context_id": "ctx_ownerA_ownerB",
       "parts": [
         { "kind": "text", "text": "Owner A asks Owner B to complete three presentations and send them back by tomorrow." }
       ],
@@ -96,8 +101,8 @@ peer. All rejections are logged without the body.
   to Owner B and replies `completed` once delivered. No Gate A or C. Owner B can reply.
 - `task`: work to be done. Gates A and C apply.
 
-Response: `{ "jsonrpc": "2.0", "id": "req_01", "result": { "kind": "task", "id": "task_…",
-"contextId": "…", "status": { "state": "submitted", "timestamp": "…" } } }`.
+Response: `{ "jsonrpc": "2.0", "id": "req_01", "result": { "id": "task_…",
+"context_id": "…", "status": { "state": "submitted", "timestamp": "…" } } }`.
 
 ## 5. Task lifecycle (assignee side)
 
@@ -136,7 +141,7 @@ plugin-channel turns before we rely on it.
 ## 7. Status pushes (`POST status`, assignee to requester)
 
 Body: an A2A `Task` object. On `completed`, `artifacts[].parts[]` hold the results:
-- files up to 5 MB: `{ "kind": "file", "filename": "presentation-1.pptx", "media_type": "...", "bytes": "<base64>" }`
+- files up to 5 MB: `{ "kind": "file", "filename": "presentation-1.pptx", "media_type": "...", "raw": "<base64>" }`
 - larger files: `{ "kind": "file", "filename": "...", "url": "https://<sujal>/webhooks/plugins/a2a-delegation/file/<id>?exp=…&sig=…" }`, valid 24 h.
 
 Requester side on each push: update its outbound task record, then tell Owner A only on

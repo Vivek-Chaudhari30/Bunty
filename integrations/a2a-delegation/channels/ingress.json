@@ -1,0 +1,75 @@
+{
+  "routes": [
+    {
+      "path": "pair",
+      "kind": "http",
+      "description": "Another Bunty assistant redeems a pairing link (bearer = the one open invite token)",
+      "verification": { "kind": "bearer", "secret": { "field": "pair_token" } }
+    },
+    {
+      "path": "message",
+      "kind": "http",
+      "description": "A paired Bunty assistant sends a note, a task, or a follow-up",
+      "verification": {
+        "kind": "hmac",
+        "algorithm": "sha256",
+        "secret": { "field": "ingress_hmac_secret" },
+        "signature": { "header": "X-Bunty-Gateway-Signature", "encoding": "hex" },
+        "payload": [{ "header": "X-Bunty-Timestamp" }, { "literal": "." }, { "header": "X-Bunty-Nonce" }, { "literal": "." }, "body"],
+        "freshness": { "header": "X-Bunty-Timestamp", "format": "unix-seconds", "toleranceSeconds": 300 }
+      }
+    },
+    {
+      "path": "status",
+      "kind": "http",
+      "description": "A paired Bunty assistant reports progress or results on a task we sent",
+      "verification": {
+        "kind": "hmac",
+        "algorithm": "sha256",
+        "secret": { "field": "ingress_hmac_secret" },
+        "signature": { "header": "X-Bunty-Gateway-Signature", "encoding": "hex" },
+        "payload": [{ "header": "X-Bunty-Timestamp" }, { "literal": "." }, { "header": "X-Bunty-Nonce" }, { "literal": "." }, "body"],
+        "freshness": { "header": "X-Bunty-Timestamp", "format": "unix-seconds", "toleranceSeconds": 300 }
+      }
+    },
+    {
+      "path": "cancel",
+      "kind": "http",
+      "description": "A paired Bunty assistant cancels a task it sent us",
+      "verification": {
+        "kind": "hmac",
+        "algorithm": "sha256",
+        "secret": { "field": "ingress_hmac_secret" },
+        "signature": { "header": "X-Bunty-Gateway-Signature", "encoding": "hex" },
+        "payload": [{ "header": "X-Bunty-Timestamp" }, { "literal": "." }, { "header": "X-Bunty-Nonce" }, { "literal": "." }, "body"],
+        "freshness": { "header": "X-Bunty-Timestamp", "format": "unix-seconds", "toleranceSeconds": 300 }
+      }
+    },
+    {
+      "path": "unpair",
+      "kind": "http",
+      "description": "A paired Bunty assistant removes the pairing",
+      "verification": {
+        "kind": "hmac",
+        "algorithm": "sha256",
+        "secret": { "field": "ingress_hmac_secret" },
+        "signature": { "header": "X-Bunty-Gateway-Signature", "encoding": "hex" },
+        "payload": [{ "header": "X-Bunty-Timestamp" }, { "literal": "." }, { "header": "X-Bunty-Nonce" }, { "literal": "." }, "body"],
+        "freshness": { "header": "X-Bunty-Timestamp", "format": "unix-seconds", "toleranceSeconds": 300 }
+      }
+    },
+    {
+      "path": "file",
+      "kind": "http",
+      "description": "A paired Bunty assistant downloads a large result file (signed GET, 24 h link)",
+      "verification": {
+        "kind": "hmac",
+        "algorithm": "sha256",
+        "secret": { "field": "ingress_hmac_secret" },
+        "signature": { "header": "X-Bunty-Gateway-Signature", "encoding": "hex" },
+        "payload": [{ "header": "X-Bunty-Timestamp" }, { "literal": "." }, { "header": "X-Bunty-Nonce" }, { "literal": "." }, "body"],
+        "freshness": { "header": "X-Bunty-Timestamp", "format": "unix-seconds", "toleranceSeconds": 300 }
+      }
+    }
+  ]
+}
