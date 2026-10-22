@@ -33,6 +33,40 @@ No message bodies are stored. Logs show the last 4 digits of numbers only.
 `ROUTER_WHATSAPP_APP_SECRET`, `ROUTER_WHATSAPP_VERIFY_TOKEN`, `ROUTER_TWILIO_AUTH_TOKEN`,
 `ROUTER_INTERNAL_HMAC_KEY`. Add the names to the root `.env.example`.
 
+## Code
+
+| File | What it does |
+| --- | --- |
+| `src/app.ts` | All routes. Pure: store and outside services come in as arguments |
+| `src/store.ts` | SQLite tables above, plus `onboarding_replies` (one reply per unknown number per day) |
+| `src/signatures.ts` | Meta, Twilio and internal (`X-Bunty-Timestamp` + `X-Bunty-Signature`) checks |
+| `src/whatsapp-payload.ts` | Finds who a webhook is about; splits a batched webhook per person |
+| `src/adapters.ts` | `WhatsAppSender` (mock by default, Meta when `BUNTY_ADAPTERS=real`), `Forwarder` |
+| `src/main.ts` | Starts the server |
+| `scripts/add-user.ts` | Writes a `users` row through `POST /internal/users` |
+
+Behaviour worth knowing:
+- A webhook for one assistant is forwarded byte-for-byte with Meta's signature. A batched webhook
+  for several people is split, and each part is re-signed with the shared app secret.
+- If an assistant's gateway is down the router answers 502, so Meta retries; gateways drop
+  duplicate message ids.
+- `POST /outbound-hint` for a number that belongs to a user is ignored: user-to-user goes
+  assistant to assistant (decision D-05).
+- `POST /internal/users` body: `{ "phone", "assistantId", "assistantBaseUrl", "status"? }`.
+
+## How to run
+
+```bash
+cp .env.example .env             # fill in ROUTER_* (any random strings work locally)
+bun run router                   # from the repo root; listens on ROUTER_PORT (8787)
+ROUTER_INTERNAL_HMAC_KEY=... bun backend/router/scripts/add-user.ts \
+  http://localhost:8787 "+91 00000 00001" chintu http://localhost:<chintu-gateway-port>
+WHATSAPP_APP_SECRET=<same as ROUTER_WHATSAPP_APP_SECRET> \
+  bun integrations/whatsapp/scripts/send-test-webhook.ts http://localhost:8787/whatsapp text 910000000001
+```
+
+Docker: `docker compose -f infra/docker-compose.yml up -d --build`.
+
 ## How to test
 
 1. `bun test backend/router` (unit: lookup, stickiness expiry, signature pass-through).

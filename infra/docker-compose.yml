@@ -1,0 +1,29 @@
+# Bunty services on one machine. Phase 3: the router. Phase 8 adds Caddy (TLS) in front.
+# Assistants are started by Vellum itself (`vellum hatch --remote docker`), one per tester;
+# the router only needs their public URLs, written with backend/router/scripts/add-user.ts.
+#
+#   cp .env.example .env   # fill in the ROUTER_* values
+#   docker compose -f infra/docker-compose.yml up -d --build
+
+services:
+  router:
+    build:
+      context: ..
+      dockerfile: backend/router/Dockerfile
+    env_file: ../.env
+    environment:
+      ROUTER_PORT: "8787"
+      ROUTER_DB_PATH: /data/router.db
+    volumes:
+      - router-data:/data
+    ports:
+      - "8787:8787"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:8787/healthz').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  router-data:

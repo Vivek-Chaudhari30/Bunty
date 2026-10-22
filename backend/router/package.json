@@ -1,0 +1,11 @@
+{
+  "name": "@bunty/router",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Shared-number router: finds the caller's own Vellum assistant for every WhatsApp message and phone call.",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "test": "bun test ."
+  }
+}

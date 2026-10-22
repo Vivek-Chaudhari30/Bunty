@@ -20,7 +20,7 @@ Stage: **prototype**, built on the open-source [Vellum assistant](https://github
 | Phone calls | Not started |
 | Google (Gmail, Calendar) via Composio | Not started |
 | Zomato and Swiggy | Not started |
-| Shared-number router | Not started |
+| Shared-number router | Built and tested with mocks (`backend/router`); live needs Meta + Twilio |
 | Reach a contact (call / text / tell) | Not started |
 | Assistant-to-assistant (notes, tasks) | Not started |
 | Website | Built ([Live preview](https://website-seven-xi-36.vercel.app)) |

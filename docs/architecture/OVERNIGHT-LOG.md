@@ -82,3 +82,37 @@ check (Hindi voice note in, correct reply out, approval buttons) also needs `ANT
 and Deepgram for transcription.
 
 **`vellum/` edits:** none.
+
+## Phase 3: router
+
+**Built:** `backend/router/`, Bun + TypeScript, no runtime dependencies (`bun:sqlite`,
+`node:crypto`).
+- Routes: `GET /whatsapp` (Meta verify), `POST /whatsapp`, `POST /twilio/voice`,
+  `POST /outbound-hint`, `POST /internal/users`, `GET /healthz`.
+- Meta signature checked before forwarding; single-assistant webhooks forwarded byte-for-byte with
+  Meta's own signature; batched webhooks split per person and re-signed with the shared app secret.
+- Twilio signature checked against `ROUTER_PUBLIC_BASE_URL/twilio/voice`; known callers get
+  `<Redirect>` to their gateway; unknown callers hear a sign-up message.
+- Non-user stickiness for 24 h from `/outbound-hint`; hints about another user are ignored (D-05).
+- Unknown WhatsApp numbers get one onboarding reply per 24 h through the `WhatsAppSender` adapter
+  (mock by default).
+- Logs show the last 4 digits of numbers only; no message bodies stored.
+- `scripts/add-user.ts`, `Dockerfile`, `infra/docker-compose.yml` (router service).
+
+**Files touched:** `backend/router/**`, `infra/docker-compose.yml`, `.env.example`
+(`ROUTER_PUBLIC_BASE_URL`, `ROUTER_ONBOARDING_URL`, `ROUTER_PORT`, `ROUTER_DB_PATH`,
+`BUNTY_ADAPTERS`), `README.md`.
+
+**Tests:** 32 new (`backend/router/test/`). `bun run check`: 39 pass, 0 fail. Also smoke-ran the
+server locally with test values: health, add-user, forged webhook (401), unknown number
+(onboarding via mock), known user with no gateway running (502, as designed).
+
+**Decisions taken:** split + re-sign batched webhooks (needs every assistant to share the Meta app
+secret, which the router README already assumes). 502 on gateway failure so Meta retries.
+
+**Needs real keys:** `ROUTER_WHATSAPP_APP_SECRET`, `ROUTER_WHATSAPP_VERIFY_TOKEN` (Meta app),
+`ROUTER_TWILIO_AUTH_TOKEN` (Twilio), `WHATSAPP_ACCESS_TOKEN` + `WHATSAPP_PHONE_NUMBER_ID` for the
+real onboarding reply (`BUNTY_ADAPTERS=real`), a public URL for the router. Exit check (two
+teammates, one shared number) needs those plus two running assistants.
+
+**`vellum/` edits:** none.
