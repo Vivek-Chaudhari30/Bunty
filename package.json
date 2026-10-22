@@ -1,0 +1,16 @@
+{
+  "name": "bunty",
+  "private": true,
+  "description": "Bunty: our router service and Vellum plugins. Vellum itself lives in vellum/ with its own package.json.",
+  "type": "module",
+  "scripts": {
+    "test": "bun test ./backend ./integrations",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "bun run typecheck && bun run test",
+    "router": "bun run backend/router/src/main.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.10",
+    "typescript": "5.9.3"
+  }
+}

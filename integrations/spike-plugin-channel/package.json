@@ -1,0 +1,10 @@
+{
+  "name": "spike-plugin-channel",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Phase 0 throwaway plugin: checks plugin-channel turns, owner approval and owner notifications.",
+  "peerDependencies": {
+    "@vellumai/plugin-api": "^0.8.0"
+  },
+  "vellum": {}
+}

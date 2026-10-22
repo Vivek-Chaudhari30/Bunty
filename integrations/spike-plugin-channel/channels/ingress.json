@@ -1,0 +1,17 @@
+{
+  "routes": [
+    {
+      "path": "inbound",
+      "kind": "http",
+      "description": "Phase 0 Spike A: a signed POST that starts a turn as a non-owner contact",
+      "verification": {
+        "kind": "hmac",
+        "algorithm": "sha256",
+        "secret": { "field": "spike_ingress_secret" },
+        "signature": { "header": "X-Spike-Signature", "encoding": "hex", "prefix": "sha256=" },
+        "payload": ["body"]
+      },
+      "inbound": {}
+    }
+  ]
+}
