@@ -1,88 +1,109 @@
-# AI Assistant (working name)
-
-A personal AI assistant you reach with a normal phone call or on WhatsApp. You don't need to
-download an app. Tell it what to do, such as setting a reminder, calling someone, booking an
-appointment or ordering food. It remembers you and confirms when each task is done.
-
-India first, in Hindi, English, Hinglish and Gujarati.
+# Bunty
 
 > **Keep this file current.** Whoever changes how the project works or how to run it updates
 > this README in the same pull request. Rules for AI tools are in [AGENTS.md](AGENTS.md).
+> Everything built so far, phase by phase: [CHANGES.md](CHANGES.md).
 
-## Status
+## What Bunty is
 
-Stage: **prototype**, built on the open-source [Vellum assistant](https://github.com/vellum-ai/vellum-assistant).
+Bunty gives every person their own personal AI assistant, built on the open-source
+[Vellum assistant](https://github.com/vellum-ai/vellum-assistant). You reach it with a normal
+**phone call** or on **WhatsApp** (text or voice note). There is no app to download.
 
-| Integration | Status |
-| --- | --- |
-| Reminders | Setup documented (built into Vellum); live check needs an LLM key |
-| WhatsApp | Setup documented + signed test-webhook kit; owner-on-WhatsApp needs a `vellum/` edit (not done); live needs Meta keys |
-| Phone calls | Voice config + exit-check scripts (built into Vellum); live needs Twilio, Deepgram, ElevenLabs |
-| Google (Gmail, Calendar) via Composio | Not started |
-| Zomato and Swiggy | Not started |
-| Shared-number router | Built and tested with mocks (`backend/router`); live needs Meta + Twilio |
-| Reach a contact (call / text / tell) | Plugin built and tested with mocks (`integrations/reach-contact`); live needs calls + WhatsApp |
-| Assistant-to-assistant (notes, tasks) | Plugin built and tested end to end in one process (`integrations/a2a-delegation`); live needs two running assistants |
-| Hardening (delete my data, consent, rate limits, audit, metrics, voice replies, server deploy) | Built and tested with mocks; voice replies not wired into Vellum (needs a `vellum/` edit) |
-| Website | Built ([Live preview](https://website-seven-xi-36.vercel.app)) |
+It remembers you, sets reminders, and acts for you: it can **call or message people**, and it can
+**hand work to other people's assistants**. Example: Owner A tells their assistant (Chintu) "ask
+Owner B to make three presentations by tomorrow". Chintu sends the task to Owner B's assistant
+(Sujal). Sujal asks Owner B whether to take it, does the work with Owner B's permissions, asks
+Owner B before sending anything back, and Chintu brings the files to Owner A. **The owner approves
+at each step**, and the approvals are checked in code, not only in the prompt.
 
-## How it works (prototype)
+India first, in Hindi, English, Hinglish and Gujarati.
 
 ```mermaid
 flowchart LR
-    U[User] -->|phone call| T[Twilio]
-    U -->|WhatsApp| W[Meta WhatsApp Cloud API]
-    T --> R[backend/ router<br/>finds the user's assistant]
-    W --> R
-    R --> G[Vellum gateway]
-    G --> A[Vellum assistant<br/>Claude + memory + reminders]
-    A --> I[integrations/<br/>one plugin per app]
-    I --> X[Composio, Zomato, Swiggy ...]
-    S[website/] -.->|Call / WhatsApp buttons| U
+    OA[Owner A] -->|call / WhatsApp| R[backend/router<br/>shared numbers]
+    OB[Owner B] -->|call / WhatsApp| R
+    R --> C[Chintu<br/>Owner A's Vellum assistant]
+    R --> S[Sujal<br/>Owner B's Vellum assistant]
+    C <-->|signed A2A: notes and tasks| S
+    C -->|reach-contact: call / WhatsApp| X[Other people]
 ```
 
-- Each tester gets their own Vellum assistant (one owner per assistant).
-- Calls and WhatsApp share the same assistant and memory.
-- New apps are added as Vellum plugins in `integrations/`, one at a time.
+- One Vellum assistant per person (own memory, owner and credentials).
+- Shared phone and WhatsApp numbers; the router finds the caller's own assistant.
+- New abilities are Vellum plugins in `integrations/`. We change `vellum/` only when a plugin
+  cannot do the job, and only after the team agrees.
 
-Full design: `docs/Assistant architecture overview.pdf`. Feature details and daily progress: Notion.
+Full design: [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md).
+
+## Status
+
+Stage: **prototype**. All nine roadmap phases are built and tested **against mocks**: no real
+call, message or paid service has been used yet. Each phase's live check needs the keys listed
+under [Keys still empty](#keys-still-empty). Details: [CHANGES.md](CHANGES.md).
+
+| Phase | What | Where | Status |
+| --- | --- | --- | --- |
+| 0 | Tooling and Vellum plugin spikes | `integrations/spike-plugin-channel`, root `package.json` | Built; spikes checked in Vellum source, live run needs an LLM key |
+| 1 | Reminders | `integrations/reminders` | Setup documented (built into Vellum) |
+| 2 | WhatsApp | `integrations/whatsapp` | Setup + signed test-webhook kit; owner-on-WhatsApp needs a `vellum/` change (not made) |
+| 3 | Shared-number router | `backend/router` | Built and tested with mocks |
+| 4 | Phone calls | `integrations/calls` | Voice config + exit-check scripts (built into Vellum) |
+| 5 | Reach a contact (call / text / tell) | `integrations/reach-contact` | Plugin built and tested with mocks |
+| 6 | Assistant to assistant: pairing + notes | `integrations/a2a-delegation` | Built, tested end to end in one process |
+| 7 | Assistant to assistant: tasks with owner gates | `integrations/a2a-delegation` | Built, tested end to end in one process |
+| 8 | Hardening and server deploy | `backend/router`, `backend/deploy`, `infra`, plugins | Built and tested with mocks; voice replies not wired into Vellum |
+
+Not started: Google (Gmail, Calendar) via Composio; Zomato and Swiggy.
+Website: built ([live preview](https://website-seven-xi-36.vercel.app)).
 
 ## Folders
 
 | Folder | What's inside |
 | --- | --- |
-| `vellum/` | Vellum open-source assistant, our copy (plain copy, updated by hand) |
-| `integrations/` | One folder per connected app; `_template/` to start a new one |
-| `backend/` | Small services outside Vellum, such as the phone-number router |
+| `vellum/` | Vellum open-source assistant, our copy (plain copy, updated by hand). Unchanged so far |
+| `backend/router/` | Shared-number router: WhatsApp and calls to the right assistant, onboarding, delete my data, rate limits, metrics |
+| `backend/deploy/` | Generates the server's Caddyfile (HTTPS per assistant) |
+| `integrations/a2a-delegation/` | Plugin: pair with another assistant, notes, delegated tasks with Gates A/B/C |
+| `integrations/reach-contact/` | Plugin: "call / text / tell X", read back, approve, send |
+| `integrations/whatsapp/` | Setup notes, signed test-webhook kit, voice-reply adapter |
+| `integrations/calls/` | Setup notes, India voice config, Phase 4 exit-check scorer |
+| `integrations/reminders/` | Setup notes (reminders are built into Vellum) |
+| `integrations/spike-plugin-channel/` | Throwaway Phase 0 plugin; delete after the live spikes |
+| `integrations/_template/` | Copy this to start a new integration |
+| `integrations/_shared-types/` | Type shim for `@vellumai/plugin-api` used by our typecheck |
+| `infra/` | Docker Compose (router + Caddy), server deploy and "delete my data" runbook |
 | `website/` | Static site: About us, Scope, Pricing, Contact us, Onboarding |
-| `infra/` | Docker Compose and scripts to run it on a server |
-| `docs/` | Exported PDFs and images, plus docs/architecture/ (Markdown architecture docs and roadmap) |
+| `docs/architecture/` | Architecture, roadmap, protocols, decisions, overnight log (see below) |
 
-## Tech stack (prototype)
+## Install and run the tests
 
-Vellum (Bun + TypeScript), Claude, Twilio, Deepgram, ElevenLabs, Meta WhatsApp Cloud API,
-SQLite + Qdrant (inside Vellum), Composio, Zomato and Swiggy MCP, plain HTML/CSS on Cloudflare
-Pages, Docker on one cloud server. Full table with reasons: [AGENTS.md](AGENTS.md#4-tech-stack).
-
-## How to run
-
-### You need
-
-- macOS or Linux (Windows: use WSL), Git, and [Bun](https://bun.sh) 1.3.11 (Vellum's setup
-  installs it if missing)
-- Docker, if you run the assistant in containers
-- An Anthropic API key. Later: Twilio account and number, Meta WhatsApp test number
-- Notion connected to your AI tool (see the collaborator setup PDF)
-
-### 1. Get the code
+You need [Bun](https://bun.sh) (1.3.11 recommended; the tests also run on 1.2) and Git.
 
 ```bash
 git clone <our repo URL>
 cd <repo>
-cp .env.example .env      # fill in your own values, never commit .env
+bun install                # dev dependencies only: typescript, @types/bun
+bun run check              # typecheck + all tests in backend/ and integrations/
 ```
 
-### 2. Start your own Vellum assistant
+Expect `133 pass, 0 fail`. `bun run test` never runs Vellum's own tests; inside `vellum/` run only
+the test file you need (`bun test path/to/file.test.ts`).
+
+Everything runs with mocks by default (`BUNTY_ADAPTERS` unset). Set `BUNTY_ADAPTERS=real` only
+when the keys below are filled in; a missing key then fails with an error naming it.
+
+### Run the router locally
+
+```bash
+cp .env.example .env       # any random strings work for the ROUTER_* values locally
+bun run router             # listens on :8787
+```
+
+Then follow [backend/router/README.md](backend/router/README.md) "How to run" to add a user and
+send a fake, correctly signed WhatsApp with `integrations/whatsapp/scripts/send-test-webhook.ts`.
+
+### Start your own Vellum assistant
 
 ```bash
 cd vellum
@@ -94,28 +115,66 @@ vellum client             # talk to it in the terminal
 
 Other commands: `vellum wake` (start), `vellum sleep` (stop, keeps data), `vellum ps` (list).
 
-### 3. Install our integrations
+### Install our plugins into your assistant
 
 ```bash
 cp -R integrations/<app-name> "$VELLUM_WORKSPACE_DIR/plugins/<app-name>"
 assistant plugins list    # should show <app-name> as ok
 ```
 
-Each integration's own README lists the secrets it needs and how to test it.
+Plugins with webhooks (`a2a-delegation`) also need their ingress approved in the assistant's
+channel settings. Each integration's README lists its secrets and how to test it.
 
-### 4. Website
-
-Live preview: https://website-seven-xi-36.vercel.app
+### Website
 
 ```bash
 cd website
 python3 -m http.server 8080   # open http://localhost:8080
 ```
 
-### Phone calls and WhatsApp
+## Keys still empty
 
-To be filled in when the calls and WhatsApp integrations are built (Twilio setup, WhatsApp test
-number, and the `backend/` router).
+Every name is in [.env.example](.env.example) with no value. Never commit `.env`; inside Vellum,
+store secrets with `assistant credentials prompt`.
+
+| Keys | Service | Where they plug in |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | Claude (LLM) | Every assistant. Needed for every live check |
+| `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN` | Meta WhatsApp Cloud API | Each assistant (`--service whatsapp`); token + phone number id also for the router's onboarding reply and voice replies |
+| `ROUTER_WHATSAPP_APP_SECRET`, `ROUTER_WHATSAPP_VERIFY_TOKEN` | Meta (same app) | Router `.env` |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | Twilio | Each assistant (`twilio-setup` skill) |
+| `ROUTER_TWILIO_AUTH_TOKEN` | Twilio (same account) | Router `.env` |
+| `DEEPGRAM_API_KEY` | Speech to text | Each assistant |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_HI`, `ELEVENLABS_VOICE_EN`, `ELEVENLABS_VOICE_GU` | Text to speech | Each assistant; `integrations/calls/scripts/voice-config.ts`; voice-reply adapter |
+| `ROUTER_INTERNAL_HMAC_KEY`, `ROUTER_METRICS_TOKEN` | Our own random secrets | Router `.env`; the HMAC key also in each assistant (router hints) |
+| `ROUTER_PUBLIC_BASE_URL`, `ROUTER_ONBOARDING_URL`, `ROUTER_PORT`, `ROUTER_DB_PATH` | Router settings | Router `.env` |
+| `BUNTY_ADAPTERS`, `BUNTY_ASSISTANT_ID`, `BUNTY_ROUTER_URL`, `BUNTY_ASSISTANT_NAME`, `BUNTY_OWNER_NAME` | Our settings | Each assistant's environment |
+| `COMPOSIO_API_KEY` | Google via Composio | Not built yet |
+| `NOTION_TOKEN` | Notion MCP for AI tools | Your AI tool (see the collaborator setup PDF) |
+
+Assistant-to-assistant pairing secrets are created by the plugin and kept in Vellum's credential
+store; nobody types them.
+
+## Docs
+
+| Doc | What it is |
+| --- | --- |
+| [CHANGES.md](CHANGES.md) | Everything built so far, by phase, with tests and decisions |
+| [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) | The target design |
+| [docs/architecture/ROADMAP.md](docs/architecture/ROADMAP.md) | Phases 0 to 8 with exit checks |
+| [docs/architecture/decisions.md](docs/architecture/decisions.md) | Decision log D-01 to D-14 |
+| [docs/architecture/a2a-delegation-protocol.md](docs/architecture/a2a-delegation-protocol.md) | Assistant-to-assistant wire protocol |
+| [docs/architecture/channels-phone-whatsapp.md](docs/architecture/channels-phone-whatsapp.md) | Calls, WhatsApp and router behaviour |
+| [docs/architecture/MASTER-PROMPT.md](docs/architecture/MASTER-PROMPT.md) | Prompt for AI coding tools, one session per phase |
+| [docs/architecture/OVERNIGHT-LOG.md](docs/architecture/OVERNIGHT-LOG.md) | Detailed log of the overnight build |
+| [infra/README.md](infra/README.md) | Local and server setup, monitoring, "delete my data" runbook |
+
+## Tech stack (prototype)
+
+Vellum (Bun + TypeScript), Claude, Twilio, Deepgram, ElevenLabs, Meta WhatsApp Cloud API,
+SQLite + Qdrant (inside Vellum), `bun:sqlite` for our router and plugins, Docker and Caddy on one
+cloud server, plain HTML/CSS for the website. Full table with reasons:
+[AGENTS.md](AGENTS.md#4-tech-stack).
 
 ## Team
 
