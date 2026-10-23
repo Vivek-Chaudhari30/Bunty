@@ -32,7 +32,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(dirname(import.meta.path), "../..");
 const BUNTY_DIR = join(REPO_ROOT, "infra/scripts/bunty-identity");
@@ -179,7 +179,7 @@ function main(): void {
     }
     if (before !== null) {
       mkdirSync(backupDir, { recursive: true });
-      copyFileSync(path, join(backupDir, path.split("/").pop()!));
+      copyFileSync(path, join(backupDir, basename(path)));
     }
     writeFileSync(path, content, "utf-8");
   }

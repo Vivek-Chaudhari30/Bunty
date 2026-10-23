@@ -30,6 +30,7 @@ yarn.lock
 # Editor and OS files
 /.vscode/
 /.idea/
+launch.json
 .DS_Store
 Thumbs.db
 
