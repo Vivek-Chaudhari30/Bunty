@@ -9,6 +9,12 @@ The Bunty landing page. One static page: plain HTML and CSS with one small scrip
 
 Open http://localhost:8080. Asset links are root paths (/assets/...), so open it through a server, not by double-clicking the file.
 
+## Deploy (Vercel)
+
+- New Vercel project, imported from the GitHub repo.
+- Root Directory: website. Framework Preset: Other. No build command; leave the output directory as the default.
+- vercel.json sets the caching and security headers. Every push to main deploys; branches and PRs get preview links.
+
 ## Deploy (Hostinger)
 
 - Upload the contents of this folder (not the folder itself) into public_html, including the hidden .htaccess.

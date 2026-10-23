@@ -71,8 +71,8 @@
 *, *::before, *::after { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; scroll-behavior: smooth; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
-/* A bright red-orange glow across the top of the page, fading through peach into white */
-body { margin: 0; background: radial-gradient(62% 300px at 50% 0%, rgba(242, 48, 14, 0.92), rgba(255, 106, 40, 0.75) 38%, rgba(255, 140, 66, 0.32) 66%, transparent 100%) no-repeat, radial-gradient(95% 640px at 50% 0%, rgba(255, 140, 66, 0.55), rgba(255, 196, 160, 0.38) 45%, rgba(255, 232, 218, 0.22) 70%, transparent 100%) no-repeat, var(--bg); color: var(--ink); font: 400 1.0625rem/1.6 var(--f-sans); font-kerning: normal; -webkit-font-smoothing: antialiased; }
+/* A soft multi-tone wash across the top of the page — red-orange, orange and gold overlapping at low opacity, diffusing gently into white so the header stays easy to read */
+body { margin: 0; background: radial-gradient(90% 420px at 46% 0%, rgba(242, 48, 14, 0.14), transparent 60%) no-repeat, radial-gradient(120% 520px at 62% 4%, rgba(255, 140, 66, 0.16), transparent 68%) no-repeat, radial-gradient(150% 640px at 32% 10%, rgba(255, 196, 120, 0.13), transparent 74%) no-repeat, var(--bg); color: var(--ink); font: 400 1.0625rem/1.6 var(--f-sans); font-kerning: normal; -webkit-font-smoothing: antialiased; }
 h1, h2, h3 { margin: 0; text-wrap: balance; }
 h1, h2 { font-family: var(--f-serif); font-weight: 400; letter-spacing: -0.02em; line-height: 1.08; }
 h1 { font-size: clamp(2.375rem, 5vw, 3.5rem); }
@@ -150,7 +150,7 @@ b, strong { font-weight: 500; }
 /* Home, screen 2: a black box glowing red-orange from below (film grain on top) that holds the phone section */
 .slide { padding: 0 var(--s2) var(--s2); }
 .box { position: relative; overflow: hidden; isolation: isolate; min-height: calc(100svh - var(--s2)); display: flex; align-items: center; border-radius: var(--r-lg); color: #fff; padding: var(--s5) 0;
-  background: radial-gradient(60% 95% at 55% 112%, #FF3A0F 0%, #F52A0A 22%, rgba(200, 34, 8, 0.75) 48%, rgba(120, 22, 6, 0) 78%), radial-gradient(45% 85% at 104% 100%, #FF9A4D 0%, rgba(255, 120, 50, 0.7) 35%, rgba(255, 120, 50, 0) 72%), radial-gradient(42% 90% at -6% 80%, rgba(170, 40, 10, 0.95), rgba(110, 24, 6, 0.5) 45%, rgba(110, 24, 6, 0) 75%), radial-gradient(9% 60% at 26% 100%, rgba(10, 10, 10, 0.95), transparent 80%), #0A0A0A; }
+  background: radial-gradient(85% 115% at 62% 115%, #FF5A22 0%, rgba(240, 58, 14, 0.75) 30%, rgba(170, 36, 10, 0.3) 56%, rgba(10, 10, 10, 0) 78%), radial-gradient(60% 70% at 4% 6%, rgba(255, 150, 90, 0.08), transparent 72%), #0A0A0A; }
 .box__bg { position: absolute; inset: 0; pointer-events: none; z-index: -1; }
 .grain { position: absolute; inset: 0; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.07 0 0 0 0 0.06 0 0 0 0 0.06 0 0 0 0.55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); background-size: 180px 180px; opacity: 0.5; mix-blend-mode: overlay; }
 .box__light { position: absolute; inset: 0; opacity: 0; transition: opacity 0.5s; background: radial-gradient(460px circle at var(--mx, 50%) var(--my, 40%), rgba(255, 255, 255, 0.08), transparent 70%); }
