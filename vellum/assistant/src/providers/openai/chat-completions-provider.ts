@@ -1321,7 +1321,9 @@ export class OpenAIChatCompletionsProvider implements Provider {
                 if (tc.id) {
                   entry.id = tc.id;
                 }
-                if (tc.function?.name) {
+                // Some OpenAI-compatible gateways repeat the full tool name on
+                // every delta instead of sending it once; skip those repeats.
+                if (tc.function?.name && tc.function.name !== entry.name) {
                   entry.name += tc.function.name;
                 }
                 toolProgress.emitPreviewStart(entry.id, entry.name);
