@@ -34,6 +34,7 @@ jobs:
           rm -rf "$SITE" && mkdir -p "$SITE"
           cp -a website/. "$SITE/"
           rm -f "$SITE/README.md" "$SITE/_headers"
+          rm -f "$SITE/vercel.json"
 
           # Switch to the deploy branch, or start it empty the first time.
           if git ls-remote --exit-code --heads origin website-deploy >/dev/null; then
