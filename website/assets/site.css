@@ -69,10 +69,31 @@
 
 /* 3. Base */
 *, *::before, *::after { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; scroll-behavior: smooth; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; scroll-behavior: smooth; overflow-x: clip; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
-/* A soft multi-tone wash across the top of the page — red-orange, orange and gold overlapping at low opacity, diffusing gently into white so the header stays easy to read */
-body { margin: 0; background: radial-gradient(90% 420px at 46% 0%, rgba(242, 48, 14, 0.14), transparent 60%) no-repeat, radial-gradient(120% 520px at 62% 4%, rgba(255, 140, 66, 0.16), transparent 68%) no-repeat, radial-gradient(150% 640px at 32% 10%, rgba(255, 196, 120, 0.13), transparent 74%) no-repeat, var(--bg); color: var(--ink); font: 400 1.0625rem/1.6 var(--f-sans); font-kerning: normal; -webkit-font-smoothing: antialiased; }
+/* overflow-x: clip on both html and body keeps the wide hero glow below from causing sideways scroll */
+body { margin: 0; position: relative; background: var(--bg); overflow-x: clip; color: var(--ink); font: 400 1.0625rem/1.6 var(--f-sans); font-kerning: normal; -webkit-font-smoothing: antialiased; }
+/* Hero glow, same recipe and shades as the sarvam.ai hero: a huge half-ellipse whose centre sits above the
+   screen, so only its lower edge shows. Solid orange, then a thin amber ring, periwinkle blue, and a
+   near-white edge, all softened by the blur. The mask fades the top 112px to white so the header reads.
+   Its centre follows our headline (50svh - 1170px), which matches sarvam.ai's position at 1440x900 and
+   1920x1080 and keeps the orange above the headline on shorter laptops. It scrolls away with the hero. */
+body::before { content: ""; position: absolute; left: 50%; top: calc(50svh - 1170px); width: 2920px; height: 1400px; margin-left: -1460px; z-index: -1; pointer-events: none;
+  background: radial-gradient(1350px 1200px at 50% 0, #F9730C 75%, #FFB053 78%, #A5BBFC 80%, #F4F7FF 100%, rgba(244, 247, 255, 0) 100%);
+  filter: blur(52px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent calc(1170px - 50svh), #000 calc(1282px - 50svh));
+  mask-image: linear-gradient(to bottom, transparent calc(1170px - 50svh), #000 calc(1282px - 50svh)); }
+/* A faint blurred blue light behind the headline, as on sarvam.ai */
+body::after { content: ""; position: absolute; left: 50%; top: calc(36px + 50svh); width: 600px; height: 400px; transform: translate(-50%, -50%); z-index: -1; pointer-events: none;
+  background: radial-gradient(#A5BBFC 0%, #D5E2FF 40%, transparent 70%); opacity: 0.4; filter: blur(100px); }
+/* Phones: a smaller ellipse placed higher, so mostly the soft blue edge shows (as on sarvam.ai) */
+@media (max-width: 767px) {
+  body::before { top: calc(422px - 150svh); width: 1800px; height: 1060px; margin-left: -900px; filter: blur(37px);
+    background: radial-gradient(900px 900px at 50% 0, #F9730C 75%, #FFB053 78%, #A5BBFC 80%, #F4F7FF 100%, rgba(244, 247, 255, 0) 100%);
+    -webkit-mask-image: linear-gradient(to bottom, transparent calc(150svh - 422px), #000 calc(150svh - 310px));
+    mask-image: linear-gradient(to bottom, transparent calc(150svh - 422px), #000 calc(150svh - 310px)); }
+  body::after { width: 288px; height: 288px; opacity: 0.3; filter: blur(80px); }
+}
 h1, h2, h3 { margin: 0; text-wrap: balance; }
 h1, h2 { font-family: var(--f-serif); font-weight: 400; letter-spacing: -0.02em; line-height: 1.08; }
 h1 { font-size: clamp(2.375rem, 5vw, 3.5rem); }
